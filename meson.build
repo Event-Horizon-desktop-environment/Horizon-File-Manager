@@ -1,5 +1,5 @@
 project(
-  'horizon-file',
+  'horizon-files',
   'c', 'cpp',
   version: '0.1.0',
   default_options: [
@@ -16,6 +16,7 @@ cpp_args = [
   '-Wno-unused-parameter',
   '-Wno-unused-variable',
   '-Wno-maybe-uninitialized',
+  '-Wno-deprecated-literal-operator',
   # Forced includes to replace the original project's PCH
   '-include', 'desktop_shell/common/log/mangowm_logger.hpp',
 ]
@@ -27,6 +28,7 @@ dep_pango      = dependency('pangocairo')
 dep_xkbcommon  = dependency('xkbcommon')
 dep_glib       = dependency('gio-2.0')
 dep_webp       = dependency('libwebp')
+dep_jpeg       = dependency('libjpeg')
 dep_openssl    = dependency('libcrypto')
 dep_sdbus      = dependency('sdbus-c++')
 dep_fontconfig = dependency('fontconfig')
@@ -71,6 +73,7 @@ sources = files(
   'src/ux/file_browser/features/progress.cpp',
   'src/ux/file_browser/features/recursive_search_worker.cpp',
   'src/ux/file_browser/features/svg_preview.cpp',
+  'src/ux/file_browser/features/thumbnail_cache.cpp',
   'src/ux/file_browser/features/video_preview.cpp',
   'src/ux/file_browser/features/video_worker.cpp',
   'src/ux/file_browser/features/terminal.cpp',
@@ -141,6 +144,29 @@ sources = files(
   'protocol/wlr-data-control-unstable-v1-client-protocol.c',
 )
 
+# ── Build ffmpegthumbnailer from source ──────────────────────────────
+ffmpegthumb_build = meson.current_build_dir() / 'ffmpegthumbnailer'
+ffmpegthumb_result = run_command(
+  'cmake', '-S', 'third_party/ffmpegthumbnailer',
+  '-B', ffmpegthumb_build,
+  '-DCMAKE_BUILD_TYPE=Release',
+  '-DENABLE_GIO=OFF',
+  '-DENABLE_EXECUTABLE=ON',
+  '-DENABLE_STATIC=OFF',
+  check: false,
+)
+if ffmpegthumb_result.returncode() == 0
+  run_command(
+    'cmake', '--build', ffmpegthumb_build, '--', '-j4',
+    check: false,
+  )
+  ffmpegthumb_bin = ffmpegthumb_build / 'ffmpegthumbnailer'
+  cpp_args += ['-DFFMPEGTHUMBNAILER_BIN="@0@"'.format(ffmpegthumb_bin)]
+  message('ffmpegthumbnailer: built from submodule')
+else
+  message('ffmpegthumbnailer: NOT built (cmake failed) — video thumbnails disabled')
+endif
+
 # ── Executable ────────────────────────────────────────────────────────
 executable(
   'horizon-files',
@@ -154,6 +180,7 @@ executable(
     dep_xkbcommon,
     dep_glib,
     dep_webp,
+    dep_jpeg,
     dep_openssl,
     dep_poppler,
     dep_archive,

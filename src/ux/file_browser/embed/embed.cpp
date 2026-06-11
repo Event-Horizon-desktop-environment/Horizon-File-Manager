@@ -93,18 +93,14 @@ static constexpr xdg_toplevel_listener kToplevelListener{
   .wm_capabilities = [](void*, xdg_toplevel*, wl_array*) {},
 };
 
-// ── buffer release ───────────────────────────────────────────────
+// ── buffer release hook ──────────────────────────────────────────
 
-static void on_buf_release(void* data, wl_buffer*) {
-  auto& app = *static_cast<AppState*>(data);
+static void on_buf_release_hook(void* user) {
+  auto& app = *static_cast<AppState*>(user);
   if (!app.surface) return;
   app.pendingRedraw = false;
   draw(app);
 }
-
-static constexpr wl_buffer_listener kBufListener{
-  .release = on_buf_release,
-};
 
 // ── connect globals ──────────────────────────────────────────────
 
@@ -148,6 +144,8 @@ static bool connect_globals(AppState& app) {
   app.shm = g.shm;
   app.buf[0].ensure(g.shm, "eh-fb-shm-a", app.width, app.height);
   app.buf[1].ensure(g.shm, "eh-fb-shm-b", app.width, app.height);
+  app.buf[0].set_release_hook(on_buf_release_hook, &app);
+  app.buf[1].set_release_hook(on_buf_release_hook, &app);
 
   // Bind seat — bind() eagerly creates pointer and keyboard objects
   // so we don't depend on the capabilities event having been received.
@@ -212,9 +210,9 @@ static bool create_window(AppState& app) {
 
   // Initialize SHM buffers
   app.buf[0].ensure(wg.shm, "eh-fb-a", app.width, app.height);
-  wl_buffer_add_listener(app.buf[0].wl(), &kBufListener, &app);
+  app.buf[0].set_release_hook(on_buf_release_hook, &app);
   app.buf[1].ensure(wg.shm, "eh-fb-b", app.width, app.height);
-  wl_buffer_add_listener(app.buf[1].wl(), &kBufListener, &app);
+  app.buf[1].set_release_hook(on_buf_release_hook, &app);
 
   wl_surface_commit(app.surface);
 

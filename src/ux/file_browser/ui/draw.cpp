@@ -10,7 +10,9 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <iterator>
+#include <mutex>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -20,6 +22,28 @@
 #include <sys/stat.h>
 #include <sys/statvfs.h>
 
+// ── icon debug logger ──────────────────────────────────────────────
+static std::mutex g_icon_log_mtx;
+static void icon_log(const char* fmt, ...) {
+  static FILE* f = nullptr;
+  std::lock_guard<std::mutex> lock(g_icon_log_mtx);
+  if (!f) {
+    const char* home = std::getenv("HOME");
+    if (!home) return;
+    std::string path = std::string(home) + "/horizon-files-icons.log";
+    f = fopen(path.c_str(), "w");
+    if (!f) return;
+    fprintf(f, "icon log started\n");
+    fflush(f);
+  }
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(f, fmt, ap);
+  va_end(ap);
+  fprintf(f, "\n");
+  fflush(f);
+}
+
 #include "desktop_shell/common/icon_cache/icon_cache.hpp"
 #include "wallpaper/thumbnail/wallpaper_thumbnail.hpp"
 #include "ux/file_browser/features/svg_preview.hpp"
@@ -27,10 +51,37 @@
 #include "ux/file_browser/features/pdf_preview.hpp"
 #include "ux/file_browser/features/epub_preview.hpp"
 #include "ux/file_browser/features/image_preview.hpp"
+#include "ux/file_browser/features/thumbnail_cache.hpp"
 
 namespace fs = std::filesystem;
 
 namespace eh::file_browser {
+
+// ── preview/thumbnail debug logger ─────────────────────────────────
+static std::mutex g_preview_log_mtx;
+void preview_log(const char* fmt, ...) {
+  static FILE* f = nullptr;
+  std::lock_guard<std::mutex> lock(g_preview_log_mtx);
+  if (!f) {
+    const char* home = std::getenv("HOME");
+    if (!home) return;
+    std::string path = std::string(home) + "/horizon-files-previews.log";
+    f = fopen(path.c_str(), "w");
+    if (!f) return;
+    fprintf(f, "preview log started\n");
+    fflush(f);
+  }
+  timespec ts{};
+  clock_gettime(CLOCK_REALTIME, &ts);
+  struct tm* t = localtime(&ts.tv_sec);
+  fprintf(f, "%02d:%02d:%02d.%03ld ", t->tm_hour, t->tm_min, t->tm_sec, ts.tv_nsec / 1000000);
+  va_list ap;
+  va_start(ap, fmt);
+  vfprintf(f, fmt, ap);
+  va_end(ap);
+  fprintf(f, "\n");
+  fflush(f);
+}
 
 static bool trash_has_files() {
   const char* home = std::getenv("HOME");
@@ -89,18 +140,45 @@ cairo_surface_t* get_thumbnail(AppState& app, const std::string& path,
     app.thumb_lru.push_front(path);
     return it->second;
   }
-  cairo_surface_t* s = is_svg_extension(path)
+
+  // Check disk cache before decoding
+  if (cairo_surface_t* s = load_cached_thumbnail(path, size)) {
+    preview_log("get_thumbnail: DISK CACHE HIT path=%s size=%d", path.c_str(), size);
+    int sh = cairo_image_surface_get_height(s);
+    int stride = cairo_image_surface_get_stride(s);
+    app.thumb_cache_bytes += static_cast<std::size_t>(sh * stride);
+    app.thumb_cache[path] = s;
+    app.thumb_lru.push_front(path);
+    return s;
+  }
+
+  cairo_surface_t* s;
+
+  bool is_svg = is_svg_extension(path);
+  bool is_pdf = is_pdf_extension(path);
+  bool is_epub = is_epub_extension(path);
+  bool is_vid = is_video_extension(path);
+  bool is_img = is_image_extension(path);
+  s = is_svg
     ? load_svg_thumbnail(path, size)
-    : is_pdf_extension(path)
+    : is_pdf
     ? load_pdf_thumbnail(path, size)
-    : is_epub_extension(path)
+    : is_epub
     ? load_epub_thumbnail(path, size)
-    : is_video_extension(path)
+    : is_vid
     ? load_video_thumbnail(path, size)
-    : is_image_extension(path)
+    : is_img
     ? load_image_thumbnail(path, size)
     : nullptr;
-  if (!s) return nullptr;
+  if (!s) {
+    if      (is_svg) preview_log("get_thumbnail: SVG  FAIL path=%s size=%d", path.c_str(), size);
+    else if (is_pdf) preview_log("get_thumbnail: PDF  FAIL path=%s size=%d", path.c_str(), size);
+    else if (is_epub) preview_log("get_thumbnail: EPUB FAIL path=%s size=%d", path.c_str(), size);
+    else if (is_vid) preview_log("get_thumbnail: VIDEO FAIL path=%s size=%d", path.c_str(), size);
+    else if (is_img) preview_log("get_thumbnail: IMAGE FAIL path=%s size=%d", path.c_str(), size);
+    else             preview_log("get_thumbnail: UNKNOWN type path=%s size=%d", path.c_str(), size);
+    return nullptr;
+  }
 
   while (app.thumb_cache_bytes >= AppState::kThumbCacheMaxBytes &&
          !app.thumb_lru.empty()) {
@@ -121,6 +199,9 @@ cairo_surface_t* get_thumbnail(AppState& app, const std::string& path,
   app.thumb_cache_bytes += static_cast<std::size_t>(sh * stride);
   app.thumb_cache[path] = s;
   app.thumb_lru.push_front(path);
+  // Save to disk cache for next time (skip video — already handled by ffmpegthumbnailer)
+  if (!is_video_extension(path))
+    save_thumbnail_cache(path, size, s);
   return s;
 }
 
@@ -138,25 +219,44 @@ static cairo_surface_t* get_thumbnail_lazy(AppState& app, int vi,
     return get_thumbnail(app, path, size);
   }
   app.thumb_pending_queue.push_back({vi, size});
+  preview_log("get_thumbnail_lazy: QUEUED path=%s size=%d (budget exhausted)", path.c_str(), size);
   return nullptr;
 }
 
-static const char* icon_name_for_file_type(FileType ft) {
-  switch (ft) {
-    case FileType::Folder:     return "folder";
-    case FileType::Image:      return "image-x-generic";
-    case FileType::Audio:      return "audio-x-generic";
-    case FileType::Video:      return "video-x-generic";
-    case FileType::Text:       return "text-x-generic";
-    case FileType::Markdown:   return "text-x-markdown";
-    case FileType::Code:       return "text-x-code";
-    case FileType::Document:   return "x-office-document";
-    case FileType::Font:       return "font-x-generic";
-    case FileType::Archive:    return "application-x-archive";
-    case FileType::Executable: return "application-x-executable";
-    case FileType::Web:        return "text-html";
-    default:                   return "text-x-generic";
+static bool is_pdf_ext(const std::string& path) {
+  if (path.size() < 5) return false;
+  const char* s = path.c_str();
+  size_t i = path.size() - 4;
+  return (s[i] == '.' || s[i] == '.') &&
+         (s[i+1] == 'p' || s[i+1] == 'P') &&
+         (s[i+2] == 'd' || s[i+2] == 'D') &&
+         (s[i+3] == 'f' || s[i+3] == 'F');
+}
+
+static const char* icon_name_for_file_type(FileType ft, const std::string* file_path = nullptr) {
+  if (ft == FileType::Document && file_path && is_pdf_ext(*file_path)) {
+    icon_log("[icon] PDF detected: path=%s -> icon=application-pdf", file_path->c_str());
+    return "application-pdf";
   }
+  const char* name;
+  switch (ft) {
+    case FileType::Folder:     name = "folder"; break;
+    case FileType::Image:      name = "image-x-generic"; break;
+    case FileType::Audio:      name = "audio-x-generic"; break;
+    case FileType::Video:      name = "video-x-generic"; break;
+    case FileType::Text:       name = "text-x-generic"; break;
+    case FileType::Markdown:   name = "text-x-markdown"; break;
+    case FileType::Code:       name = "text-x-code"; break;
+    case FileType::Document:   name = "x-office-document"; break;
+    case FileType::Font:       name = "font-x-generic"; break;
+    case FileType::Archive:    name = "application-x-archive"; break;
+    case FileType::Executable: name = "application-x-executable"; break;
+    case FileType::Web:        name = "text-html"; break;
+    default:                   name = "text-x-generic"; break;
+  }
+  icon_log("[icon] ft=%d path=%s -> icon=%s", static_cast<int>(ft),
+           file_path ? file_path->c_str() : "(null)", name);
+  return name;
 }
 
 static void draw_file_icon_cairo(AppState& app, cairo_t* cr, int x, int y,
@@ -164,29 +264,13 @@ static void draw_file_icon_cairo(AppState& app, cairo_t* cr, int x, int y,
                                   const std::string& icon_name = {},
                                   cairo_surface_t* thumb = nullptr,
                                   const std::string* file_path = nullptr) {
-  if (!icon_name.empty()) {
-    const auto* ic = app.icons.tray_icon(icon_name);
-    if (ic && ic->surface) {
-      double iw = static_cast<double>(ic->width);
-      double ih = static_cast<double>(ic->height);
-      if (iw > 0 && ih > 0) {
-        double scale = size / std::max(1.0, std::max(iw, ih));
-        cairo_save(cr);
-        cairo_translate(cr, x, y);
-        cairo_scale(cr, scale, scale);
-        cairo_set_source_surface(cr, ic->surface,
-                                 (size / scale - iw) / 2,
-                                 (size / scale - ih) / 2);
-        cairo_paint(cr);
-        cairo_restore(cr);
-        return;
-      }
-    }
-  }
-
+  // Types that support thumbnails: draw thumb first if available
+  bool has_thumb = thumb != nullptr;
+  bool thumb_type = (ft == FileType::Image || ft == FileType::Video);
   bool doc_thumb = (ft == FileType::Document && thumb && file_path
                     && (is_pdf_extension(*file_path) || is_epub_extension(*file_path)));
-  if ((ft == FileType::Image || ft == FileType::Video || doc_thumb) && thumb) {
+
+  if ((thumb_type || doc_thumb) && has_thumb) {
     double iw = static_cast<double>(cairo_image_surface_get_width(thumb));
     double ih = static_cast<double>(cairo_image_surface_get_height(thumb));
     if (iw > 0 && ih > 0) {
@@ -220,11 +304,34 @@ static void draw_file_icon_cairo(AppState& app, cairo_t* cr, int x, int y,
     }
   }
 
-  const auto* ic = app.icons.tray_icon(icon_name_for_file_type(ft));
+  // Fallback to per-entry icon name (MIME-type-derived) if set
+  if (!icon_name.empty()) {
+    const auto* ic = app.icons.tray_icon(icon_name);
+    if (ic && ic->surface) {
+      double iw = static_cast<double>(ic->width);
+      double ih = static_cast<double>(ic->height);
+      if (iw > 0 && ih > 0) {
+        double scale = size / std::max(1.0, std::max(iw, ih));
+        cairo_save(cr);
+        cairo_translate(cr, x, y);
+        cairo_scale(cr, scale, scale);
+        cairo_set_source_surface(cr, ic->surface,
+                                 (size / scale - iw) / 2,
+                                 (size / scale - ih) / 2);
+        cairo_paint(cr);
+        cairo_restore(cr);
+        return;
+      }
+    }
+  }
+
+  const char* icon_name_resolved = icon_name_for_file_type(ft, file_path);
+  const auto* ic = app.icons.tray_icon(icon_name_resolved);
   if (ic && ic->surface) {
     double iw = static_cast<double>(ic->width);
     double ih = static_cast<double>(ic->height);
     if (iw > 0 && ih > 0) {
+      icon_log("[icon] FOUND in theme: name=%s %dx%d", icon_name_resolved, ic->width, ic->height);
       double scale = size / std::max(1.0, std::max(iw, ih));
       cairo_save(cr);
       cairo_translate(cr, x, y);
@@ -237,6 +344,7 @@ static void draw_file_icon_cairo(AppState& app, cairo_t* cr, int x, int y,
       return;
     }
   }
+  icon_log("[icon] NOT FOUND in theme: name=%s -> using fallback color", icon_name_resolved);
 
   double r, g, b;
   switch (ft) {
@@ -2625,7 +2733,7 @@ void draw_confirm_dialog(AppState& app, cairo_t* cr) {
                ext == "webm")
         ft = FileType::Video;
     }
-    const auto* ic = app.icons.tray_icon(icon_name_for_file_type(ft));
+    const auto* ic = app.icons.tray_icon(icon_name_for_file_type(ft, &app.confirm_preview_path));
     if (ic && ic->surface) {
       double iw = static_cast<double>(ic->width);
       double ih = static_cast<double>(ic->height);

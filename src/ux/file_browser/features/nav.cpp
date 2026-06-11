@@ -40,6 +40,8 @@ namespace xdg = eh::shell::desktop::xdg;
 
 namespace eh::file_browser {
 
+void preview_log(const char* fmt, ...);  // defined in draw.cpp
+
 // ── helpers ──────────────────────────────────────────────────────
 
 static std::string desktop_dir() {
@@ -1226,10 +1228,14 @@ void check_hover_preview(AppState& app) {
               app.preview_thumb = load_image_thumbnail(entry.path, 500);
             if (app.preview_thumb)
               cairo_surface_reference(app.preview_thumb);
+            else
+              preview_log("hover_preview: IMAGE thumb FAIL path=%s", entry.path.c_str());
           } else if (entry.type == FileType::Video || entry.type == FileType::Audio) {
             app.preview_thumb = get_thumbnail(app, entry.path, 256);
             if (app.preview_thumb)
               cairo_surface_reference(app.preview_thumb);
+            else
+              preview_log("hover_preview: VIDEO/AUDIO thumb FAIL path=%s", entry.path.c_str());
           }
 
           // PDF gets a rendered thumbnail via poppler
@@ -1237,6 +1243,8 @@ void check_hover_preview(AppState& app) {
             app.preview_thumb = load_pdf_thumbnail(entry.path, 256);
             if (app.preview_thumb)
               cairo_surface_reference(app.preview_thumb);
+            else
+              preview_log("hover_preview: PDF thumb FAIL path=%s", entry.path.c_str());
           }
 
           // EPUB gets a cover thumbnail via libarchive + stb_image
@@ -1244,6 +1252,8 @@ void check_hover_preview(AppState& app) {
             app.preview_thumb = load_epub_thumbnail(entry.path, 256);
             if (app.preview_thumb)
               cairo_surface_reference(app.preview_thumb);
+            else
+              preview_log("hover_preview: EPUB thumb FAIL path=%s", entry.path.c_str());
           }
 
           // Read text file content for preview (not for binary Document types like PDF/EPUB)
@@ -1444,15 +1454,25 @@ void activate_space_preview(AppState& app) {
     else
       app.preview_thumb = load_image_thumbnail(entry.path, thumb_px);
     has_thumb = app.preview_thumb != nullptr;
+    if (!has_thumb)
+      preview_log("space_preview: IMAGE thumb FAIL path=%s", entry.path.c_str());
   } else if (entry.type == FileType::Video || entry.type == FileType::Audio) {
     app.preview_thumb = get_thumbnail(app, entry.path, thumb_px);
     has_thumb = app.preview_thumb != nullptr;
+    if (!has_thumb)
+      preview_log("space_preview: VIDEO/AUDIO thumb FAIL path=%s", entry.path.c_str());
   } else if (entry.type == FileType::Document) {
-    if (is_pdf_extension(entry.path))
+    if (is_pdf_extension(entry.path)) {
       app.preview_thumb = load_pdf_thumbnail(entry.path, thumb_px);
-    else if (is_epub_extension(entry.path))
+      has_thumb = app.preview_thumb != nullptr;
+      if (!has_thumb)
+        preview_log("space_preview: PDF thumb FAIL path=%s", entry.path.c_str());
+    } else if (is_epub_extension(entry.path)) {
       app.preview_thumb = load_epub_thumbnail(entry.path, thumb_px);
-    has_thumb = app.preview_thumb != nullptr;
+      has_thumb = app.preview_thumb != nullptr;
+      if (!has_thumb)
+        preview_log("space_preview: EPUB thumb FAIL path=%s", entry.path.c_str());
+    }
   }
 
   if (has_thumb)
@@ -1637,7 +1657,11 @@ bool process_pending_thumbnails(AppState& app) {
       continue;
 
     auto& entry = app.cur_tab().entries[real_idx];
-    if (entry.type != FileType::Image && entry.type != FileType::Video) continue;
+    // Skip types that don't support thumbnails
+    if (entry.type != FileType::Image && entry.type != FileType::Video) {
+      if (entry.type != FileType::Document) continue;
+      if (!is_pdf_extension(entry.path) && !is_epub_extension(entry.path)) continue;
+    }
     if (app.thumb_cache.find(entry.path) != app.thumb_cache.end())
       continue;
 

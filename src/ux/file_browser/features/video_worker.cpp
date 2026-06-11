@@ -118,7 +118,12 @@ void VideoThumbWorker::thread_main(int /*thread_id*/) {
       auto dir = std::filesystem::path(item.cache_path).parent_path();
       std::filesystem::create_directories(dir, ec);
 
-      std::string cmd = "ffmpegthumbnailer -s 512 -q 1 -i \"";
+#ifdef FFMPEGTHUMBNAILER_BIN
+      std::string cmd = "\"" FFMPEGTHUMBNAILER_BIN "\"";
+#else
+      std::string cmd = "ffmpegthumbnailer";
+#endif
+      cmd += " -s 512 -q 1 -i \"";
       cmd += item.path;
       cmd += "\" -o \"";
       cmd += item.cache_path;

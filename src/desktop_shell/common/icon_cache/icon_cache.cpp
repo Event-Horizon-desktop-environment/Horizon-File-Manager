@@ -104,11 +104,20 @@ static std::string find_icon_file(const fs::path& theme_dir, const std::string& 
     theme_dir / "devices" / "scalable" / (icon_name + ".svg"),
     theme_dir / "actions" / "scalable" / (icon_name + ".svg"),
 
+    // MacTahoe mimes: mimes/scalable/icon.svg
+    theme_dir / "mimes" / "scalable" / (icon_name + ".svg"),
+
+    // MacTahoe mimes: mimes/symbolic/icon-symbolic.svg
+    theme_dir / "mimes" / "symbolic" / (icon_name + "-symbolic.svg"),
+
     // MacTahoe: <cat>/<size>/icon.svg
     theme_dir / "places" / size_str / (icon_name + ".svg"),
     theme_dir / "apps" / size_str / (icon_name + ".svg"),
     theme_dir / "devices" / size_str / (icon_name + ".svg"),
     theme_dir / "actions" / size_str / (icon_name + ".svg"),
+
+    // MacTahoe mimes: mimes/<size>/icon.svg
+    theme_dir / "mimes" / size_str / (icon_name + ".svg"),
   };
 
   // Also try nearby sizes for MacTahoe style
@@ -118,6 +127,7 @@ static std::string find_icon_file(const fs::path& theme_dir, const std::string& 
     candidates.push_back(theme_dir / "places" / ss / (icon_name + ".svg"));
     candidates.push_back(theme_dir / "apps" / ss / (icon_name + ".svg"));
     candidates.push_back(theme_dir / "devices" / ss / (icon_name + ".svg"));
+    candidates.push_back(theme_dir / "mimes" / ss / (icon_name + ".svg"));
   }
 
   for (auto& p : candidates) {
@@ -468,6 +478,7 @@ const IconEntry* IconCache::resolve_and_cache(const std::string& key, const std:
     ICON_DBG("  trying dir: %s\n", theme_dir.c_str());
     auto path = find_icon_file(theme_dir, icon_name, load_size);
     if (!path.empty()) {
+      ICON_DBG("  found file: %s\n", path.c_str());
       cairo_surface_t* surf = nullptr;
       if (path.ends_with(".svg")) {
         surf = load_svg(path, load_size);
@@ -509,7 +520,14 @@ const IconEntry* IconCache::app_icon(const std::string& app_id) {
 
 const IconEntry* IconCache::tray_icon(const std::string& icon_name) {
   std::string key = "tray:" + icon_name;
-  return resolve_and_cache(key, icon_name, true);
+  ICON_DBG("tray_icon called: name='%s'\n", icon_name.c_str());
+  auto* result = resolve_and_cache(key, icon_name, true);
+  if (result) {
+    ICON_DBG("tray_icon FOUND: name='%s' %dx%d\n", icon_name.c_str(), result->width, result->height);
+  } else {
+    ICON_DBG("tray_icon MISS: name='%s'\n", icon_name.c_str());
+  }
+  return result;
 }
 
 const IconEntry* IconCache::app_icon_from_exec_basename(const std::string& exec_basename) {
