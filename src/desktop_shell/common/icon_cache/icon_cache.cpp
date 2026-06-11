@@ -10,6 +10,7 @@
 #include "nanosvg/src/nanosvgrast.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cerrno>
 #include <cstdio>
@@ -190,6 +191,98 @@ static cairo_surface_t* load_svg(const std::string& path, int size) {
   NSVGimage* image = nsvgParseFromFile(path.c_str(), "px", 96.0f);
   if (!image) return nullptr;
 
+  // Some themes ship SVGs that wrap an embedded base64 PNG via
+  // <image xlink:href="data:image/png;base64,..."> instead of real
+  // vector paths. nanosvg can't render these, so detect and handle
+  // them ourselves.
+  if (!image->shapes) {
+    nsvgDelete(image);
+    static const auto b64_d = []() -> std::array<unsigned char, 256> {
+      std::array<unsigned char, 256> t = {};
+      for (int i = 0; i < 26; ++i) {
+        t[static_cast<unsigned char>('A' + i)] = static_cast<unsigned char>(i);
+        t[static_cast<unsigned char>('a' + i)] = static_cast<unsigned char>(26 + i);
+      }
+      for (int i = 0; i < 10; ++i)
+        t[static_cast<unsigned char>('0' + i)] = static_cast<unsigned char>(52 + i);
+      t[static_cast<unsigned char>('+')] = 62;
+      t[static_cast<unsigned char>('/')] = 63;
+      return t;
+    }();
+    auto b64_c = [&](char c) -> unsigned char { return b64_d[static_cast<unsigned char>(c)]; };
+    std::string svg_data;
+    {
+      std::ifstream ifs(path, std::ios::binary);
+      if (ifs) {
+        ifs.seekg(0, std::ios::end);
+        svg_data.resize(static_cast<std::size_t>(ifs.tellg()));
+        ifs.seekg(0, std::ios::beg);
+        ifs.read(svg_data.data(), static_cast<std::streamsize>(svg_data.size()));
+      }
+    }
+    const char kNeedle[] = "data:image/png;base64,";
+    auto pos = svg_data.find(kNeedle);
+    if (pos != std::string::npos) {
+      pos += sizeof(kNeedle) - 1;
+      auto epos = pos;
+      while (epos < svg_data.size() && svg_data[epos] != '"' && svg_data[epos] != '\'')
+        ++epos;
+      std::string b64;
+      for (auto i = pos; i < epos; ++i)
+        if (svg_data[i] > ' ') b64.push_back(svg_data[i]);
+      std::vector<unsigned char> png_bytes;
+      png_bytes.reserve(b64.size() / 4 * 3 + 3);
+      for (std::size_t i = 0; i + 3 < b64.size(); i += 4) {
+        unsigned char d0 = b64_c(b64[i]), d1 = b64_c(b64[i+1]);
+        unsigned char d2 = b64_c(b64[i+2]), d3 = b64_c(b64[i+3]);
+        png_bytes.push_back(static_cast<unsigned char>((d0 << 2) | (d1 >> 4)));
+        if (b64[i+2] != '=')
+          png_bytes.push_back(static_cast<unsigned char>((d1 << 4) | (d2 >> 2)));
+        if (b64[i+3] != '=')
+          png_bytes.push_back(static_cast<unsigned char>((d2 << 6) | d3));
+      }
+      int pw = 0, ph = 0, pn = 0;
+      unsigned char* png_rgba = stbi_load_from_memory(
+          png_bytes.data(), static_cast<int>(png_bytes.size()), &pw, &ph, &pn, 4);
+      if (png_rgba) {
+        float sc = static_cast<float>(size) / std::max(pw, ph);
+        int tw = std::max(1, static_cast<int>(pw * sc));
+        int th = std::max(1, static_cast<int>(ph * sc));
+        auto* scaled = static_cast<unsigned char*>(std::malloc(static_cast<std::size_t>(tw) * th * 4));
+        if (scaled) {
+          cairo_surface_t* src = cairo_image_surface_create_for_data(
+              png_rgba, CAIRO_FORMAT_ARGB32, pw, ph, pw * 4);
+          for (int i = 0; i < pw * ph; ++i) {
+            unsigned char* pp = png_rgba + i * 4;
+            unsigned char pt = pp[0]; pp[0] = pp[2]; pp[2] = pt;
+            unsigned int pa = pp[3];
+            if (pa == 0) { pp[0] = pp[1] = pp[2] = 0; }
+            else if (pa < 255) {
+              pp[0] = static_cast<unsigned char>((static_cast<unsigned int>(pp[0]) * pa) / 255);
+              pp[1] = static_cast<unsigned char>((static_cast<unsigned int>(pp[1]) * pa) / 255);
+              pp[2] = static_cast<unsigned char>((static_cast<unsigned int>(pp[2]) * pa) / 255);
+            }
+          }
+          cairo_surface_t* dst = cairo_image_surface_create_for_data(
+              scaled, CAIRO_FORMAT_ARGB32, tw, th, tw * 4);
+          cairo_t* cr = cairo_create(dst);
+          cairo_scale(cr, static_cast<double>(tw) / pw, static_cast<double>(th) / ph);
+          cairo_set_source_surface(cr, src, 0, 0);
+          cairo_paint(cr);
+          cairo_destroy(cr);
+          cairo_surface_destroy(src);
+          static const cairo_user_data_key_t kEmbedKey = {};
+          cairo_surface_set_user_data(dst, &kEmbedKey, scaled,
+              [](void* d) { std::free(d); });
+          stbi_image_free(png_rgba);
+          return dst;
+        }
+        stbi_image_free(png_rgba);
+      }
+    }
+    return nullptr;
+  }
+
   float scale = static_cast<float>(size) / std::max(image->width, image->height);
   int w = static_cast<int>(image->width * scale);
   int h = static_cast<int>(image->height * scale);
@@ -207,11 +300,22 @@ static cairo_surface_t* load_svg(const std::string& path, int size) {
   nsvgDelete(image);
 
   // nanosvg outputs RGBA but CAIRO_FORMAT_ARGB32 expects BGRA on little-endian
+  // with pre-multiplied alpha. nanosvg gives straight alpha; Cairo requires
+  // pre-multiplied, so multiply each colour channel by alpha/255.
   for (int i = 0; i < w * h; i++) {
     unsigned char* p = rgba + i * 4;
     unsigned char tmp = p[0];
     p[0] = p[2];
     p[2] = tmp;
+    // Pre-multiply alpha — now channels are B, G, R, A
+    unsigned int a = p[3];
+    if (a == 0) {
+      p[0] = p[1] = p[2] = 0;
+    } else if (a < 255) {
+      p[0] = static_cast<unsigned char>((static_cast<unsigned int>(p[0]) * a) / 255);
+      p[1] = static_cast<unsigned char>((static_cast<unsigned int>(p[1]) * a) / 255);
+      p[2] = static_cast<unsigned char>((static_cast<unsigned int>(p[2]) * a) / 255);
+    }
   }
 
   static const cairo_user_data_key_t kSvgKey = {};
