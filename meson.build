@@ -18,7 +18,7 @@ cpp_args = [
   '-Wno-maybe-uninitialized',
   '-Wno-deprecated-literal-operator',
   # Forced includes to replace the original project's PCH
-  '-include', 'desktop_shell/common/log/mangowm_logger.hpp',
+  '-include', 'platform/common/log/mangowm_logger.hpp',
 ]
 
 # ── Dependencies (system) ─────────────────────────────────────────────
@@ -62,78 +62,69 @@ inc = include_directories(
 # ── Sources ───────────────────────────────────────────────────────────
 sources = files(
   # File browser core
-  'src/ux/file_browser/embed/embed.cpp',
-  'src/ux/file_browser/features/compress.cpp',
-  'src/ux/file_browser/features/drag.cpp',
-  'src/ux/file_browser/features/epub_preview.cpp',
-  'src/ux/file_browser/features/image_preview.cpp',
-  'src/ux/file_browser/features/menu.cpp',
-  'src/ux/file_browser/features/nav.cpp',
-  'src/ux/file_browser/features/pdf_preview.cpp',
-  'src/ux/file_browser/features/progress.cpp',
-  'src/ux/file_browser/features/recursive_search_worker.cpp',
-  'src/ux/file_browser/features/svg_preview.cpp',
-  'src/ux/file_browser/features/thumbnail_cache.cpp',
-  'src/ux/file_browser/features/video_preview.cpp',
-  'src/ux/file_browser/features/video_worker.cpp',
-  'src/ux/file_browser/features/terminal.cpp',
-  'src/ux/file_browser/ui/computer_view.cpp',
-  'src/ux/file_browser/ui/rename_ui.cpp',
-  'src/ux/file_browser/ui/draw.cpp',
-  'src/ux/file_browser/input/events.cpp',
-  'src/ux/file_browser/app.cpp',
+  'src/app/file_browser/embed/embed.cpp',
+  'src/app/file_browser/features/compress.cpp',
+  'src/app/file_browser/features/drag.cpp',
+  'src/app/file_browser/features/epub_preview.cpp',
+  'src/app/file_browser/features/image_preview.cpp',
+  'src/app/file_browser/features/menu.cpp',
+  'src/app/file_browser/features/nav.cpp',
+  'src/app/file_browser/features/pdf_preview.cpp',
+  'src/app/file_browser/features/progress.cpp',
+  'src/app/file_browser/features/recursive_search_worker.cpp',
+  'src/app/file_browser/features/svg_preview.cpp',
+  'src/app/file_browser/features/thumbnail_cache.cpp',
+  'src/app/file_browser/features/video_preview.cpp',
+  'src/app/file_browser/features/video_worker.cpp',
+  'src/app/file_browser/features/terminal.cpp',
+  'src/app/file_browser/ui/computer_view.cpp',
+  'src/app/file_browser/ui/rename_ui.cpp',
+  'src/app/file_browser/ui/draw.cpp',
+  'src/app/file_browser/input/events.cpp',
+  'src/app/file_browser/app.cpp',
 
   # Wayland core
-  'src/wl/core/connection.cpp',
-  'src/wl/core/seat.cpp',
-  'src/wl/core/memfd.cpp',
-  'src/wl/buffer/shm_buffer.cpp',
-  'src/wl/buffer/cairo_cpu_buffer.cpp',
-  'src/wl/buffer/single_pixel_buffer.cpp',
-  'src/wl/input/clipboard.cpp',
+  'src/wayland/core/connection.cpp',
+  'src/wayland/core/seat.cpp',
+  'src/wayland/core/memfd.cpp',
+  'src/wayland/buffer/shm_buffer.cpp',
+  'src/wayland/buffer/cairo_cpu_buffer.cpp',
+  'src/wayland/buffer/single_pixel_buffer.cpp',
+  'src/wayland/input/clipboard.cpp',
 
   # Surface extensions (only the file used by the file browser)
-  'src/wl/surface/surface_extensions.cpp',
-  'src/wl/surface/tearing_control.cpp',
+  'src/wayland/surface/surface_extensions.cpp',
+  'src/wayland/surface/tearing_control.cpp',
 
   # Configuration (standalone)
-  'src/configuration/shell_config.cpp',
+  'src/config/shell_config.cpp',
 
   # Desktop shell
-  'src/desktop_shell/desktop/entries/desktop_xdg_ops.cpp',
-  'src/desktop_shell/common/asset/asset_loader.cpp',
-  'src/desktop_shell/common/glyph/bundled_assets.cpp',
-  'src/desktop_shell/common/glyph/material_glyph.cpp',
-  'src/desktop_shell/common/icon_cache/icon_cache.cpp',
-  'src/desktop_shell/common/fs/shell_paths.cpp',
-  'src/desktop_shell/common/fs/string_util.cpp',
-  'src/desktop_shell/common/palette/matugen_palette.cpp',
+  'src/platform/desktop/entries/desktop_xdg_ops.cpp',
+  'src/platform/common/asset/asset_loader.cpp',
+  'src/platform/common/glyph/bundled_assets.cpp',
+  'src/platform/common/glyph/material_glyph.cpp',
+  'src/platform/common/icon_cache/icon_cache.cpp',
+  'src/platform/common/fs/shell_paths.cpp',
+  'src/platform/common/fs/string_util.cpp',
+  'src/platform/common/palette/matugen_palette.cpp',
 
   # Bootstrap thread
-  'src/bootstrap/thread/thread_dispatch.cpp',
-  'src/bootstrap/thread/thread_pool.cpp',
+  'src/base/thread/thread_dispatch.cpp',
+  'src/base/thread/thread_pool.cpp',
 
-  # Services (standalone stubs)
+  # Services
   'src/services/udisks2/udisks2_drive_service.cpp',
 
-  # Dialog (standalone stubs)
+  # Dialog
   'src/dialog/dialog_base.cpp',
   'src/dialog/file_chooser_dialog.cpp',
 
-  # Wallpaper (standalone stubs)
-  'src/wallpaper/thumbnail/wallpaper_thumbnail.cpp',
-
-  # Backend interfaces (standalone stubs)
-  'src/backends/interfaces/compositor_ipc.cpp',
-
-  # Spotlight search stub
-  'src/desktop_shell/spotlight/search/spotlight_search.cpp',
-
-  # Desktop list stub
-  'src/desktop_shell/widgets/app_drawer/list/desktop_list.cpp',
+  # Desktop list
+  'src/platform/widgets/app_drawer/list/desktop_list.cpp',
 
   # Standalone main
-  'src/ux/file_browser/standalone_main.cpp',
+  'src/app/file_browser/standalone_main.cpp',
 
   # Wayland protocol code (generated .c files)
   'protocol/xdg-shell-client-protocol.c',
@@ -166,6 +157,9 @@ if ffmpegthumb_result.returncode() == 0
 else
   message('ffmpegthumbnailer: NOT built (cmake failed) — video thumbnails disabled')
 endif
+
+# ── Archive viewer sub-directory ──────────────────────────────────────
+subdir('src/archive_viewer')
 
 # ── Executable ────────────────────────────────────────────────────────
 executable(

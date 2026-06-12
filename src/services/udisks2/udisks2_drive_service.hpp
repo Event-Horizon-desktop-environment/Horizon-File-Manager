@@ -47,8 +47,6 @@ public:
   bool add_fstab_entry(const std::string& object_path, const std::string& mount_point,
                        const std::string& fstype, const std::string& uuid);
 
-  // Async mount using callMethodAsync — keeps PolKit auth on the main DBus connection.
-  // Callback fires on the sdbus event loop thread (not the main thread).
   void mount_async(const std::string& object_path, std::function<void(bool)> cb,
                    const std::string& options = "rw");
 
@@ -73,9 +71,6 @@ private:
   std::mutex mtx_{};
   bool started_ = false;
   ChangeCallback on_change_{};
-
-  std::unique_ptr<sdbus::IConnection> bus_{};
-  std::unique_ptr<sdbus::IProxy> proxy_{};
 };
 
 }

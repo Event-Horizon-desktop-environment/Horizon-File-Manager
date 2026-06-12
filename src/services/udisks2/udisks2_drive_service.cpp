@@ -1,12 +1,13 @@
 #include "services/udisks2/udisks2_drive_service.hpp"
 
-#include <sdbus-c++/IConnection.h>
-#include <sdbus-c++/IProxy.h>
+#include <sdbus-c++/sdbus-c++.h>
 
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#include <map>
 #include <string>
+#include <thread>
 
 namespace eh::drives {
 
@@ -35,6 +36,7 @@ std::vector<DriveInfo> detect_mounted_drives() {
       di.mount_point = mount_point;
       di.mounted = true;
       di.label = device.substr(5); // strip "/dev/"
+      di.object_path = device;
       drives.push_back(std::move(di));
     }
   }
@@ -64,8 +66,31 @@ std::vector<DriveInfo> UDisks2DriveService::query_drives() {
   return detect_mounted_drives();
 }
 
+static std::string dev_to_udisks_path(const std::string& path) {
+  if (path.find("/dev/") == 0) {
+    auto name = path.substr(5); // strip "/dev/"
+    return "/org/freedesktop/UDisks2/block_devices/" + name;
+  }
+  return path; // already a UDisks2 object path
+}
+
 std::string UDisks2DriveService::mount(const std::string& object_path, const std::string& options) {
-  // Fallback: use udisksctl or pmount
+  try {
+    auto conn = sdbus::createSystemBusConnection();
+    auto proxy = sdbus::createProxy(*conn,
+                                     sdbus::ServiceName{"org.freedesktop.UDisks2"},
+                                     sdbus::ObjectPath{dev_to_udisks_path(object_path)});
+    std::map<std::string, sdbus::Variant> mount_opts;
+    std::string mount_path;
+    proxy->callMethod("Mount")
+        .onInterface("org.freedesktop.UDisks2.Filesystem")
+        .withArguments(mount_opts)
+        .storeResultsTo(mount_path);
+    return mount_path;
+  } catch (const sdbus::Error&) {
+  }
+
+  // Fallback: use udisksctl
   std::string cmd = "udisksctl mount -b " + object_path + " 2>&1";
   FILE* f = popen(cmd.c_str(), "r");
   if (!f) return {};
@@ -73,7 +98,6 @@ std::string UDisks2DriveService::mount(const std::string& object_path, const std
   std::string result;
   while (fgets(buf, sizeof(buf), f)) result += buf;
   pclose(f);
-  // Parse "Mounted at /media/..." from udisksctl output
   auto pos = result.find("Mounted at ");
   if (pos != std::string::npos) {
     auto start = pos + 11;
@@ -85,6 +109,20 @@ std::string UDisks2DriveService::mount(const std::string& object_path, const std
 }
 
 bool UDisks2DriveService::unmount(const std::string& object_path) {
+  try {
+    auto conn = sdbus::createSystemBusConnection();
+    auto proxy = sdbus::createProxy(*conn,
+                                     sdbus::ServiceName{"org.freedesktop.UDisks2"},
+                                     sdbus::ObjectPath{dev_to_udisks_path(object_path)});
+    std::map<std::string, sdbus::Variant> unmount_opts;
+    proxy->callMethod("Unmount")
+        .onInterface("org.freedesktop.UDisks2.Filesystem")
+        .withArguments(unmount_opts);
+    return true;
+  } catch (const sdbus::Error&) {
+  }
+
+  // Fallback
   std::string cmd = "udisksctl unmount -b " + object_path + " 2>/dev/null";
   return std::system(cmd.c_str()) == 0;
 }
@@ -97,16 +135,20 @@ bool UDisks2DriveService::add_fstab_entry(const std::string&, const std::string&
 }
 
 void UDisks2DriveService::mount_async(const std::string& object_path,
-                                       std::function<void(bool)> cb,
-                                       const std::string& options) {
-  bool ok = !mount(object_path, options).empty();
-  if (cb) cb(ok);
+                                        std::function<void(bool)> cb,
+                                        const std::string& options) {
+  std::thread([this, object_path, options, cb = std::move(cb)] {
+    std::string result = mount(object_path, options);
+    if (cb) cb(!result.empty());
+  }).detach();
 }
 
 void UDisks2DriveService::unmount_async(const std::string& object_path,
-                                         std::function<void(bool)> cb) {
-  bool ok = unmount(object_path);
-  if (cb) cb(ok);
+                                           std::function<void(bool)> cb) {
+  std::thread([this, object_path, cb = std::move(cb)] {
+    bool ok = unmount(object_path);
+    if (cb) cb(ok);
+  }).detach();
 }
 
 void UDisks2DriveService::add_fstab_async(const std::string&, const std::string&,

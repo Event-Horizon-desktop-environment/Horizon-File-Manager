@@ -1,7 +1,7 @@
 #include "dialog/dialog_base.hpp"
 
-#include "desktop_shell/common/log/mangowm_logger.hpp"
-#include "wl/buffer/shm_buffer.hpp"
+#include "platform/common/log/mangowm_logger.hpp"
+#include "wayland/buffer/shm_buffer.hpp"
 
 #include <algorithm>
 #include <cerrno>

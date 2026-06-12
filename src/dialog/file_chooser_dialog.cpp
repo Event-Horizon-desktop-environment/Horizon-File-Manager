@@ -14,9 +14,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
-#include "configuration/shell_config.hpp"
-#include "desktop_shell/common/icon_cache/icon_cache.hpp"
-#include "wallpaper/thumbnail/wallpaper_thumbnail.hpp"
+#include "config/shell_config.hpp"
+#include "platform/common/icon_cache/icon_cache.hpp"
 
 namespace fs = std::filesystem;
 
@@ -96,9 +95,8 @@ static const char* icon_name_for_type(FileIcon fi) {
 cairo_surface_t* FileChooserDialog::get_thumbnail(const std::string& path, int size) {
   auto it = thumb_cache_.find(path);
   if (it != thumb_cache_.end()) return it->second;
-  cairo_surface_t* s = eh::wallpaper::load_thumbnail(path, size);
-  if (s) thumb_cache_[path] = s;
-  return s;
+  (void)size;
+  return nullptr;
 }
 
 static void draw_file_icon(cairo_t* cr, int x, int y, int size, FileIcon fi,
