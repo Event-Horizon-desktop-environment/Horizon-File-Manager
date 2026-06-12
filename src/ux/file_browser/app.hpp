@@ -106,14 +106,18 @@ cairo_surface_t* get_thumbnail(AppState& app, const std::string& path,
                                 int size);
 void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
                   int view_h);
-void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h);
-void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h);
+void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x = 0, int pane_w = 0);
+void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int pane_x = 0, int pane_w = 0);
 void draw_list_view(AppState& app, cairo_t* cr, int content_x, int content_y,
                     int content_w, int view_h);
 void draw_grid_view(AppState& app, cairo_t* cr, int content_x, int content_y,
                     int content_w, int view_h);
 void draw_computer_view(AppState& app, cairo_t* cr, int content_x, int content_y,
                         int content_w, int view_h);
+void draw_tree_view(AppState& app, cairo_t* cr, int content_x, int content_y,
+                    int content_w, int view_h);
+void draw_compact_view(AppState& app, cairo_t* cr, int content_x, int content_y,
+                       int content_w, int view_h);
 void draw_status_bar(AppState& app, cairo_t* cr, int w, int h, int status_h);
 void draw_create_dialog(AppState& app, cairo_t* cr);
 void draw_rename_ui(AppState& app, cairo_t* cr);
@@ -129,6 +133,9 @@ void draw_marquee(AppState& app, cairo_t* cr);
 int hit_test_list(AppState& app, int x, int y);
 int hit_test_grid(AppState& app, int x, int y);
 int hit_test_computer(AppState& app, int x, int y);
+int hit_test_tree(AppState& app, int x, int y, bool for_click = false);
+int hit_test_compact(AppState& app, int x, int y);
+void build_tree_entries(AppState& app);
 int hit_test_sidebar(AppState& app, int x, int y);
 int hit_test_context_menu(AppState& app, int x, int y);
 
@@ -158,6 +165,7 @@ void draw_sort_menu(AppState& app, cairo_t* cr);
 void draw_filter_dropdown(AppState& app, cairo_t* cr, int section);
 void draw_hover_preview(AppState& app, cairo_t* cr);
 void draw_properties_dialog(AppState& app, cairo_t* cr);
+void draw_info_panel(AppState& app, cairo_t* cr);
 int properties_hit_test(AppState& app, int x, int y);
 void show_properties(AppState& app, const std::string& path, const std::string& icon_name = "");
 void reload_settings_from_config(AppState& app);

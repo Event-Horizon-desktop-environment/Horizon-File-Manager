@@ -281,6 +281,40 @@ void handle_click(AppState& app, int x, int y, int button) {
   app.pointerX = static_cast<double>(x);
   app.pointerY = static_cast<double>(y);
 
+  // Split pane: determine which pane was clicked
+  if (app.split_view) {
+    int s_w = app.sidebar_expanded ? app.sidebar_width : 0;
+    int content_w = app.width - s_w - (app.info_panel_open ? app.info_panel_width : 0);
+    int split = app.split_divider_x;
+    if (split <= 0) split = content_w / 2;
+    int div_x = s_w + split;
+    int div_w = 4;
+    if (x >= div_x && x < div_x + div_w) {
+      if (button == 0x110) { app.split_divider_dragging = true; app.split_divider_hover = true; }
+      return;
+    }
+    app.active_pane = (x >= div_x + div_w) ? 1 : 0;
+  }
+
+  // ── Info panel tab click (in the left‑click handler) ──
+  if (app.info_panel_open) {
+    int panel_px = app.width - app.info_panel_width;
+    int top_h = app.top_bar_height + app.tab_bar_height;
+    int tab_h = static_cast<int>(38 * app.zoom_pct / 100.0);
+    if (x >= panel_px && y >= top_h && y < top_h + tab_h) {
+      for (int i = 0; i < 3; ++i) {
+        if (x >= static_cast<int>(app.info_panel_hit_tabs[i][0]) &&
+            x < static_cast<int>(app.info_panel_hit_tabs[i][0] + app.info_panel_hit_tabs[i][2]) &&
+            y >= static_cast<int>(app.info_panel_hit_tabs[i][1]) &&
+            y < static_cast<int>(app.info_panel_hit_tabs[i][1] + app.info_panel_hit_tabs[i][3])) {
+          app.info_panel_tab = i;
+          draw(app);
+          return;
+        }
+      }
+    }
+  }
+
   // ── Sidebar drag start ──
   if (app.sidebar_expanded && button == 0x110) {
     int edge_x = app.sidebar_width;
@@ -1079,35 +1113,44 @@ void handle_click(AppState& app, int x, int y, int button) {
                   static_cast<uint64_t>(ts.tv_nsec);
 
     // ── Sort menu item click (handle before top bar, so menu stays on top) ──
-    if (app.sort_menu_open) {
-      if (x >= app.sort_menu_x && x < app.sort_menu_x + app.sort_menu_w &&
-          y >= app.sort_menu_y && y < app.sort_menu_y + app.sort_menu_h) {
-        int rel_y = y - app.sort_menu_y - 6;
+    if ((app.active_pane ? app.r_sort_menu_open : app.sort_menu_open)) {
+      if (x >= (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) && x < (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) + (app.active_pane ? app.r_sort_menu_w : app.sort_menu_w) &&
+          y >= (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) && y < (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) + (app.active_pane ? app.r_sort_menu_h : app.sort_menu_h)) {
+        int rel_y = y - (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) - 6;
         int idx = rel_y / 30;
         if (idx >= 0 && idx <= 3) {
           app.cur_tab().sort_field = static_cast<SortField>(idx);
-          app.sort_menu_open = false;
+          (app.active_pane ? app.r_sort_menu_open : app.sort_menu_open) = false;
           save_file_browser_settings(app);
           reload_dir(app);
           draw(app);
           return;
         }
       } else {
-        app.sort_menu_open = false;
+        (app.active_pane ? app.r_sort_menu_open : app.sort_menu_open) = false;
         draw(app);
         return;
       }
     }
 
     // ── Filter dropdown click (handled before top bar) ──
-    if (app.filter_dropdown_section > 0) {
-      if (x >= app.filter_dropdown_x && x < app.filter_dropdown_x + app.filter_dropdown_w &&
-          y >= app.filter_dropdown_y && y < app.filter_dropdown_y + app.filter_dropdown_h) {
+    auto& click_filter_dd_x = app.active_pane ? app.r_filter_dropdown_x : app.filter_dropdown_x;
+    auto& click_filter_dd_y = app.active_pane ? app.r_filter_dropdown_y : app.filter_dropdown_y;
+    auto& click_filter_dd_w = app.active_pane ? app.r_filter_dropdown_w : app.filter_dropdown_w;
+    auto& click_filter_dd_h = app.active_pane ? app.r_filter_dropdown_h : app.filter_dropdown_h;
+    auto& click_filter_section = app.active_pane ? app.r_filter_dropdown_section : app.filter_dropdown_section;
+    auto& click_filter_hover = app.active_pane ? app.r_filter_dropdown_hover : app.filter_dropdown_hover;
+    auto& click_filter_type = app.active_pane ? app.r_filter_type_idx : app.filter_type_idx;
+    auto& click_filter_size = app.active_pane ? app.r_filter_size_idx : app.filter_size_idx;
+    auto& click_filter_date = app.active_pane ? app.r_filter_date_idx : app.filter_date_idx;
+    if (click_filter_section > 0) {
+      if (x >= click_filter_dd_x && x < click_filter_dd_x + click_filter_dd_w &&
+          y >= click_filter_dd_y && y < click_filter_dd_y + click_filter_dd_h) {
         // Map click to global index, then to section+item or header
-        int rel_y = y - app.filter_dropdown_y - kFilterPD;
+        int rel_y = y - click_filter_dd_y - kFilterPD;
         int gy = 0;
         int glob = 0;
-        int section = app.filter_dropdown_section;
+        int section = click_filter_section;
         int clicked_section = 0, clicked_item = -1;
         for (int si = 1; si <= 3; ++si) {
           // Header
@@ -1141,30 +1184,66 @@ void handle_click(AppState& app, int x, int y, int button) {
 
         if (clicked_item >= 0) {
           // Item clicked — select it and close dropdown
-          if (clicked_section == 1) app.filter_type_idx = clicked_item;
-          else if (clicked_section == 2) app.filter_size_idx = clicked_item;
-          else if (clicked_section == 3) app.filter_date_idx = clicked_item;
-          app.filter_dropdown_section = 0;
+          if (clicked_section == 1) click_filter_type = clicked_item;
+          else if (clicked_section == 2) click_filter_size = clicked_item;
+          else if (clicked_section == 3) click_filter_date = clicked_item;
+          click_filter_section = 0;
           trigger_search_on_filter_change(app);
           draw(app);
           return;
         } else if (clicked_section > 0) {
           // Header clicked — toggle expansion
-          app.filter_dropdown_section = (app.filter_dropdown_section == clicked_section) ? 0 : clicked_section;
-          app.filter_dropdown_hover = -1;
+          click_filter_section = (click_filter_section == clicked_section) ? 0 : clicked_section;
+          click_filter_hover = -1;
           draw(app);
           return;
         }
       } else {
-        app.filter_dropdown_section = 0;
+        click_filter_section = 0;
         draw(app);
         return;
       }
     }
 
-    if (y < app.top_bar_height) {
+    int bar_y = y;
+    if (app.split_view) {
+      int content_y = app.top_bar_height + app.tab_bar_height;
+      if (y >= content_y && y < content_y + app.top_bar_height)
+        bar_y = y - content_y;
+    }
+    if (bar_y < app.top_bar_height) {
       app.last_click_ns = 0;
       double zf = app.zoom_pct / 100.0;
+
+      auto& in_search_btn_x = app.active_pane ? app.r_search_btn_x : app.search_btn_x;
+      auto& in_search_btn_w = app.active_pane ? app.r_search_btn_w : app.search_btn_w;
+      auto& in_folder_search_btn_x = app.active_pane ? app.r_folder_search_btn_x : app.folder_search_btn_x;
+      auto& in_folder_search_btn_w = app.active_pane ? app.r_folder_search_btn_w : app.folder_search_btn_w;
+      auto& in_view_btn_x = app.active_pane ? app.r_view_btn_x : app.view_btn_x;
+      auto& in_view_btn_w = app.active_pane ? app.r_view_btn_w : app.view_btn_w;
+      auto& in_sort_btn_x = app.active_pane ? app.r_sort_btn_x : app.sort_btn_x;
+      auto& in_sort_btn_w = app.active_pane ? app.r_sort_btn_w : app.sort_btn_w;
+      auto& in_dots_btn_x = app.active_pane ? app.r_dots_btn_x : app.dots_btn_x;
+      auto& in_dots_btn_y = app.active_pane ? app.r_dots_btn_y : app.dots_btn_y;
+      auto& in_dots_btn_w = app.active_pane ? app.r_dots_btn_w : app.dots_btn_w;
+      auto& in_dots_btn_h = app.active_pane ? app.r_dots_btn_h : app.dots_btn_h;
+      auto& in_arrow_back_x = app.active_pane ? app.r_arrow_back_x : app.arrow_back_x;
+      auto& in_arrow_forward_x = app.active_pane ? app.r_arrow_forward_x : app.arrow_forward_x;
+      auto& in_search_bar_x = app.active_pane ? app.r_search_bar_x : app.search_bar_x;
+      auto& in_search_bar_w = app.active_pane ? app.r_search_bar_w : app.search_bar_w;
+      auto& in_search_clear_x = app.active_pane ? app.r_search_clear_x : app.search_clear_x;
+      auto& in_search_clear_w = app.active_pane ? app.r_search_clear_w : app.search_clear_w;
+      auto& in_filter_btn_x = app.active_pane ? app.r_filter_btn_x : app.filter_btn_x;
+      auto& in_filter_btn_w = app.active_pane ? app.r_filter_btn_w : app.filter_btn_w;
+      auto& in_breadcrumbs = app.active_pane ? app.r_breadcrumbs : app.breadcrumbs;
+      auto& in_breadcrumb_hover = app.active_pane ? app.r_breadcrumb_hover : app.breadcrumb_hover;
+      auto& in_search_active = app.active_pane ? app.r_search_active : app.search_active;
+      auto& in_recursive_search_active = app.active_pane ? app.r_recursive_search_active : app.recursive_search_active;
+      auto& in_search_query = app.active_pane ? app.r_search_query : app.search_query;
+      auto& in_recursive_search_query = app.active_pane ? app.r_recursive_search_query : app.recursive_search_query;
+      auto& in_search_cursor = app.active_pane ? app.r_search_cursor : app.search_cursor;
+      auto& in_search_sel_start = app.active_pane ? app.r_search_sel_start : app.search_sel_start;
+      auto& in_search_sel_end = app.active_pane ? app.r_search_sel_end : app.search_sel_end;
 
       // Window control buttons (traffic lights on the right: max | min | close)
       if (app.win_btn_x > 0) {
@@ -1195,7 +1274,7 @@ void handle_click(AppState& app, int x, int y, int button) {
       {
         int gap4 = static_cast<int>(4.0 * zf);
         int gear_w = static_cast<int>(36.0 * zf);
-        int gear_x = app.sort_btn_x + app.sort_btn_w + gap4;
+        int gear_x = in_sort_btn_x + in_sort_btn_w + gap4;
         if (x >= gear_x && x < gear_x + gear_w) {
           open_settings(app);
           draw(app);
@@ -1204,12 +1283,12 @@ void handle_click(AppState& app, int x, int y, int button) {
       }
 
       // Path bar dots menu button
-      if (app.dots_btn_w > 0 &&
-          x >= app.dots_btn_x && x < app.dots_btn_x + app.dots_btn_w &&
-          y >= app.dots_btn_y && y < app.dots_btn_y + app.dots_btn_h) {
+      if (in_dots_btn_w > 0 &&
+          x >= in_dots_btn_x && x < in_dots_btn_x + in_dots_btn_w &&
+          bar_y >= in_dots_btn_y && bar_y < in_dots_btn_y + in_dots_btn_h) {
         app.context_menu_open = true;
-        app.context_menu_x = app.dots_btn_x;
-        app.context_menu_y = app.dots_btn_y + app.dots_btn_h;
+        app.context_menu_x = in_dots_btn_x;
+        app.context_menu_y = in_dots_btn_y + in_dots_btn_h;
         app.context_menu_hover = -1; app.context_menu_hover_prev = -1; app.context_menu_sub_hover = -1;
         app.context_menu_file_idx = -5;
         app.context_menu_items = {
@@ -1248,120 +1327,136 @@ void handle_click(AppState& app, int x, int y, int button) {
       }
 
       // Folder-search button (folder + magnifying glass) → recursive search in current dir
-      if (x >= app.folder_search_btn_x && x < app.folder_search_btn_x + app.folder_search_btn_w) {
-      if (app.search_active) {
+      if (x >= in_folder_search_btn_x && x < in_folder_search_btn_x + in_folder_search_btn_w) {
+      if (in_search_active) {
         reset_search_filters(app);
-        app.search_active = false;
-        app.recursive_search_active = false;
-        app.search_query.clear();
-        app.recursive_search_query.clear();
+        in_search_active = false;
+        in_recursive_search_active = false;
+        in_search_query.clear();
+        in_recursive_search_query.clear();
         recursive_search_worker().cancel();
         reload_dir(app);
       } else {
-        app.recursive_search_active = false;
-        app.search_active = true;
-        app.search_query.clear();
-        app.recursive_search_query.clear();
+        in_recursive_search_active = false;
+        in_search_active = true;
+        in_search_query.clear();
+        in_recursive_search_query.clear();
         recursive_search_worker().cancel();
-        app.search_cursor = 0;
-        app.search_sel_start = -1;
-        app.search_sel_end = -1;
+        in_search_cursor = 0;
+        in_search_sel_start = -1;
+        in_search_sel_end = -1;
       }
-      app.path_editing = false;
+      (app.active_pane ? app.r_path_editing : app.path_editing) = false;
       draw(app);
       return;
     }
     // Search button (magnifying glass) → recursive home search
-      if (x >= app.search_btn_x && x < app.search_btn_x + app.search_btn_w) {
-      if (app.recursive_search_active) {
+      if (x >= in_search_btn_x && x < in_search_btn_x + in_search_btn_w) {
+      if (in_recursive_search_active) {
         reset_search_filters(app);
-        app.recursive_search_active = false;
-        app.search_active = false;
-        app.search_query.clear();
-        app.recursive_search_query.clear();
+        in_recursive_search_active = false;
+        in_search_active = false;
+        in_search_query.clear();
+        in_recursive_search_query.clear();
         recursive_search_worker().cancel();
         reload_dir(app);
       } else {
-        app.search_active = false;
-        app.recursive_search_active = true;
-          app.search_query.clear();
-          app.recursive_search_query.clear();
+        in_search_active = false;
+        in_recursive_search_active = true;
+          in_search_query.clear();
+          in_recursive_search_query.clear();
           recursive_search_worker().cancel();
-          app.search_cursor = 0;
-          app.search_sel_start = -1;
-          app.search_sel_end = -1;
+          in_search_cursor = 0;
+          in_search_sel_start = -1;
+          in_search_sel_end = -1;
         }
-        app.path_editing = false;
+        (app.active_pane ? app.r_path_editing : app.path_editing) = false;
         draw(app);
         return;
       }
 
-      // View-mode toggle (single swap button)
-      if (x >= app.view_btn_x && x < app.view_btn_x + app.view_btn_w) {
-        app.cur_tab().view_mode = (app.cur_tab().view_mode == ViewMode::List) ? ViewMode::Grid : ViewMode::List;
+      // View-mode toggle (cycles through List → Grid → Compact → Tree → List)
+      if (x >= in_view_btn_x && x < in_view_btn_x + in_view_btn_w) {
+        auto cur = app.cur_tab().view_mode;
+        if (cur == ViewMode::List) app.cur_tab().view_mode = ViewMode::Grid;
+        else if (cur == ViewMode::Grid) app.cur_tab().view_mode = ViewMode::Compact;
+        else if (cur == ViewMode::Compact) app.cur_tab().view_mode = ViewMode::Tree;
+        else app.cur_tab().view_mode = ViewMode::List;
         save_file_browser_settings(app);
         draw(app);
         return;
       }
-      if (x >= app.sort_btn_x && x < app.sort_btn_x + app.sort_btn_w) {
-        app.sort_menu_open = !app.sort_menu_open;
-        app.sort_menu_hover = -1;
+      if (x >= in_sort_btn_x && x < in_sort_btn_x + in_sort_btn_w) {
+        // Close sort menu in both panes, then toggle active pane only
+        bool was_open = app.active_pane ? app.r_sort_menu_open : app.sort_menu_open;
+        app.r_sort_menu_open = false;
+        app.sort_menu_open = false;
+        if (!was_open)
+          (app.active_pane ? app.r_sort_menu_open : app.sort_menu_open) = true;
+        (app.active_pane ? app.r_sort_menu_hover : app.sort_menu_hover) = -1;
         draw(app);
         return;
       }
 
       // Filter button click (only when search is active)
-      if (app.search_active || app.recursive_search_active) {
-        if (x >= app.filter_btn_x && x < app.filter_btn_x + app.filter_btn_w) {
-          app.filter_dropdown_section = (app.filter_dropdown_section > 0) ? 0 : 1;
-          app.filter_dropdown_hover = -1;
+      if (in_search_active || in_recursive_search_active) {
+        if (x >= in_filter_btn_x && x < in_filter_btn_x + in_filter_btn_w) {
+          auto& click_filter_section = app.active_pane ? app.r_filter_dropdown_section : app.filter_dropdown_section;
+          auto& click_filter_hover = app.active_pane ? app.r_filter_dropdown_hover : app.filter_dropdown_hover;
+          click_filter_section = (click_filter_section > 0) ? 0 : 1;
+          click_filter_hover = -1;
           draw(app);
           return;
         }
       }
 
       // Search bar click — set cursor position or clear
-      if (app.search_active || app.recursive_search_active) {
+      if (in_search_active || in_recursive_search_active) {
         // Clear button hit test
-        if (app.search_clear_w > 0 && x >= app.search_clear_x && x < app.search_clear_x + app.search_clear_w) {
-          app.search_query.clear();
-          app.search_cursor = 0;
-          app.search_sel_start = -1;
-          app.search_sel_end = -1;
+        if (in_search_clear_w > 0 && x >= in_search_clear_x && x < in_search_clear_x + in_search_clear_w) {
+          in_search_query.clear();
+          in_search_cursor = 0;
+          in_search_sel_start = -1;
+          in_search_sel_end = -1;
           recursive_search_worker().cancel();
           reload_dir(app);
           draw(app);
           return;
         }
         // Click in search bar area — set cursor position
-        if (x >= app.search_bar_x && x < app.search_bar_x + app.search_bar_w) {
+        if (x >= in_search_bar_x && x < in_search_bar_x + in_search_bar_w) {
           double zf = app.zoom_pct / 100.0;
           int search_icon_size = static_cast<int>(14.0 * zf);
-          int text_left = app.search_bar_x + search_icon_size + static_cast<int>(8.0 * zf);
+          int text_left = in_search_bar_x + search_icon_size + static_cast<int>(8.0 * zf);
           int click_x = x - text_left;
-          int best_pos = static_cast<int>(app.search_query.size());
+          int best_pos = static_cast<int>(in_search_query.size());
           cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
           cairo_t* cr_tmp = cairo_create(tmp);
           cairo_select_font_face(cr_tmp, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
           cairo_set_font_size(cr_tmp, 13.0 * zf);
-          for (int ci = 0; ci <= static_cast<int>(app.search_query.size()); ++ci) {
-            std::string sub = app.search_query.substr(0, static_cast<std::size_t>(ci));
+          for (int ci = 0; ci <= static_cast<int>(in_search_query.size()); ++ci) {
+            std::string sub = in_search_query.substr(0, static_cast<std::size_t>(ci));
             cairo_text_extents_t te;
             cairo_text_extents(cr_tmp, sub.c_str(), &te);
             if (te.width >= click_x) { best_pos = ci; break; }
           }
           cairo_destroy(cr_tmp);
           cairo_surface_destroy(tmp);
-          app.search_cursor = best_pos;
-          app.search_sel_start = -1;
-          app.search_sel_end = -1;
+          in_search_cursor = best_pos;
+          in_search_sel_start = -1;
+          in_search_sel_end = -1;
           draw(app);
           return;
         }
       }
 
       // Path editing click — set cursor position by character hit-test
-      if (app.path_editing) {
+      if (app.active_pane ? app.r_path_editing : app.path_editing) {
+        auto& pe_buf = app.active_pane ? app.r_path_edit_buf : app.path_edit_buf;
+        auto& pe_cursor = app.active_pane ? app.r_path_edit_cursor : app.path_edit_cursor;
+        auto& pe_sel_start = app.active_pane ? app.r_path_edit_sel_start : app.path_edit_sel_start;
+        auto& pe_sel_end = app.active_pane ? app.r_path_edit_sel_end : app.path_edit_sel_end;
+        auto& pe_dragging = app.active_pane ? app.r_path_edit_dragging : app.path_edit_dragging;
         double zf = app.zoom_pct / 100.0;
         int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
         int arrow_w = static_cast<int>(36.0 * zf);
@@ -1372,7 +1467,7 @@ void handle_click(AppState& app, int x, int y, int button) {
         int gap12 = static_cast<int>(12.0 * zf);
         int nav_origin = sidebar_w + static_cast<int>(20.0 * zf);
         int path_x_inner = nav_origin + 2 * arrow_w + gap4 + mx6 + path_pad + house_w + gap12;
-        int path_w_inner = app.search_btn_x - static_cast<int>(4.0 * zf) - path_x_inner;
+        int path_w_inner = in_search_btn_x - static_cast<int>(4.0 * zf) - path_x_inner;
         int text_x = path_x_inner;
         int field_right = path_x_inner + path_w_inner - static_cast<int>(14.0 * zf);
         if (x >= path_x_inner && x < field_right) {
@@ -1380,7 +1475,7 @@ void handle_click(AppState& app, int x, int y, int button) {
           cairo_t* cr_tmp = cairo_create(tmp);
           cairo_select_font_face(cr_tmp, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
           cairo_set_font_size(cr_tmp, 13.0 * zf);
-          const std::string& buf = app.path_edit_buf;
+          const std::string& buf = pe_buf;
           cairo_text_extents_t full_te;
           cairo_text_extents(cr_tmp, buf.c_str(), &full_te);
           int scroll_offset = 0;
@@ -1411,24 +1506,24 @@ void handle_click(AppState& app, int x, int y, int button) {
           }
           cairo_destroy(cr_tmp);
           cairo_surface_destroy(tmp);
-          app.path_edit_cursor = best_pos;
-          app.path_edit_sel_start = -1;
-          app.path_edit_sel_end = -1;
-          app.path_edit_dragging = true;
+          pe_cursor = best_pos;
+          pe_sel_start = -1;
+          pe_sel_end = -1;
+          pe_dragging = true;
           draw(app);
         } else {
-          app.path_edit_cursor = static_cast<int>(app.path_edit_buf.size());
-          app.path_edit_sel_start = -1;
-          app.path_edit_sel_end = -1;
-          app.path_edit_dragging = true;
+          pe_cursor = static_cast<int>(pe_buf.size());
+          pe_sel_start = -1;
+          pe_sel_end = -1;
+          pe_dragging = true;
           draw(app);
         }
         return;
       }
 
       // Breadcrumb click
-      for (size_t i = 0; i < app.breadcrumbs.size(); ++i) {
-        auto& seg = app.breadcrumbs[i];
+      for (size_t i = 0; i < in_breadcrumbs.size(); ++i) {
+        auto& seg = in_breadcrumbs[i];
         if (x >= seg.x && x < seg.x + seg.w) {
           navigate_to(app, seg.path);
           draw(app);
@@ -1436,8 +1531,8 @@ void handle_click(AppState& app, int x, int y, int button) {
         }
       }
       // Click on empty area in top bar → enter path editing mode
-      app.path_edit_buf = app.cur_tab().current_path;
-      app.path_editing = true;
+      (app.active_pane ? app.r_path_edit_buf : app.path_edit_buf) = app.cur_tab().current_path;
+      (app.active_pane ? app.r_path_editing : app.path_editing) = true;
       {
         double zf = app.zoom_pct / 100.0;
         int s_w = app.sidebar_expanded ? app.sidebar_width : 0;
@@ -1449,13 +1544,13 @@ void handle_click(AppState& app, int x, int y, int button) {
         int gap12 = static_cast<int>(12.0 * zf);
         int nav_origin = s_w + static_cast<int>(20.0 * zf);
         int path_x = nav_origin + 2 * arrow_w + gap4 + mx6 + path_pad + house_w + gap12;
-        int path_w = app.search_btn_x - static_cast<int>(4.0 * zf) - path_x;
+        int path_w = in_search_btn_x - static_cast<int>(4.0 * zf) - path_x;
         int text_x = path_x;
         cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
         cairo_t* cr_tmp = cairo_create(tmp);
         cairo_select_font_face(cr_tmp, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
         cairo_set_font_size(cr_tmp, 13.0 * zf);
-        const std::string& buf = app.path_edit_buf;
+        const std::string& buf = (app.active_pane ? app.r_path_edit_buf : app.path_edit_buf);
         cairo_text_extents_t full_te;
         cairo_text_extents(cr_tmp, buf.c_str(), &full_te);
         int scroll_offset = 0;
@@ -1486,11 +1581,11 @@ void handle_click(AppState& app, int x, int y, int button) {
         }
         cairo_destroy(cr_tmp);
         cairo_surface_destroy(tmp);
-        app.path_edit_cursor = best_pos;
+        (app.active_pane ? app.r_path_edit_cursor : app.path_edit_cursor) = best_pos;
       }
-      app.path_edit_sel_start = -1;
-      app.path_edit_sel_end = -1;
-      app.path_edit_dragging = true;
+      (app.active_pane ? app.r_path_edit_sel_start : app.path_edit_sel_start) = -1;
+      (app.active_pane ? app.r_path_edit_sel_end : app.path_edit_sel_end) = -1;
+      (app.active_pane ? app.r_path_edit_dragging : app.path_edit_dragging) = true;
       draw(app);
       return;
     }
@@ -1662,6 +1757,7 @@ void handle_click(AppState& app, int x, int y, int button) {
       return;
     }
 
+    // ── Content-area hit-test ──
     int idx = -1;
     if (app.cur_tab().view_mode == ViewMode::List) {
       idx = hit_test_list(app, x, y);
@@ -1669,6 +1765,17 @@ void handle_click(AppState& app, int x, int y, int button) {
       idx = hit_test_grid(app, x, y);
     } else if (app.cur_tab().view_mode == ViewMode::Computer) {
       idx = hit_test_computer(app, x, y);
+    } else if (app.cur_tab().view_mode == ViewMode::Tree) {
+      idx = hit_test_tree(app, x, y, true);
+    } else if (app.cur_tab().view_mode == ViewMode::Compact) {
+      idx = hit_test_compact(app, x, y);
+    }
+
+    if (idx == -2) {
+      // Tree view arrow toggle
+      build_tree_entries(app);
+      draw(app);
+      return;
     }
 
     if (idx >= 0) {
@@ -1799,7 +1906,14 @@ void handle_click(AppState& app, int x, int y, int button) {
   // Right click (BTN_RIGHT = 0x111)
   if (button == 0x111) {
     // Path editing right-click context menu
-    if (app.path_editing && y < app.top_bar_height) {
+    if ((app.active_pane ? app.r_path_editing : app.path_editing)) {
+      int rc_bar_y = y;
+      if (app.split_view) {
+        int content_y = app.top_bar_height + app.tab_bar_height;
+        if (y >= content_y && y < content_y + app.top_bar_height)
+          rc_bar_y = y - content_y;
+      }
+      if (rc_bar_y < app.top_bar_height) {
       app.context_menu_open = true;
       app.context_menu_x = x;
       app.context_menu_y = y;
@@ -1811,6 +1925,7 @@ void handle_click(AppState& app, int x, int y, int button) {
       };
       draw(app);
       return;
+    }
     }
 
     // Tab bar right-click context menu
@@ -1908,6 +2023,10 @@ void handle_click(AppState& app, int x, int y, int button) {
       idx = hit_test_grid(app, x, y);
     } else if (app.cur_tab().view_mode == ViewMode::Computer) {
       idx = hit_test_computer(app, x, y);
+    } else if (app.cur_tab().view_mode == ViewMode::Tree) {
+      idx = hit_test_tree(app, x, y);
+    } else if (app.cur_tab().view_mode == ViewMode::Compact) {
+      idx = hit_test_compact(app, x, y);
     }
 
     open_context_menu(app, idx, x, y);
@@ -1919,6 +2038,29 @@ void handle_click(AppState& app, int x, int y, int button) {
 void handle_pointer_move(AppState& app, int x, int y) {
   app.pointerX = static_cast<double>(x);
   app.pointerY = static_cast<double>(y);
+
+  // ── Split pane divider drag ──
+  if (app.split_view) {
+    int s_w = app.sidebar_expanded ? app.sidebar_width : 0;
+    int content_w = app.width - s_w - (app.info_panel_open ? app.info_panel_width : 0);
+    int split = app.split_divider_x;
+    if (split <= 0) split = content_w / 2;
+    int div_x = s_w + split;
+    int div_w = 4;
+    if (app.split_divider_dragging) {
+      app.split_divider_x = std::clamp(x - s_w, 100, app.width - s_w - 100 - app.info_panel_width);
+      draw(app);
+      return;
+    }
+    bool over_div = (x >= div_x && x < div_x + div_w);
+    if (over_div != app.split_divider_hover) {
+      app.split_divider_hover = over_div;
+      draw(app);
+      return;
+    }
+    // Set active pane based on pointer position (after divider checks)
+    app.active_pane = (x >= div_x + div_w) ? 1 : 0;
+  }
 
   // ── Marquee drag ──
   if (app.marquee_active) {
@@ -2314,34 +2456,66 @@ void handle_pointer_move(AppState& app, int x, int y) {
     return;
   }
 
+  // ── Per-pane position helpers ──
+  auto& pm_search_btn_x = app.active_pane ? app.r_search_btn_x : app.search_btn_x;
+  auto& pm_search_btn_w = app.active_pane ? app.r_search_btn_w : app.search_btn_w;
+  auto& pm_folder_search_btn_x = app.active_pane ? app.r_folder_search_btn_x : app.folder_search_btn_x;
+  auto& pm_folder_search_btn_w = app.active_pane ? app.r_folder_search_btn_w : app.folder_search_btn_w;
+  auto& pm_view_btn_x = app.active_pane ? app.r_view_btn_x : app.view_btn_x;
+  auto& pm_view_btn_w = app.active_pane ? app.r_view_btn_w : app.view_btn_w;
+  auto& pm_sort_btn_x = app.active_pane ? app.r_sort_btn_x : app.sort_btn_x;
+  auto& pm_sort_btn_w = app.active_pane ? app.r_sort_btn_w : app.sort_btn_w;
+  auto& pm_dots_btn_x = app.active_pane ? app.r_dots_btn_x : app.dots_btn_x;
+  auto& pm_dots_btn_y = app.active_pane ? app.r_dots_btn_y : app.dots_btn_y;
+  auto& pm_dots_btn_w = app.active_pane ? app.r_dots_btn_w : app.dots_btn_w;
+  auto& pm_dots_btn_h = app.active_pane ? app.r_dots_btn_h : app.dots_btn_h;
+  auto& pm_filter_btn_x = app.active_pane ? app.r_filter_btn_x : app.filter_btn_x;
+  auto& pm_filter_btn_w = app.active_pane ? app.r_filter_btn_w : app.filter_btn_w;
+  auto& pm_filter_dd_x = app.active_pane ? app.r_filter_dropdown_x : app.filter_dropdown_x;
+  auto& pm_filter_dd_y = app.active_pane ? app.r_filter_dropdown_y : app.filter_dropdown_y;
+  auto& pm_filter_dd_w = app.active_pane ? app.r_filter_dropdown_w : app.filter_dropdown_w;
+  auto& pm_filter_dd_h = app.active_pane ? app.r_filter_dropdown_h : app.filter_dropdown_h;
+  auto& pm_search_bar_x = app.active_pane ? app.r_search_bar_x : app.search_bar_x;
+  auto& pm_search_bar_w = app.active_pane ? app.r_search_bar_w : app.search_bar_w;
+  auto& pm_search_clear_x = app.active_pane ? app.r_search_clear_x : app.search_clear_x;
+  auto& pm_search_clear_w = app.active_pane ? app.r_search_clear_w : app.search_clear_w;
+  auto& pm_breadcrumbs = app.active_pane ? app.r_breadcrumbs : app.breadcrumbs;
+  auto& pm_breadcrumb_hover = app.active_pane ? app.r_breadcrumb_hover : app.breadcrumb_hover;
+
   // ── Top-bar button hover (arrows + view mode + sort + gear + window controls) ──
   {
+    int bar_y = y;
+    if (app.split_view) {
+      int content_y = app.top_bar_height + app.tab_bar_height;
+      if (y >= content_y && y < content_y + app.top_bar_height)
+        bar_y = y - content_y;
+    }
     double zf = app.zoom_pct / 100.0;
     int btn_w = static_cast<int>(36.0 * zf);
     int gap4 = static_cast<int>(4.0 * zf);
     int bx = (app.sidebar_expanded ? app.sidebar_width : 0) + static_cast<int>(20.0 * zf);
-    bool bh = (y < app.top_bar_height && x >= bx && x < bx + btn_w);
+    bool bh = (bar_y < app.top_bar_height && x >= bx && x < bx + btn_w);
     bx += btn_w + gap4;
-    bool fh = (y < app.top_bar_height && x >= bx && x < bx + btn_w);
+    bool fh = (bar_y < app.top_bar_height && x >= bx && x < bx + btn_w);
 
-    bool vh = (y < app.top_bar_height && x >= app.view_btn_x && x < app.view_btn_x + app.view_btn_w);
-    bool search_h = (y < app.top_bar_height && x >= app.search_btn_x && x < app.search_btn_x + app.search_btn_w);
-    bool folder_search_h = (y < app.top_bar_height && x >= app.folder_search_btn_x && x < app.folder_search_btn_x + app.folder_search_btn_w);
-    bool sh = (y < app.top_bar_height && x >= app.sort_btn_x && x < app.sort_btn_x + app.sort_btn_w);
-    bool filter_h = (app.search_active || app.recursive_search_active) &&
-                     y < app.top_bar_height && x >= app.filter_btn_x && x < app.filter_btn_x + app.filter_btn_w;
+    bool vh = (bar_y < app.top_bar_height && x >= pm_view_btn_x && x < pm_view_btn_x + pm_view_btn_w);
+    bool search_h = (bar_y < app.top_bar_height && x >= pm_search_btn_x && x < pm_search_btn_x + pm_search_btn_w);
+    bool folder_search_h = (bar_y < app.top_bar_height && x >= pm_folder_search_btn_x && x < pm_folder_search_btn_x + pm_folder_search_btn_w);
+    bool sh = (bar_y < app.top_bar_height && x >= pm_sort_btn_x && x < pm_sort_btn_x + pm_sort_btn_w);
+    bool filter_h = ((app.active_pane ? app.r_search_active : app.search_active) || (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active)) &&
+                     bar_y < app.top_bar_height && x >= pm_filter_btn_x && x < pm_filter_btn_x + pm_filter_btn_w;
 
     int gear_w = static_cast<int>(36.0 * zf);
-    int gear_x = app.sort_btn_x + app.sort_btn_w + gap4;
-    bool gh = (y < app.top_bar_height && x >= gear_x && x < gear_x + gear_w);
+    int gear_x = pm_sort_btn_x + pm_sort_btn_w + gap4;
+    bool gh = (bar_y < app.top_bar_height && x >= gear_x && x < gear_x + gear_w);
 
-    bool dh = (app.dots_btn_w > 0 &&
-               y >= app.dots_btn_y && y < app.dots_btn_y + app.dots_btn_h &&
-               x >= app.dots_btn_x && x < app.dots_btn_x + app.dots_btn_w);
+    bool dh = (pm_dots_btn_w > 0 &&
+               bar_y >= pm_dots_btn_y && bar_y < pm_dots_btn_y + pm_dots_btn_h &&
+               x >= pm_dots_btn_x && x < pm_dots_btn_x + pm_dots_btn_w);
 
     // Window control buttons (traffic lights on right: max | min | close)
     bool close_h = false, min_h = false, max_h = false;
-    if (app.win_btn_x > 0 && y < app.top_bar_height) {
+    if (app.win_btn_x > 0 && bar_y < app.top_bar_height) {
       int rel = x - app.win_btn_x;
       if (rel >= 0 && rel < 3 * app.win_btn_w) {
         int slot = rel / app.win_btn_w;
@@ -2351,23 +2525,26 @@ void handle_pointer_move(AppState& app, int x, int y) {
       }
     }
 
-    if (bh != app.arrow_back_hover || fh != app.arrow_forward_hover ||
-        vh != app.view_mode_btn_hover || search_h != app.search_btn_hover ||
-        folder_search_h != app.folder_search_btn_hover ||
-        sh != app.sort_btn_hover || gh != app.settings_btn_hover ||
-        dh != app.dots_btn_hover ||
-        filter_h != app.filter_btn_hover ||
+    if (bh != (app.active_pane ? app.r_arrow_back_hover : app.arrow_back_hover) ||
+        fh != (app.active_pane ? app.r_arrow_forward_hover : app.arrow_forward_hover) ||
+        vh != (app.active_pane ? app.r_view_mode_btn_hover : app.view_mode_btn_hover) ||
+        search_h != (app.active_pane ? app.r_search_btn_hover : app.search_btn_hover) ||
+        folder_search_h != (app.active_pane ? app.r_folder_search_btn_hover : app.folder_search_btn_hover) ||
+        sh != (app.active_pane ? app.r_sort_btn_hover : app.sort_btn_hover) ||
+        gh != (app.active_pane ? app.r_settings_btn_hover : app.settings_btn_hover) ||
+        dh != (app.active_pane ? app.r_dots_btn_hover : app.dots_btn_hover) ||
+        filter_h != (app.active_pane ? app.r_filter_btn_hover : app.filter_btn_hover) ||
         close_h != app.win_btn_close_hover || min_h != app.win_btn_min_hover ||
         max_h != app.win_btn_max_hover) {
-      app.arrow_back_hover = bh;
-      app.arrow_forward_hover = fh;
-      app.view_mode_btn_hover = vh;
-      app.search_btn_hover = search_h;
-      app.folder_search_btn_hover = folder_search_h;
-      app.sort_btn_hover = sh;
-      app.settings_btn_hover = gh;
-      app.dots_btn_hover = dh;
-      app.filter_btn_hover = filter_h;
+      (app.active_pane ? app.r_arrow_back_hover : app.arrow_back_hover) = bh;
+      (app.active_pane ? app.r_arrow_forward_hover : app.arrow_forward_hover) = fh;
+      (app.active_pane ? app.r_view_mode_btn_hover : app.view_mode_btn_hover) = vh;
+      (app.active_pane ? app.r_search_btn_hover : app.search_btn_hover) = search_h;
+      (app.active_pane ? app.r_folder_search_btn_hover : app.folder_search_btn_hover) = folder_search_h;
+      (app.active_pane ? app.r_sort_btn_hover : app.sort_btn_hover) = sh;
+      (app.active_pane ? app.r_settings_btn_hover : app.settings_btn_hover) = gh;
+      (app.active_pane ? app.r_dots_btn_hover : app.dots_btn_hover) = dh;
+      (app.active_pane ? app.r_filter_btn_hover : app.filter_btn_hover) = filter_h;
       app.win_btn_close_hover = close_h;
       app.win_btn_min_hover = min_h;
       app.win_btn_max_hover = max_h;
@@ -2377,61 +2554,76 @@ void handle_pointer_move(AppState& app, int x, int y) {
   }
 
   // ── Sort menu item hover ──
-  if (app.sort_menu_open) {
+  if ((app.active_pane ? app.r_sort_menu_open : app.sort_menu_open)) {
     int new_hover = -1;
-    if (x >= app.sort_menu_x && x < app.sort_menu_x + app.sort_menu_w &&
-        y >= app.sort_menu_y && y < app.sort_menu_y + app.sort_menu_h) {
-      int rel_y = y - app.sort_menu_y - 6;
+    if (x >= (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) && x < (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) + (app.active_pane ? app.r_sort_menu_w : app.sort_menu_w) &&
+        y >= (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) && y < (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) + (app.active_pane ? app.r_sort_menu_h : app.sort_menu_h)) {
+      int rel_y = y - (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) - 6;
       int idx = rel_y / 30;
       if (idx >= 0 && idx <= 3) new_hover = idx;
     }
-    if (new_hover != app.sort_menu_hover) {
-      app.sort_menu_hover = new_hover;
+    if (new_hover != (app.active_pane ? app.r_sort_menu_hover : app.sort_menu_hover)) {
+      (app.active_pane ? app.r_sort_menu_hover : app.sort_menu_hover) = new_hover;
       draw(app);
       return;
     }
   }
 
   // ── Filter dropdown item hover ──
-  if (app.filter_dropdown_section > 0) {
-    int new_hover = -1;
-    if (x >= app.filter_dropdown_x && x < app.filter_dropdown_x + app.filter_dropdown_w &&
-        y >= app.filter_dropdown_y && y < app.filter_dropdown_y + app.filter_dropdown_h) {
-      int rel_y = y - app.filter_dropdown_y - kFilterPD;
-      int gy = 0;
-      int glob = 0;
-      int section = app.filter_dropdown_section;
-      for (int si = 1; si <= 3; ++si) {
-        // Header
-        if (rel_y >= gy && rel_y < gy + kFilterHdrH) { new_hover = glob; break; }
-        ++glob;
-        gy += kFilterHdrH;
+  {
+    auto& pm_filter_section = app.active_pane ? app.r_filter_dropdown_section : app.filter_dropdown_section;
+    auto& pm_filter_hover = app.active_pane ? app.r_filter_dropdown_hover : app.filter_dropdown_hover;
+    if (pm_filter_section > 0) {
+      int new_hover = -1;
+      if (x >= pm_filter_dd_x && x < pm_filter_dd_x + pm_filter_dd_w &&
+          y >= pm_filter_dd_y && y < pm_filter_dd_y + pm_filter_dd_h) {
+        int rel_y = y - pm_filter_dd_y - kFilterPD;
+        int gy = 0;
+        int glob = 0;
+        int section = pm_filter_section;
+        for (int si = 1; si <= 3; ++si) {
+          // Header
+          if (rel_y >= gy && rel_y < gy + kFilterHdrH) { new_hover = glob; break; }
+          ++glob;
+          gy += kFilterHdrH;
 
-        // Items if expanded
-        if (section == si) {
-          int cnt = (si == 1) ? 13 : (si == 2) ? 7 : 5;
-          int item_y = gy;
-          for (int i = 0; i < cnt; ++i) {
-            if (rel_y >= item_y && rel_y < item_y + kFilterItemH) { new_hover = glob; break; }
-            ++glob;
-            item_y += kFilterItemH;
+          // Items if expanded
+          if (section == si) {
+            int cnt = (si == 1) ? 13 : (si == 2) ? 7 : 5;
+            int item_y = gy;
+            for (int i = 0; i < cnt; ++i) {
+              if (rel_y >= item_y && rel_y < item_y + kFilterItemH) { new_hover = glob; break; }
+              ++glob;
+              item_y += kFilterItemH;
+            }
+            gy = item_y;
+            if (new_hover >= 0) break;
           }
-          gy = item_y;
-          if (new_hover >= 0) break;
-        }
 
-        gy += kFilterSep;
+          gy += kFilterSep;
+        }
       }
-    }
-    if (new_hover != app.filter_dropdown_hover) {
-      app.filter_dropdown_hover = new_hover;
-      draw(app);
-      return;
+      if (new_hover != pm_filter_hover) {
+        pm_filter_hover = new_hover;
+        draw(app);
+        return;
+      }
     }
   }
 
   // ── Path editing drag selection ──
-  if (app.path_editing && app.path_edit_dragging && y < app.top_bar_height) {
+  if ((app.active_pane ? app.r_path_editing : app.path_editing) && (app.active_pane ? app.r_path_edit_dragging : app.path_edit_dragging)) {
+    int pm_pe_bar_y = y;
+    if (app.split_view) {
+      int content_y = app.top_bar_height + app.tab_bar_height;
+      if (y >= content_y && y < content_y + app.top_bar_height)
+        pm_pe_bar_y = y - content_y;
+    }
+    if (pm_pe_bar_y < app.top_bar_height) {
+    auto& pm_pe_buf = app.active_pane ? app.r_path_edit_buf : app.path_edit_buf;
+    auto& pm_pe_cursor = app.active_pane ? app.r_path_edit_cursor : app.path_edit_cursor;
+    auto& pm_pe_sel_start = app.active_pane ? app.r_path_edit_sel_start : app.path_edit_sel_start;
+    auto& pm_pe_sel_end = app.active_pane ? app.r_path_edit_sel_end : app.path_edit_sel_end;
     double zf = app.zoom_pct / 100.0;
     int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
     int arrow_w = static_cast<int>(36.0 * zf);
@@ -2442,13 +2634,13 @@ void handle_pointer_move(AppState& app, int x, int y) {
     int gap12 = static_cast<int>(12.0 * zf);
     int nav_origin = sidebar_w + static_cast<int>(20.0 * zf);
     int path_x_inner = nav_origin + 2 * arrow_w + gap4 + mx6 + path_pad + house_w + gap12;
-    int path_w_inner = app.search_btn_x - static_cast<int>(4.0 * zf) - path_x_inner;
+    int path_w_inner = pm_search_btn_x - static_cast<int>(4.0 * zf) - path_x_inner;
     int text_x = path_x_inner;
     cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
     cairo_t* cr_tmp = cairo_create(tmp);
     cairo_select_font_face(cr_tmp, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr_tmp, 13.0 * zf);
-    const std::string& buf = app.path_edit_buf;
+    const std::string& buf = pm_pe_buf;
     cairo_text_extents_t full_te;
     cairo_text_extents(cr_tmp, buf.c_str(), &full_te);
     int scroll_offset = 0;
@@ -2479,49 +2671,58 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
     cairo_destroy(cr_tmp);
     cairo_surface_destroy(tmp);
-    if (best_pos != app.path_edit_cursor || app.path_edit_sel_start < 0) {
-      if (app.path_edit_sel_start < 0) {
-        app.path_edit_sel_start = app.path_edit_cursor;
+    if (best_pos != pm_pe_cursor || pm_pe_sel_start < 0) {
+      if (pm_pe_sel_start < 0) {
+        pm_pe_sel_start = pm_pe_cursor;
         // Force at least 1-char highlight on the very first drag move
         // so selection appears immediately rather than waiting for a
         // character-boundary crossing.
-        if (best_pos == app.path_edit_cursor &&
-            app.path_edit_cursor < static_cast<int>(app.path_edit_buf.size())) {
-          app.path_edit_cursor = app.path_edit_cursor + 1;
+        if (best_pos == pm_pe_cursor &&
+            pm_pe_cursor < static_cast<int>(pm_pe_buf.size())) {
+          pm_pe_cursor = pm_pe_cursor + 1;
         } else {
-          app.path_edit_cursor = best_pos;
+          pm_pe_cursor = best_pos;
         }
       } else {
-        app.path_edit_cursor = best_pos;
+        pm_pe_cursor = best_pos;
       }
-      app.path_edit_sel_end = app.path_edit_cursor;
+      pm_pe_sel_end = pm_pe_cursor;
       draw(app);
     }
     return;
+    }
   }
 
   // ── Breadcrumb hover tracking ──
-  if (y < app.top_bar_height && !app.path_editing) {
-    int hover = -1;
-    for (size_t i = 0; i < app.breadcrumbs.size(); ++i) {
-      if (x >= app.breadcrumbs[i].x && x < app.breadcrumbs[i].x + app.breadcrumbs[i].w) {
-        hover = static_cast<int>(i);
-        break;
-      }
+  {
+    int pm_bc_bar_y = y;
+    if (app.split_view) {
+      int content_y = app.top_bar_height + app.tab_bar_height;
+      if (y >= content_y && y < content_y + app.top_bar_height)
+        pm_bc_bar_y = y - content_y;
     }
-    if (hover != app.breadcrumb_hover) {
-      app.breadcrumb_hover = hover;
+    if (pm_bc_bar_y < app.top_bar_height && !(app.active_pane ? app.r_path_editing : app.path_editing)) {
+      int hover = -1;
+      for (size_t i = 0; i < pm_breadcrumbs.size(); ++i) {
+        if (x >= pm_breadcrumbs[i].x && x < pm_breadcrumbs[i].x + pm_breadcrumbs[i].w) {
+          hover = static_cast<int>(i);
+          break;
+        }
+      }
+      if (hover != pm_breadcrumb_hover) {
+        pm_breadcrumb_hover = hover;
+        draw(app);
+        return;
+      }
+    } else if (pm_breadcrumb_hover >= 0) {
+      pm_breadcrumb_hover = -1;
       draw(app);
       return;
     }
-  } else if (app.breadcrumb_hover >= 0) {
-    app.breadcrumb_hover = -1;
-    draw(app);
-    return;
   }
 
   // ── Column divider hover ──
-  if (!app.path_editing && app.cur_tab().view_mode == ViewMode::List && y >= app.top_bar_height + app.tab_bar_height &&
+  if (!(app.active_pane ? app.r_path_editing : app.path_editing) && app.cur_tab().view_mode == ViewMode::List && y >= app.top_bar_height + app.tab_bar_height &&
       y < app.top_bar_height + app.tab_bar_height + app.entry_height) {
     int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
     double zf = app.zoom_pct / 100.0;
@@ -2592,6 +2793,23 @@ void handle_pointer_move(AppState& app, int x, int y) {
       new_hover = hit_test_list(app, x, y);
     } else if (app.cur_tab().view_mode == ViewMode::Grid) {
       new_hover = hit_test_grid(app, x, y);
+    } else if (app.cur_tab().view_mode == ViewMode::Tree) {
+      new_hover = hit_test_tree(app, x, y);
+      if (new_hover == -2) {
+        // Arrow hover: recalc actual entry index from y-position
+        double zf = app.zoom_pct / 100.0;
+        int entry_h = static_cast<int>(28.0 * zf);
+        int content_y = app.top_bar_height + app.tab_bar_height;
+        if (app.split_view) content_y += app.top_bar_height;
+        int rel_y = y - content_y + app.cur_tab().scroll_px;
+        int ti = rel_y / entry_h;
+        if (ti >= 0 && ti < static_cast<int>(app.cur_tab().tree_entries.size()))
+          new_hover = ti;
+        else
+          new_hover = -1;
+      }
+    } else if (app.cur_tab().view_mode == ViewMode::Compact) {
+      new_hover = hit_test_compact(app, x, y);
     } else {
       new_hover = -1;
     }
@@ -2675,6 +2893,30 @@ void handle_pointer_move(AppState& app, int x, int y) {
   draw(app);
 }
 
+static int headers_before(AppState const& app, int vi) {
+  if (!app.cur_tab().group_by_type) return 0;
+  int count = 0, prev = -1;
+  for (int i = 0; i <= vi; ++i) {
+    int r = app.cur_tab().visible_entries[i];
+    if (r < 0 || r >= static_cast<int>(app.cur_tab().entries.size())) continue;
+    int t = static_cast<int>(app.cur_tab().entries[r].type);
+    if (t != prev) { ++count; prev = t; }
+  }
+  return count;
+}
+
+static int header_h(AppState const& app) {
+  return static_cast<int>(app.entry_height * 0.55);
+}
+
+static int entry_top(AppState const& app, int vi) {
+  return vi * app.entry_height + headers_before(app, vi) * header_h(app);
+}
+
+static int entry_bottom(AppState const& app, int vi) {
+  return (vi + 1) * app.entry_height + headers_before(app, vi) * header_h(app);
+}
+
 void handle_scroll(AppState& app, int x, int, double, double dy) {
   if (app.open_with_open) {
     int total = static_cast<int>(app.open_with_apps.size());
@@ -2739,6 +2981,11 @@ void handle_scroll(AppState& app, int x, int, double, double dy) {
 
 bool handle_key(AppState& app, uint32_t, uint32_t state,
                 xkb_keysym_t sym, const char* utf8, int utf8_len) {
+  // Key release — clear repeat tracking
+  if (state == 0) {
+    if (sym == app.key_repeat_sym) app.key_repeat_sym = 0;
+    return false;
+  }
   if (state != 1) return false;
 
   auto* xkb = app.seat.xkb_state_ptr();
@@ -2748,6 +2995,14 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
                                                     XKB_STATE_MODS_EFFECTIVE) != 0;
   bool alt = xkb && xkb_state_mod_name_is_active(xkb, XKB_MOD_NAME_ALT,
                                                   XKB_STATE_MODS_EFFECTIVE) != 0;
+
+  // In split view, determine which pane has keyboard focus
+  if (app.split_view) {
+    if (app.r_path_editing || app.r_search_active || app.r_recursive_search_active)
+      app.active_pane = 1;
+    else if (app.path_editing || app.search_active || app.recursive_search_active)
+      app.active_pane = 0;
+  }
 
   // ── Cancel running operation ──
   if (sym == XKB_KEY_Escape && app.op_progress && app.op_progress->active) {
@@ -2930,8 +3185,58 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       return true;
     }
     if (sym == XKB_KEY_BackSpace && !app.rename_ui_buf.empty()) {
-      app.rename_ui_buf.pop_back();
+      if (app.rename_ui_cursor_pos > 0) {
+        app.rename_ui_buf.erase(app.rename_ui_cursor_pos - 1, 1);
+        --app.rename_ui_cursor_pos;
+      }
+      { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
+        app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
+        app.key_repeat_last_ms = app.key_repeat_start_ms; }
+      draw(app);
+      return true;
+    }
+    if (sym == XKB_KEY_Delete && !app.rename_ui_buf.empty()) {
+      if (app.rename_ui_cursor_pos < static_cast<int>(app.rename_ui_buf.size()))
+        app.rename_ui_buf.erase(app.rename_ui_cursor_pos, 1);
+      else
+        app.rename_ui_buf.pop_back();
+      if (app.rename_ui_cursor_pos > static_cast<int>(app.rename_ui_buf.size()))
+        app.rename_ui_cursor_pos = static_cast<int>(app.rename_ui_buf.size());
+      { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
+        app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
+        app.key_repeat_last_ms = app.key_repeat_start_ms; }
+      draw(app);
+      return true;
+    }
+    if (sym == XKB_KEY_Left && app.rename_ui_cursor_pos > 0) {
+      --app.rename_ui_cursor_pos;
+      { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
+        app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
+        app.key_repeat_last_ms = app.key_repeat_start_ms; }
+      draw(app);
+      return true;
+    }
+    if (sym == XKB_KEY_Right && app.rename_ui_cursor_pos < static_cast<int>(app.rename_ui_buf.size())) {
+      ++app.rename_ui_cursor_pos;
+      { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
+        app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
+        app.key_repeat_last_ms = app.key_repeat_start_ms; }
+      draw(app);
+      return true;
+    }
+    if (sym == XKB_KEY_Home) {
+      app.rename_ui_cursor_pos = 0;
+      draw(app);
+      return true;
+    }
+    if (sym == XKB_KEY_End) {
       app.rename_ui_cursor_pos = static_cast<int>(app.rename_ui_buf.size());
+      draw(app);
+      return true;
+    }
+    if (utf8 && utf8_len > 0 && utf8_len <= 4) {
+      app.rename_ui_buf.insert(app.rename_ui_cursor_pos, utf8, utf8_len);
+      app.rename_ui_cursor_pos += utf8_len;
       draw(app);
       return true;
     }
@@ -3077,15 +3382,22 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   }
 
   // ── Search bar keyboard handler (local + recursive) ──
-  if (app.search_active || app.recursive_search_active) {
+  if ((app.active_pane ? app.r_search_active : app.search_active) || (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active)) {
+    auto& k_search_active = app.active_pane ? app.r_search_active : app.search_active;
+    auto& k_recursive_search_active = app.active_pane ? app.r_recursive_search_active : app.recursive_search_active;
+    auto& k_search_query = app.active_pane ? app.r_search_query : app.search_query;
+    auto& k_recursive_search_query = app.active_pane ? app.r_recursive_search_query : app.recursive_search_query;
+    auto& k_search_cursor = app.active_pane ? app.r_search_cursor : app.search_cursor;
+    auto& k_search_sel_start = app.active_pane ? app.r_search_sel_start : app.search_sel_start;
+    auto& k_search_sel_end = app.active_pane ? app.r_search_sel_end : app.search_sel_end;
     auto trigger_search = [&] {
-      bool search_from_home = app.recursive_search_active;
-      app.recursive_search_query = app.search_query;
-      if (!app.search_query.empty()) {
+      bool search_from_home = k_recursive_search_active;
+      k_recursive_search_query = k_search_query;
+      if (!k_search_query.empty()) {
         app.cur_tab().entries.clear();
         app.cur_tab().visible_entries.clear();
         std::string root = search_from_home ? home_dir() : app.cur_tab().current_path;
-        recursive_search_worker().start_search(root, app.search_query);
+        recursive_search_worker().start_search(root, k_search_query);
       } else {
         recursive_search_worker().cancel();
       }
@@ -3093,11 +3405,11 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
 
     if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
       reset_search_filters(app);
-      bool was_recursive = app.recursive_search_active;
-      app.search_active = false;
-      app.recursive_search_active = false;
-      app.search_query.clear();
-      app.recursive_search_query.clear();
+      bool was_recursive = k_recursive_search_active;
+      k_search_active = false;
+      k_recursive_search_active = false;
+      k_search_query.clear();
+      k_recursive_search_query.clear();
       recursive_search_worker().cancel();
       if (was_recursive)
         reload_dir(app);
@@ -3108,11 +3420,11 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     }
     if (sym == XKB_KEY_Escape) {
       reset_search_filters(app);
-      bool was_recursive = app.recursive_search_active;
-      app.search_active = false;
-      app.recursive_search_active = false;
-      app.search_query.clear();
-      app.recursive_search_query.clear();
+      bool was_recursive = k_recursive_search_active;
+      k_search_active = false;
+      k_recursive_search_active = false;
+      k_search_query.clear();
+      k_recursive_search_query.clear();
       recursive_search_worker().cancel();
       if (was_recursive)
         reload_dir(app);
@@ -3122,45 +3434,45 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       return true;
     }
     if (ctrl && (sym == XKB_KEY_A || sym == XKB_KEY_a)) {
-      app.search_sel_start = 0;
-      app.search_sel_end = static_cast<int>(app.search_query.size());
-      app.search_cursor = app.search_sel_end;
+      k_search_sel_start = 0;
+      k_search_sel_end = static_cast<int>(k_search_query.size());
+      k_search_cursor = k_search_sel_end;
       draw(app);
       return true;
     }
     if (ctrl && (sym == XKB_KEY_C || sym == XKB_KEY_c)) {
-      if (app.search_sel_start >= 0 && app.search_sel_start != app.search_sel_end) {
-        int a = std::min(app.search_sel_start, app.search_sel_end);
-        int b = std::max(app.search_sel_start, app.search_sel_end);
-        app.clipboard.copy_text(app.search_query.substr(a, b - a));
+      if (k_search_sel_start >= 0 && k_search_sel_start != k_search_sel_end) {
+        int a = std::min(k_search_sel_start, k_search_sel_end);
+        int b = std::max(k_search_sel_start, k_search_sel_end);
+        app.clipboard.copy_text(k_search_query.substr(a, b - a));
       }
       return true;
     }
     if (sym == XKB_KEY_Left || sym == XKB_KEY_KP_Left) {
-      if (app.search_cursor > 0) {
+      if (k_search_cursor > 0) {
         if (shift) {
-          if (app.search_sel_start < 0) app.search_sel_start = app.search_cursor;
-          app.search_cursor--;
-          app.search_sel_end = app.search_cursor;
+          if (k_search_sel_start < 0) k_search_sel_start = k_search_cursor;
+          k_search_cursor--;
+          k_search_sel_end = k_search_cursor;
         } else {
-          app.search_cursor--;
-          app.search_sel_start = -1;
-          app.search_sel_end = -1;
+          k_search_cursor--;
+          k_search_sel_start = -1;
+          k_search_sel_end = -1;
         }
       }
       draw(app);
       return true;
     }
     if (sym == XKB_KEY_Right || sym == XKB_KEY_KP_Right) {
-      if (app.search_cursor < static_cast<int>(app.search_query.size())) {
+      if (k_search_cursor < static_cast<int>(k_search_query.size())) {
         if (shift) {
-          if (app.search_sel_start < 0) app.search_sel_start = app.search_cursor;
-          app.search_cursor++;
-          app.search_sel_end = app.search_cursor;
+          if (k_search_sel_start < 0) k_search_sel_start = k_search_cursor;
+          k_search_cursor++;
+          k_search_sel_end = k_search_cursor;
         } else {
-          app.search_cursor++;
-          app.search_sel_start = -1;
-          app.search_sel_end = -1;
+          k_search_cursor++;
+          k_search_sel_start = -1;
+          k_search_sel_end = -1;
         }
       }
       draw(app);
@@ -3168,75 +3480,75 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     }
     if (sym == XKB_KEY_Home || sym == XKB_KEY_KP_Home) {
       if (shift) {
-        if (app.search_sel_start < 0) app.search_sel_start = app.search_cursor;
-        app.search_cursor = 0;
-        app.search_sel_end = app.search_cursor;
+        if (k_search_sel_start < 0) k_search_sel_start = k_search_cursor;
+        k_search_cursor = 0;
+        k_search_sel_end = k_search_cursor;
       } else {
-        app.search_cursor = 0;
-        app.search_sel_start = -1;
-        app.search_sel_end = -1;
+        k_search_cursor = 0;
+        k_search_sel_start = -1;
+        k_search_sel_end = -1;
       }
       draw(app);
       return true;
     }
     if (sym == XKB_KEY_End || sym == XKB_KEY_KP_End) {
-      int end = static_cast<int>(app.search_query.size());
+      int end = static_cast<int>(k_search_query.size());
       if (shift) {
-        if (app.search_sel_start < 0) app.search_sel_start = app.search_cursor;
-        app.search_cursor = end;
-        app.search_sel_end = app.search_cursor;
+        if (k_search_sel_start < 0) k_search_sel_start = k_search_cursor;
+        k_search_cursor = end;
+        k_search_sel_end = k_search_cursor;
       } else {
-        app.search_cursor = end;
-        app.search_sel_start = -1;
-        app.search_sel_end = -1;
+        k_search_cursor = end;
+        k_search_sel_start = -1;
+        k_search_sel_end = -1;
       }
       draw(app);
       return true;
     }
     if (sym == XKB_KEY_BackSpace) {
-      if (app.search_sel_start >= 0 && app.search_sel_start != app.search_sel_end) {
-        int a = std::min(app.search_sel_start, app.search_sel_end);
-        int b = std::max(app.search_sel_start, app.search_sel_end);
-        app.search_query.erase(a, b - a);
-        app.search_cursor = a;
-        app.search_sel_start = -1;
-        app.search_sel_end = -1;
-      } else if (app.search_cursor > 0) {
-        app.search_query.erase(app.search_cursor - 1, 1);
-        app.search_cursor--;
+      if (k_search_sel_start >= 0 && k_search_sel_start != k_search_sel_end) {
+        int a = std::min(k_search_sel_start, k_search_sel_end);
+        int b = std::max(k_search_sel_start, k_search_sel_end);
+        k_search_query.erase(a, b - a);
+        k_search_cursor = a;
+        k_search_sel_start = -1;
+        k_search_sel_end = -1;
+      } else if (k_search_cursor > 0) {
+        k_search_query.erase(k_search_cursor - 1, 1);
+        k_search_cursor--;
       }
       trigger_search();
       draw(app);
       return true;
     }
     if (sym == XKB_KEY_Delete || sym == XKB_KEY_KP_Delete) {
-      if (app.search_sel_start >= 0 && app.search_sel_start != app.search_sel_end) {
-        int a = std::min(app.search_sel_start, app.search_sel_end);
-        int b = std::max(app.search_sel_start, app.search_sel_end);
-        app.search_query.erase(a, b - a);
-        app.search_cursor = a;
-        app.search_sel_start = -1;
-        app.search_sel_end = -1;
-      } else if (app.search_cursor < static_cast<int>(app.search_query.size())) {
-        app.search_query.erase(app.search_cursor, 1);
+      if (k_search_sel_start >= 0 && k_search_sel_start != k_search_sel_end) {
+        int a = std::min(k_search_sel_start, k_search_sel_end);
+        int b = std::max(k_search_sel_start, k_search_sel_end);
+        k_search_query.erase(a, b - a);
+        k_search_cursor = a;
+        k_search_sel_start = -1;
+        k_search_sel_end = -1;
+      } else if (k_search_cursor < static_cast<int>(k_search_query.size())) {
+        k_search_query.erase(k_search_cursor, 1);
       }
       trigger_search();
       draw(app);
       return true;
     }
     if (utf8_len > 0 && utf8[0] >= 32) {
-      if (app.search_sel_start >= 0 && app.search_sel_start != app.search_sel_end) {
-        int a = std::min(app.search_sel_start, app.search_sel_end);
-        int b = std::max(app.search_sel_start, app.search_sel_end);
-        app.search_query.erase(a, b - a);
-        app.search_cursor = a;
-        app.search_sel_start = -1;
-        app.search_sel_end = -1;
+      if (k_search_sel_start >= 0 && k_search_sel_start != k_search_sel_end) {
+        int a = std::min(k_search_sel_start, k_search_sel_end);
+        int b = std::max(k_search_sel_start, k_search_sel_end);
+        k_search_query.erase(a, b - a);
+        k_search_cursor = a;
+        k_search_sel_start = -1;
+        k_search_sel_end = -1;
       }
-      app.search_query.insert(static_cast<std::size_t>(app.search_cursor), utf8, utf8_len);
-      app.search_cursor += utf8_len;
-      if (app.search_cursor > static_cast<int>(app.search_query.size()))
-        app.search_cursor = static_cast<int>(app.search_query.size());
+      k_search_query.insert(static_cast<std::size_t>(k_search_cursor), utf8, utf8_len);
+      k_search_cursor += utf8_len;
+      if (k_search_cursor > static_cast<int>(k_search_query.size()))
+        k_search_cursor = static_cast<int>(k_search_query.size());
       trigger_search();
       draw(app);
       return true;
@@ -3245,11 +3557,17 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   }
 
   // ── Path editing keyboard handler ──
-  if (app.path_editing) {
+  if (app.active_pane ? app.r_path_editing : app.path_editing) {
+    auto& pe_editing = app.active_pane ? app.r_path_editing : app.path_editing;
+    auto& pe_buf = app.active_pane ? app.r_path_edit_buf : app.path_edit_buf;
+    auto& pe_cursor = app.active_pane ? app.r_path_edit_cursor : app.path_edit_cursor;
+    auto& pe_sel_start = app.active_pane ? app.r_path_edit_sel_start : app.path_edit_sel_start;
+    auto& pe_sel_end = app.active_pane ? app.r_path_edit_sel_end : app.path_edit_sel_end;
+    auto& pe_dragging = app.active_pane ? app.r_path_edit_dragging : app.path_edit_dragging;
     if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
-      app.path_editing = false;
-      app.path_edit_dragging = false;
-      std::string new_path = app.path_edit_buf;
+      pe_editing = false;
+      pe_dragging = false;
+      std::string new_path = pe_buf;
       if (fs::exists(new_path)) {
         navigate_to(app, new_path);
       }
@@ -3257,69 +3575,69 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       return true;
     }
     if (sym == XKB_KEY_Escape) {
-      app.path_editing = false;
-      app.path_edit_dragging = false;
-      app.path_edit_sel_start = -1;
-      app.path_edit_sel_end = -1;
+      pe_editing = false;
+      pe_dragging = false;
+      pe_sel_start = -1;
+      pe_sel_end = -1;
       draw(app);
       return true;
     }
     if (sym == XKB_KEY_BackSpace) {
-      if (app.path_edit_sel_start >= 0 && app.path_edit_sel_start != app.path_edit_sel_end) {
-        int sel_a = std::min(app.path_edit_sel_start, app.path_edit_sel_end);
-        int sel_b = std::max(app.path_edit_sel_start, app.path_edit_sel_end);
-        app.path_edit_buf.erase(sel_a, sel_b - sel_a);
-        app.path_edit_cursor = sel_a;
-      } else if (app.path_edit_cursor > 0) {
-        app.path_edit_buf.erase(app.path_edit_cursor - 1, 1);
-        app.path_edit_cursor--;
+      if (pe_sel_start >= 0 && pe_sel_start != pe_sel_end) {
+        int sel_a = std::min(pe_sel_start, pe_sel_end);
+        int sel_b = std::max(pe_sel_start, pe_sel_end);
+        pe_buf.erase(sel_a, sel_b - sel_a);
+        pe_cursor = sel_a;
+      } else if (pe_cursor > 0) {
+        pe_buf.erase(pe_cursor - 1, 1);
+        pe_cursor--;
       }
-      app.path_edit_sel_start = -1;
-      app.path_edit_sel_end = -1;
+      pe_sel_start = -1;
+      pe_sel_end = -1;
       draw(app);
       return true;
     }
     if (sym == XKB_KEY_Delete) {
-      if (app.path_edit_sel_start >= 0 && app.path_edit_sel_start != app.path_edit_sel_end) {
-        int sel_a = std::min(app.path_edit_sel_start, app.path_edit_sel_end);
-        int sel_b = std::max(app.path_edit_sel_start, app.path_edit_sel_end);
-        app.path_edit_buf.erase(sel_a, sel_b - sel_a);
-        app.path_edit_cursor = sel_a;
-      } else if (app.path_edit_cursor < static_cast<int>(app.path_edit_buf.size())) {
-        app.path_edit_buf.erase(app.path_edit_cursor, 1);
+      if (pe_sel_start >= 0 && pe_sel_start != pe_sel_end) {
+        int sel_a = std::min(pe_sel_start, pe_sel_end);
+        int sel_b = std::max(pe_sel_start, pe_sel_end);
+        pe_buf.erase(sel_a, sel_b - sel_a);
+        pe_cursor = sel_a;
+      } else if (pe_cursor < static_cast<int>(pe_buf.size())) {
+        pe_buf.erase(pe_cursor, 1);
       }
-      app.path_edit_sel_start = -1;
-      app.path_edit_sel_end = -1;
+      pe_sel_start = -1;
+      pe_sel_end = -1;
       draw(app);
       return true;
     }
     if (sym == XKB_KEY_Left) {
-      if (app.path_edit_cursor > 0) {
+      if (pe_cursor > 0) {
         if (shift) {
-          if (app.path_edit_sel_start < 0)
-            app.path_edit_sel_start = app.path_edit_cursor;
-          app.path_edit_cursor--;
-          app.path_edit_sel_end = app.path_edit_cursor;
+          if (pe_sel_start < 0)
+            pe_sel_start = pe_cursor;
+          pe_cursor--;
+          pe_sel_end = pe_cursor;
         } else {
-          app.path_edit_cursor--;
-          app.path_edit_sel_start = -1;
-          app.path_edit_sel_end = -1;
+          pe_cursor--;
+          pe_sel_start = -1;
+          pe_sel_end = -1;
         }
       }
       draw(app);
       return true;
     }
     if (sym == XKB_KEY_Right) {
-      if (app.path_edit_cursor < static_cast<int>(app.path_edit_buf.size())) {
+      if (pe_cursor < static_cast<int>(pe_buf.size())) {
         if (shift) {
-          if (app.path_edit_sel_start < 0)
-            app.path_edit_sel_start = app.path_edit_cursor;
-          app.path_edit_cursor++;
-          app.path_edit_sel_end = app.path_edit_cursor;
+          if (pe_sel_start < 0)
+            pe_sel_start = pe_cursor;
+          pe_cursor++;
+          pe_sel_end = pe_cursor;
         } else {
-          app.path_edit_cursor++;
-          app.path_edit_sel_start = -1;
-          app.path_edit_sel_end = -1;
+          pe_cursor++;
+          pe_sel_start = -1;
+          pe_sel_end = -1;
         }
       }
       draw(app);
@@ -3327,45 +3645,45 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     }
     if (sym == XKB_KEY_Home) {
       if (shift) {
-        if (app.path_edit_sel_start < 0)
-          app.path_edit_sel_start = app.path_edit_cursor;
-        app.path_edit_cursor = 0;
-        app.path_edit_sel_end = 0;
+        if (pe_sel_start < 0)
+          pe_sel_start = pe_cursor;
+        pe_cursor = 0;
+        pe_sel_end = 0;
       } else {
-        app.path_edit_cursor = 0;
-        app.path_edit_sel_start = -1;
-        app.path_edit_sel_end = -1;
+        pe_cursor = 0;
+        pe_sel_start = -1;
+        pe_sel_end = -1;
       }
       draw(app);
       return true;
     }
     if (sym == XKB_KEY_End) {
-      int end_pos = static_cast<int>(app.path_edit_buf.size());
+      int end_pos = static_cast<int>(pe_buf.size());
       if (shift) {
-        if (app.path_edit_sel_start < 0)
-          app.path_edit_sel_start = app.path_edit_cursor;
-        app.path_edit_cursor = end_pos;
-        app.path_edit_sel_end = end_pos;
+        if (pe_sel_start < 0)
+          pe_sel_start = pe_cursor;
+        pe_cursor = end_pos;
+        pe_sel_end = end_pos;
       } else {
-        app.path_edit_cursor = end_pos;
-        app.path_edit_sel_start = -1;
-        app.path_edit_sel_end = -1;
+        pe_cursor = end_pos;
+        pe_sel_start = -1;
+        pe_sel_end = -1;
       }
       draw(app);
       return true;
     }
     if (ctrl && (sym == XKB_KEY_A || sym == XKB_KEY_a)) {
-      app.path_edit_sel_start = 0;
-      app.path_edit_sel_end = static_cast<int>(app.path_edit_buf.size());
-      app.path_edit_cursor = app.path_edit_sel_end;
+      pe_sel_start = 0;
+      pe_sel_end = static_cast<int>(pe_buf.size());
+      pe_cursor = pe_sel_end;
       draw(app);
       return true;
     }
     if (ctrl && (sym == XKB_KEY_C || sym == XKB_KEY_c)) {
-      if (app.path_edit_sel_start >= 0 && app.path_edit_sel_start != app.path_edit_sel_end) {
-        int sel_a = std::min(app.path_edit_sel_start, app.path_edit_sel_end);
-        int sel_b = std::max(app.path_edit_sel_start, app.path_edit_sel_end);
-        std::string selected = app.path_edit_buf.substr(sel_a, sel_b - sel_a);
+      if (pe_sel_start >= 0 && pe_sel_start != pe_sel_end) {
+        int sel_a = std::min(pe_sel_start, pe_sel_end);
+        int sel_b = std::max(pe_sel_start, pe_sel_end);
+        std::string selected = pe_buf.substr(sel_a, sel_b - sel_a);
         if (!selected.empty()) {
           app.clipboard.copy_text(selected);
         }
@@ -3374,16 +3692,16 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       return true;
     }
     if (utf8 && utf8_len > 0 && !ctrl && !alt) {
-      if (app.path_edit_sel_start >= 0 && app.path_edit_sel_start != app.path_edit_sel_end) {
-        int sel_a = std::min(app.path_edit_sel_start, app.path_edit_sel_end);
-        int sel_b = std::max(app.path_edit_sel_start, app.path_edit_sel_end);
-        app.path_edit_buf.erase(sel_a, sel_b - sel_a);
-        app.path_edit_cursor = sel_a;
-        app.path_edit_sel_start = -1;
-        app.path_edit_sel_end = -1;
+      if (pe_sel_start >= 0 && pe_sel_start != pe_sel_end) {
+        int sel_a = std::min(pe_sel_start, pe_sel_end);
+        int sel_b = std::max(pe_sel_start, pe_sel_end);
+        pe_buf.erase(sel_a, sel_b - sel_a);
+        pe_cursor = sel_a;
+        pe_sel_start = -1;
+        pe_sel_end = -1;
       }
-      app.path_edit_buf.insert(static_cast<std::size_t>(app.path_edit_cursor), utf8, utf8_len);
-      app.path_edit_cursor += utf8_len;
+      pe_buf.insert(static_cast<std::size_t>(pe_cursor), utf8, utf8_len);
+      pe_cursor += utf8_len;
       draw(app);
       return true;
     }
@@ -3627,35 +3945,40 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   }
 
   if (ctrl && (sym == XKB_KEY_L || sym == XKB_KEY_l)) {
-    app.path_editing = true;
-    app.path_edit_buf = app.cur_tab().current_path;
-    app.path_edit_cursor = static_cast<int>(app.path_edit_buf.size());
-    app.path_edit_sel_start = -1;
-    app.path_edit_sel_end = -1;
+    auto& pe_editing = app.active_pane ? app.r_path_editing : app.path_editing;
+    auto& pe_buf = app.active_pane ? app.r_path_edit_buf : app.path_edit_buf;
+    auto& pe_cursor = app.active_pane ? app.r_path_edit_cursor : app.path_edit_cursor;
+    auto& pe_sel_start = app.active_pane ? app.r_path_edit_sel_start : app.path_edit_sel_start;
+    auto& pe_sel_end = app.active_pane ? app.r_path_edit_sel_end : app.path_edit_sel_end;
+    pe_editing = true;
+    pe_buf = app.cur_tab().current_path;
+    pe_cursor = static_cast<int>(pe_buf.size());
+    pe_sel_start = -1;
+    pe_sel_end = -1;
     draw(app);
     return true;
   }
 
   if (ctrl && (sym == XKB_KEY_F || sym == XKB_KEY_f)) {
-    if (app.search_active || app.recursive_search_active) {
+    if ((app.active_pane ? app.r_search_active : app.search_active) || (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active)) {
       reset_search_filters(app);
-      app.search_active = false;
-      app.recursive_search_active = false;
-      app.search_query.clear();
-      app.recursive_search_query.clear();
+      (app.active_pane ? app.r_search_active : app.search_active) = false;
+      (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active) = false;
+      (app.active_pane ? app.r_search_query : app.search_query).clear();
+      (app.active_pane ? app.r_recursive_search_query : app.recursive_search_query).clear();
       recursive_search_worker().cancel();
       reload_dir(app);
     } else {
-      app.search_active = true;
-      app.recursive_search_active = false;
-      app.search_query.clear();
-      app.recursive_search_query.clear();
+      (app.active_pane ? app.r_search_active : app.search_active) = true;
+      (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active) = false;
+      (app.active_pane ? app.r_search_query : app.search_query).clear();
+      (app.active_pane ? app.r_recursive_search_query : app.recursive_search_query).clear();
       recursive_search_worker().cancel();
-      app.search_cursor = 0;
-      app.search_sel_start = -1;
-      app.search_sel_end = -1;
+      (app.active_pane ? app.r_search_cursor : app.search_cursor) = 0;
+      (app.active_pane ? app.r_search_sel_start : app.search_sel_start) = -1;
+      (app.active_pane ? app.r_search_sel_end : app.search_sel_end) = -1;
     }
-    app.path_editing = false;
+    (app.active_pane ? app.r_path_editing : app.path_editing) = false;
     draw(app);
     return true;
   }
@@ -3677,6 +4000,28 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   if (ctrl && (sym == XKB_KEY_3)) {
     app.cur_tab().current_path = "computer://";
     navigate_to(app, "computer://");
+    return true;
+  }
+
+  if (ctrl && (sym == XKB_KEY_4)) {
+    app.cur_tab().view_mode = ViewMode::Tree;
+    save_file_browser_settings(app);
+    draw(app);
+    return true;
+  }
+
+  if (ctrl && (sym == XKB_KEY_5)) {
+    app.cur_tab().view_mode = ViewMode::Compact;
+    save_file_browser_settings(app);
+    draw(app);
+    return true;
+  }
+
+  if (ctrl && (sym == XKB_KEY_G || sym == XKB_KEY_g)) {
+    app.cur_tab().group_by_type = !app.cur_tab().group_by_type;
+    reload_dir(app);
+    save_file_browser_settings(app);
+    draw(app);
     return true;
   }
 
@@ -3726,8 +4071,28 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     }
   }
 
+  if (sym == XKB_KEY_F3) {
+    app.split_view = !app.split_view;
+    if (app.split_view) {
+      app.right_pane = app.cur_tab();
+      app.split_divider_x = app.width / 2;
+      app.active_pane = 0;
+    } else {
+      app.active_pane = 0;
+    }
+    draw(app);
+    return true;
+  }
+
   if (sym == XKB_KEY_F5) {
     reload_dir(app);
+    draw(app);
+    return true;
+  }
+
+  if (sym == XKB_KEY_F11) {
+    app.info_panel_open = !app.info_panel_open;
+    if (app.info_panel_open) app.info_panel_needs_update = true;
     draw(app);
     return true;
   }
@@ -3749,6 +4114,28 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       return true;
 
     case XKB_KEY_Left: {
+      // Tree view: collapse expanded directory
+      if (app.cur_tab().view_mode == ViewMode::Tree) {
+        auto& tab = app.cur_tab();
+        if (tab.selected_idx >= 0 && tab.selected_idx < static_cast<int>(tab.tree_entries.size())) {
+          auto& te = tab.tree_entries[tab.selected_idx];
+          if (te.is_dir && tab.tree_expanded.count(te.path)) {
+            tab.tree_expanded.erase(te.path);
+            build_tree_entries(app);
+          } else {
+            // Navigate to parent: find an entry with lower depth
+            for (int i = tab.selected_idx - 1; i >= 0; --i) {
+              if (tab.tree_entries[i].depth < te.depth) {
+                tab.selected_idx = i;
+                tab.multi_selected = {i};
+                break;
+              }
+            }
+          }
+        }
+        draw(app);
+        return true;
+      }
       if (app.preview_mode == AppState::PreviewMode::Space) {
         int idx = std::max(0, app.cur_tab().selected_idx - 1);
         app.cur_tab().selected_idx = idx;
@@ -3776,7 +4163,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
         if (target_line < app.cur_tab().scroll_px)
           app.cur_tab().scroll_px = target_line;
       } else {
-        int target_line = idx * app.entry_height;
+        int target_line = entry_top(app, idx);
         if (target_line < app.cur_tab().scroll_px)
           app.cur_tab().scroll_px = target_line;
       }
@@ -3785,6 +4172,22 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     }
 
     case XKB_KEY_Right: {
+      // Tree view: expand collapsed directory
+      if (app.cur_tab().view_mode == ViewMode::Tree) {
+        auto& tab = app.cur_tab();
+        if (tab.selected_idx >= 0 && tab.selected_idx < static_cast<int>(tab.tree_entries.size())) {
+          auto& te = tab.tree_entries[tab.selected_idx];
+          if (te.is_dir && !tab.tree_expanded.count(te.path)) {
+            tab.tree_expanded.insert(te.path);
+            build_tree_entries(app);
+            draw(app);
+          } else {
+            open_selected(app);
+          }
+        }
+        draw(app);
+        return true;
+      }
       if (app.preview_mode == AppState::PreviewMode::Space) {
         int idx = app.cur_tab().selected_idx + 1;
         int max_i = static_cast<int>(app.cur_tab().visible_entries.size()) - 1;
@@ -3816,7 +4219,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
           app.cur_tab().scroll_px = target_line - view_h;
       } else {
         int view_h = app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height;
-        int target_line = (idx + 1) * app.entry_height;
+        int target_line = entry_bottom(app, idx);
         if (target_line > app.cur_tab().scroll_px + view_h)
           app.cur_tab().scroll_px = target_line - view_h;
       }
@@ -3825,6 +4228,22 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     }
 
     case XKB_KEY_Up: {
+      // Tree view: navigate tree_entries
+      if (app.cur_tab().view_mode == ViewMode::Tree) {
+        auto& tab = app.cur_tab();
+        int idx = tab.selected_idx >= 0 ? tab.selected_idx : 0;
+        idx = std::max(0, idx - 1);
+        tab.selected_idx = idx;
+        tab.multi_selected = {idx};
+        int view_h = app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height;
+        double zf = app.zoom_pct / 100.0;
+        int entry_h = static_cast<int>(28.0 * zf);
+        int target_line = idx * entry_h;
+        if (target_line < tab.scroll_px)
+          tab.scroll_px = target_line;
+        draw(app);
+        return true;
+      }
       int idx = app.cur_tab().selected_idx >= 0 ? app.cur_tab().selected_idx : 0;
       if (app.cur_tab().view_mode == ViewMode::Grid) {
         int cell_size = app.grid_cell_size;
@@ -3847,7 +4266,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
         idx = std::max(0, idx - 1);
         app.cur_tab().selected_idx = idx;
         app.cur_tab().multi_selected = {idx};
-        int target_line = idx * app.entry_height;
+        int target_line = entry_top(app, idx);
         if (target_line < app.cur_tab().scroll_px)
           app.cur_tab().scroll_px = target_line;
       }
@@ -3856,6 +4275,23 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     }
 
     case XKB_KEY_Down: {
+      // Tree view: navigate tree_entries
+      if (app.cur_tab().view_mode == ViewMode::Tree) {
+        auto& tab = app.cur_tab();
+        int idx = tab.selected_idx >= 0 ? tab.selected_idx : -1;
+        int max_idx = static_cast<int>(tab.tree_entries.size()) - 1;
+        idx = std::min(max_idx, idx + 1);
+        tab.selected_idx = idx;
+        tab.multi_selected = {idx};
+        double zf = app.zoom_pct / 100.0;
+        int entry_h = static_cast<int>(28.0 * zf);
+        int target_line = (idx + 1) * entry_h;
+        int view_h = app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height;
+        if (target_line > tab.scroll_px + view_h)
+          tab.scroll_px = target_line - view_h;
+        draw(app);
+        return true;
+      }
       int idx = app.cur_tab().selected_idx >= 0 ? app.cur_tab().selected_idx : -1;
       int max_idx = static_cast<int>(app.cur_tab().visible_entries.size()) - 1;
       if (app.cur_tab().view_mode == ViewMode::Grid) {
@@ -3880,7 +4316,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
         idx = std::min(max_idx, idx + 1);
         app.cur_tab().selected_idx = idx;
         app.cur_tab().multi_selected = {idx};
-        int target_line = (idx + 1) * app.entry_height;
+        int target_line = entry_bottom(app, idx);
         int view_h = app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height;
         if (target_line > app.cur_tab().scroll_px + view_h)
           app.cur_tab().scroll_px = target_line - view_h;
@@ -4012,25 +4448,32 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   }
 
   // ── Type-to-find: printable character activates search bar ──
-  if (!app.search_active && !app.path_editing && !app.settings_open &&
+  if (!(app.active_pane ? app.r_search_active : app.search_active) && !(app.active_pane ? app.r_path_editing : app.path_editing) && !app.settings_open &&
       !app.confirm_open && !app.create_dialog_open && !app.rename_ui_open &&
       !app.properties.open && !app.open_with_open && !app.compress_dialog_open &&
       !app.batch_rename_open && !app.settings_dropdown_open &&
-      !app.sort_menu_open && !app.context_menu_open &&
+      (app.active_pane ? !app.r_sort_menu_open : !app.sort_menu_open) && !app.context_menu_open &&
       !ctrl && !alt && utf8_len == 1 && utf8[0] >= 32 && utf8[0] < 127 &&
       app.cur_tab().current_path != "computer://") {
-    app.search_active = true;
-    app.recursive_search_active = false;
-    app.search_query.clear();
-    app.recursive_search_query.clear();
-    app.search_cursor = 0;
-    app.search_sel_start = -1;
-    app.search_sel_end = -1;
-    app.search_query += utf8[0];
-    app.search_cursor = 1;
+    auto& active = app.active_pane ? app.r_search_active : app.search_active;
+    auto& recursive = app.active_pane ? app.r_recursive_search_active : app.recursive_search_active;
+    auto& query = app.active_pane ? app.r_search_query : app.search_query;
+    auto& rec_query = app.active_pane ? app.r_recursive_search_query : app.recursive_search_query;
+    auto& cursor = app.active_pane ? app.r_search_cursor : app.search_cursor;
+    auto& sel_start = app.active_pane ? app.r_search_sel_start : app.search_sel_start;
+    auto& sel_end = app.active_pane ? app.r_search_sel_end : app.search_sel_end;
+    active = true;
+    recursive = false;
+    query.clear();
+    rec_query.clear();
+    cursor = 0;
+    sel_start = -1;
+    sel_end = -1;
+    query += utf8[0];
+    cursor = 1;
     app.cur_tab().entries.clear();
     app.cur_tab().visible_entries.clear();
-    recursive_search_worker().start_search(app.cur_tab().current_path, app.search_query);
+    recursive_search_worker().start_search(app.cur_tab().current_path, query);
     draw(app);
     return true;
   }
@@ -4049,6 +4492,10 @@ void handle_pointer_release(AppState& app, int x, int y, int button) {
   (void)x;
   (void)y;
   (void)button;
+  if (app.split_divider_dragging) {
+    app.split_divider_dragging = false;
+    return;
+  }
   if (app.col_resizing >= 0) {
     app.col_resizing = -1;
     draw(app);
@@ -4063,13 +4510,18 @@ void handle_pointer_release(AppState& app, int x, int y, int button) {
     draw(app);
     return;
   }
-  if (app.path_editing && app.path_edit_dragging) {
-    app.path_edit_dragging = false;
-    if (app.path_edit_sel_start >= 0 &&
-        app.path_edit_sel_start != app.path_edit_sel_end) {
-      int sel_a = std::min(app.path_edit_sel_start, app.path_edit_sel_end);
-      int sel_b = std::max(app.path_edit_sel_start, app.path_edit_sel_end);
-      std::string sel = app.path_edit_buf.substr(sel_a, sel_b - sel_a);
+  if ((app.active_pane ? app.r_path_editing : app.path_editing) && (app.active_pane ? app.r_path_edit_dragging : app.path_edit_dragging)) {
+    auto& rel_buf = app.active_pane ? app.r_path_edit_buf : app.path_edit_buf;
+    auto& rel_cursor = app.active_pane ? app.r_path_edit_cursor : app.path_edit_cursor;
+    auto& rel_sel_start = app.active_pane ? app.r_path_edit_sel_start : app.path_edit_sel_start;
+    auto& rel_sel_end = app.active_pane ? app.r_path_edit_sel_end : app.path_edit_sel_end;
+    auto& rel_dragging = app.active_pane ? app.r_path_edit_dragging : app.path_edit_dragging;
+    rel_dragging = false;
+    if (rel_sel_start >= 0 &&
+        rel_sel_start != rel_sel_end) {
+      int sel_a = std::min(rel_sel_start, rel_sel_end);
+      int sel_b = std::max(rel_sel_start, rel_sel_end);
+      std::string sel = rel_buf.substr(sel_a, sel_b - sel_a);
       if (!sel.empty()) app.clipboard.copy_text(sel);
     }
   }

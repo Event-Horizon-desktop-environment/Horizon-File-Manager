@@ -35,6 +35,8 @@ enum class ViewMode {
   List,
   Grid,
   Computer,
+  Tree,
+  Compact,
 };
 
 enum class SortField {
@@ -126,11 +128,22 @@ struct ComputerItem {
   bool is_user_label = false;
 };
 
+// ── Tree view entry ──
+struct TreeEntry {
+  std::string name;
+  std::string path;
+  bool is_dir = false;
+  int depth = 0;
+  bool has_children = false;
+  bool is_expanded = false;
+};
+
 // ── Per-folder view mode settings ──
 struct FolderSettings {
   ViewMode view_mode = ViewMode::List;
   SortField sort_field = SortField::Name;
   bool sort_descending = false;
+  bool group_by_type = false;
 };
 
 // ── Breadcrumb segment ──
@@ -152,6 +165,7 @@ struct Tab {
   ViewMode view_mode = ViewMode::List;
   SortField sort_field = SortField::Name;
   bool sort_descending = false;
+  bool group_by_type = false;
 
   // Scroll
   int scroll_px = 0;
@@ -167,6 +181,10 @@ struct Tab {
 
   // Directory auto-refresh
   int64_t dir_mtime = 0;
+
+  // Tree view
+  std::vector<TreeEntry> tree_entries;
+  std::unordered_set<std::string> tree_expanded;
 };
 
 struct AppState {
@@ -205,8 +223,20 @@ struct AppState {
   // ── Tabs ──
   std::vector<Tab> tabs;
   int active_tab = 0;
-  Tab& cur_tab() { return tabs[active_tab]; }
-  const Tab& cur_tab() const { return tabs[active_tab]; }
+  Tab& cur_tab() {
+    return split_view && active_pane == 1 ? right_pane : tabs[active_tab];
+  }
+  const Tab& cur_tab() const {
+    return split_view && active_pane == 1 ? right_pane : tabs[active_tab];
+  }
+
+  // ── Split pane ──
+  bool split_view = false;
+  int active_pane = 0;          // 0=left, 1=right
+  int split_divider_x = 0;      // pixel position of divider (from content left edge)
+  bool split_divider_hover = false;
+  bool split_divider_dragging = false;
+  Tab right_pane;
 
   bool show_hidden = false;
 
@@ -233,33 +263,57 @@ struct AppState {
 
   // ── Search ──
   bool search_active = false;          // local folder inline filter
+  bool r_search_active = false;
   std::string search_query;
+  std::string r_search_query;
   bool recursive_search_active = false; // home directory recursive search
+  bool r_recursive_search_active = false;
   std::string recursive_search_query;
+  std::string r_recursive_search_query;
   int search_cursor = 0;
+  int r_search_cursor = 0;
   int search_sel_start = -1;
+  int r_search_sel_start = -1;
   int search_sel_end = -1;
+  int r_search_sel_end = -1;
   int search_bar_x = 0, search_bar_w = 0;
+  int r_search_bar_x = 0, r_search_bar_w = 0;
   int search_clear_x = 0, search_clear_w = 0;
+  int r_search_clear_x = 0, r_search_clear_w = 0;
   int search_btn_x = 0, search_btn_w = 0;
+  int r_search_btn_x = 0, r_search_btn_w = 0;
   bool search_btn_hover = false;
+  bool r_search_btn_hover = false;
   int folder_search_btn_x = 0, folder_search_btn_w = 0;
+  int r_folder_search_btn_x = 0, r_folder_search_btn_w = 0;
   bool folder_search_btn_hover = false;
+  bool r_folder_search_btn_hover = false;
 
   // ── Search filters ──
   int filter_type_idx = 0;   // 0=All, 1=Folder, 2=Image, 3=Audio, 4=Video, 5=Text, 6=Document, 7=Archive, 8=Code, 9=Executable, 10=Web, 11=Font, 12=Markdown
+  int r_filter_type_idx = 0;
   int filter_size_idx = 0;   // 0=Any, 1=<10K, 2=10-100K, 3=100K-1M, 4=1-10M, 5=10-100M, 6=>100M
+  int r_filter_size_idx = 0;
   int filter_date_idx = 0;   // 0=Any, 1=Today, 2=This week, 3=This month, 4=This year
+  int r_filter_date_idx = 0;
   int filter_btn_x = 0, filter_btn_w = 0;
+  int r_filter_btn_x = 0, r_filter_btn_w = 0;
   bool filter_btn_hover = false;
+  bool r_filter_btn_hover = false;
   int filter_dropdown_section = 0;  // 0=none, 1=type expanded, 2=size expanded, 3=date expanded
+  int r_filter_dropdown_section = 0;
   int filter_dropdown_hover = -1;
+  int r_filter_dropdown_hover = -1;
   int filter_dropdown_x = 0, filter_dropdown_y = 0;
   int filter_dropdown_w = 0, filter_dropdown_h = 0;
+  int r_filter_dropdown_x = 0, r_filter_dropdown_y = 0;
+  int r_filter_dropdown_w = 0, r_filter_dropdown_h = 0;
 
   // ── Path bar ──
   std::string path_edit_buf;
+  std::string r_path_edit_buf;
   bool path_editing = false;
+  bool r_path_editing = false;
 
   // ── Operations ──
   bool operation_in_progress = false;
@@ -338,7 +392,9 @@ struct AppState {
 
   // ── Path bar dots menu button hit target ──
   int dots_btn_x = 0, dots_btn_y = 0, dots_btn_w = 0, dots_btn_h = 0;
+  int r_dots_btn_x = 0, r_dots_btn_y = 0, r_dots_btn_w = 0, r_dots_btn_h = 0;
   bool dots_btn_hover = false;
+  bool r_dots_btn_hover = false;
 
   // ── Sidebar context menu actions ──
   enum class SidebarMenuAction {
@@ -357,6 +413,11 @@ struct AppState {
   std::string rename_ui_buf;
   int rename_ui_cursor_pos = 0;
   std::string rename_ui_entry_path;
+
+  // ── Key repeat (application-level, for consistent repeat across compositors) ──
+  uint32_t key_repeat_sym = 0;   // 0 = none
+  uint64_t key_repeat_start_ms = 0; // steady_clock epoch ms of initial press
+  uint64_t key_repeat_last_ms = 0;  // steady_clock epoch ms of last repeat fire
 
   // ── Batch rename dialog (Nautilus-style) ──
   struct BatchRenameEntry {
@@ -455,6 +516,23 @@ struct AppState {
   wl_surface* previewPopupSurface = nullptr;
   wl_subsurface* previewPopupSub = nullptr;
   eh::wayland::ShmBuffer previewPopupBuf{};
+
+  // ── Info panel (F11) (Phase 8) ──
+  bool info_panel_open = false;
+  int info_panel_tab = 0;       // 0=Preview, 1=Properties, 2=Terminal
+  int info_panel_width = 0;     // computed from zoom_pct
+  std::string info_panel_path;
+  std::string info_panel_name;
+  uint64_t info_panel_size = 0;
+  int64_t info_panel_modified_sec = 0;
+  bool info_panel_is_dir = false;
+  bool info_panel_needs_update = true;
+  std::string info_panel_mime_type;
+  std::string info_panel_owner;
+  std::string info_panel_group;
+  mode_t info_panel_mode = 0;
+  // Hit rects (set during draw, queried by click handler)
+  double info_panel_hit_tabs[3][4]{};
 
   // ── Background pre-cache: all image thumbnails in current folder ──
   std::vector<std::string> precache_paths;   // image file paths to pre-cache
@@ -627,16 +705,25 @@ struct AppState {
   bool col_show_date = true;
   bool col_show_type = false;  // hidden by default
   bool view_mode_btn_hover = false;
+  bool r_view_mode_btn_hover = false;
   bool settings_btn_hover = false;
+  bool r_settings_btn_hover = false;
 
   // ── Sort menu (dropdown from top-bar sort button) ──
   bool sort_menu_open = false;
+  bool r_sort_menu_open = false;
   int sort_menu_x = 0, sort_menu_y = 0;
   int sort_menu_w = 0, sort_menu_h = 0;
+  int r_sort_menu_x = 0, r_sort_menu_y = 0;
+  int r_sort_menu_w = 0, r_sort_menu_h = 0;
   int sort_menu_hover = -1;
+  int r_sort_menu_hover = -1;
   bool sort_btn_hover = false;
+  bool r_sort_btn_hover = false;
   int sort_btn_x = 0, sort_btn_w = 0;   // stored during draw for hit-testing
+  int r_sort_btn_x = 0, r_sort_btn_w = 0;
   int view_btn_x = 0, view_btn_w = 0;   // stored during draw for hit-testing
+  int r_view_btn_x = 0, r_view_btn_w = 0;
 
   // ── Window control buttons (minimize / maximize / close) ──
   bool window_controls_left = false;
@@ -662,12 +749,18 @@ struct AppState {
   // ── Top-bar arrow button hover ──
   int arrow_back_x = 0;
   int arrow_forward_x = 0;
+  int r_arrow_back_x = 0;
+  int r_arrow_forward_x = 0;
   bool arrow_back_hover = false;
+  bool r_arrow_back_hover = false;
   bool arrow_forward_hover = false;
+  bool r_arrow_forward_hover = false;
 
   // ── Breadcrumb nav bar ──
   std::vector<BreadcrumbSegment> breadcrumbs;
+  std::vector<BreadcrumbSegment> r_breadcrumbs;
   int breadcrumb_hover = -1;
+  int r_breadcrumb_hover = -1;
 
   // ── Tab bar ──
   int tab_bar_height = 44;
@@ -687,9 +780,13 @@ struct AppState {
 
   // ── Path editing ──
   int path_edit_cursor = 0;
+  int r_path_edit_cursor = 0;
   int path_edit_sel_start = -1;
+  int r_path_edit_sel_start = -1;
   int path_edit_sel_end = -1;
+  int r_path_edit_sel_end = -1;
   bool path_edit_dragging = false;
+  bool r_path_edit_dragging = false;
 
   // ── Live config values ──
   double zoom_pct = 100.0;

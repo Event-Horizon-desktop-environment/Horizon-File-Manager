@@ -13,6 +13,8 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <xkbcommon/xkbcommon.h>
+
 #include "configuration/shell_config.hpp"
 #include "services/udisks2/udisks2_drive_service.hpp"
 #include "ux/file_browser/features/drag.hpp"
@@ -465,8 +467,8 @@ static bool create_window(AppState& app) {
     pf.fd = dpy_fd;
     pf.events = POLLIN | POLLERR | POLLHUP;
 
-    bool search_pending = (app.search_active || app.recursive_search_active) && !app.search_query.empty();
-    int poll_ms = (!app.thumb_pending_queue.empty() || search_pending) ? 0 : kPollMs;
+    bool search_pending = ((app.search_active || app.recursive_search_active) && !app.search_query.empty()) || ((app.r_search_active || app.r_recursive_search_active) && !app.r_search_query.empty());
+    int poll_ms = (!app.thumb_pending_queue.empty() || search_pending || app.key_repeat_sym != 0) ? 0 : kPollMs;
     int pr = poll(&pf, 1, poll_ms);
     if (pr < 0) {
       if (errno == EINTR) {
@@ -546,6 +548,46 @@ static bool create_window(AppState& app) {
 
     // ── hover preview timer check ─────────────────────────────────
     check_hover_preview(app);
+
+    // ── application-level key repeat ───────────────────────────────
+    if (app.key_repeat_sym != 0) {
+      auto now = std::chrono::steady_clock::now();
+      uint64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
+      uint64_t elapsed = now_ms - app.key_repeat_start_ms;
+      constexpr uint64_t kRepeatDelay = 0;
+      constexpr uint64_t kRepeatRate = 100;
+      if (elapsed >= kRepeatDelay) {
+        uint64_t delta = now_ms - app.key_repeat_last_ms;
+        if (delta >= kRepeatRate) {
+          int sym = app.key_repeat_sym;
+          if (app.rename_ui_open) {
+            if (sym == XKB_KEY_BackSpace && !app.rename_ui_buf.empty()) {
+              if (app.rename_ui_cursor_pos > 0) {
+                app.rename_ui_buf.erase(app.rename_ui_cursor_pos - 1, 1);
+                --app.rename_ui_cursor_pos;
+              }
+              app.pendingRedraw = true;
+            } else if (sym == XKB_KEY_Delete && !app.rename_ui_buf.empty()) {
+              if (app.rename_ui_cursor_pos < static_cast<int>(app.rename_ui_buf.size()))
+                app.rename_ui_buf.erase(app.rename_ui_cursor_pos, 1);
+              else
+                app.rename_ui_buf.pop_back();
+              if (app.rename_ui_cursor_pos > static_cast<int>(app.rename_ui_buf.size()))
+                app.rename_ui_cursor_pos = static_cast<int>(app.rename_ui_buf.size());
+              app.pendingRedraw = true;
+            } else if (sym == XKB_KEY_Left && app.rename_ui_cursor_pos > 0) {
+              --app.rename_ui_cursor_pos;
+              app.pendingRedraw = true;
+            } else if (sym == XKB_KEY_Right && app.rename_ui_cursor_pos < static_cast<int>(app.rename_ui_buf.size())) {
+              ++app.rename_ui_cursor_pos;
+              app.pendingRedraw = true;
+            }
+          }
+          if (app.pendingRedraw)
+            app.key_repeat_last_ms = now_ms;
+        }
+      }
+    }
 
     if (app.pendingRedraw) {
       app.pendingRedraw = false;

@@ -558,15 +558,18 @@ static void reset_scroll_and_selection(AppState& app) {
 }
 
 static bool matches_filter(const AppState& app, const FileEntry& entry) {
+  int ft = app.active_pane ? app.r_filter_type_idx : app.filter_type_idx;
+  int fs = app.active_pane ? app.r_filter_size_idx : app.filter_size_idx;
+  int fd = app.active_pane ? app.r_filter_date_idx : app.filter_date_idx;
   // Type filter
-  if (app.filter_type_idx > 0) {
-    FileType target = static_cast<FileType>(app.filter_type_idx - 1);
+  if (ft > 0) {
+    FileType target = static_cast<FileType>(ft - 1);
     if (entry.type != target) return false;
   }
   // Size filter
-  if (app.filter_size_idx > 0) {
+  if (fs > 0) {
     uint64_t s = entry.size;
-    switch (app.filter_size_idx) {
+    switch (fs) {
       case 1: if (s >= 10240) return false; break;
       case 2: if (s < 10240 || s >= 102400) return false; break;
       case 3: if (s < 102400 || s >= 1048576) return false; break;
@@ -576,14 +579,14 @@ static bool matches_filter(const AppState& app, const FileEntry& entry) {
     }
   }
   // Date filter
-  if (app.filter_date_idx > 0) {
+  if (fd > 0) {
     int64_t mod = entry.modified_sec;
     if (mod == 0) return false;
     time_t now = time(nullptr);
     struct tm tm_now;
     localtime_r(&now, &tm_now);
     int64_t boundary = 0;
-    switch (app.filter_date_idx) {
+    switch (fd) {
       case 1: { // Today
         struct tm tm_today = tm_now;
         tm_today.tm_hour = 0; tm_today.tm_min = 0; tm_today.tm_sec = 0;
@@ -619,15 +622,15 @@ static bool matches_filter(const AppState& app, const FileEntry& entry) {
 }
 
 void reset_search_filters(AppState& app) {
-  app.filter_type_idx = 0;
-  app.filter_size_idx = 0;
-  app.filter_date_idx = 0;
-  app.filter_dropdown_section = 0;
-  app.filter_dropdown_hover = -1;
+  (app.active_pane ? app.r_filter_type_idx : app.filter_type_idx) = 0;
+  (app.active_pane ? app.r_filter_size_idx : app.filter_size_idx) = 0;
+  (app.active_pane ? app.r_filter_date_idx : app.filter_date_idx) = 0;
+  (app.active_pane ? app.r_filter_dropdown_section : app.filter_dropdown_section) = 0;
+  (app.active_pane ? app.r_filter_dropdown_hover : app.filter_dropdown_hover) = -1;
 }
 
 void trigger_search_on_filter_change(AppState& app) {
-  if (app.filter_type_idx == 0 && app.filter_size_idx == 0 && app.filter_date_idx == 0) {
+  if ((app.active_pane ? app.r_filter_type_idx : app.filter_type_idx) == 0 && (app.active_pane ? app.r_filter_size_idx : app.filter_size_idx) == 0 && (app.active_pane ? app.r_filter_date_idx : app.filter_date_idx) == 0) {
     // No filters — just re-apply the existing apply_filter logic
     apply_filter(app);
     return;
@@ -636,8 +639,8 @@ void trigger_search_on_filter_change(AppState& app) {
   app.cur_tab().visible_entries.clear();
   for (int i = 0; i < static_cast<int>(app.cur_tab().entries.size()); ++i) {
     if (!app.show_hidden && app.cur_tab().entries[i].is_hidden) continue;
-    if (!app.search_query.empty()) {
-      auto q = app.search_query;
+    if (!(app.active_pane ? app.r_search_query : app.search_query).empty()) {
+      auto q = (app.active_pane ? app.r_search_query : app.search_query);
       std::transform(q.begin(), q.end(), q.begin(), ::tolower);
       auto n = app.cur_tab().entries[i].name;
       std::transform(n.begin(), n.end(), n.begin(), ::tolower);
@@ -654,8 +657,8 @@ void apply_filter(AppState& app) {
   app.cur_tab().visible_entries.clear();
   for (int i = 0; i < static_cast<int>(app.cur_tab().entries.size()); ++i) {
     if (!app.show_hidden && app.cur_tab().entries[i].is_hidden) continue;
-    if (!app.search_query.empty()) {
-      auto q = app.search_query;
+    if (!(app.active_pane ? app.r_search_query : app.search_query).empty()) {
+      auto q = (app.active_pane ? app.r_search_query : app.search_query);
       std::transform(q.begin(), q.end(), q.begin(), ::tolower);
       auto n = app.cur_tab().entries[i].name;
       std::transform(n.begin(), n.end(), n.begin(), ::tolower);
@@ -785,10 +788,17 @@ void reload_dir(AppState& app) {
     [&](const FileEntry& a, const FileEntry& b) {
       if (app.folders_before_files && a.is_dir != b.is_dir) return a.is_dir;
 
+      // Group by type: primary sort key when enabled
+      if (app.cur_tab().group_by_type) {
+        int ta = static_cast<int>(a.type);
+        int tb = static_cast<int>(b.type);
+        if (ta != tb) return ta < tb;
+      }
+
       int cmp = 0;
       switch (app.cur_tab().sort_field) {
         case SortField::Name:
-          cmp = strcasecmp(a.name.c_str(), b.name.c_str());
+          cmp = strverscmp(a.name.c_str(), b.name.c_str());
           break;
         case SortField::Size:
           if (a.size < b.size) cmp = -1;
@@ -800,7 +810,7 @@ void reload_dir(AppState& app) {
           break;
         case SortField::Type:
           cmp = static_cast<int>(a.type) - static_cast<int>(b.type);
-          if (cmp == 0) cmp = strcasecmp(a.name.c_str(), b.name.c_str());
+          if (cmp == 0) cmp = strverscmp(a.name.c_str(), b.name.c_str());
           break;
       }
       return app.cur_tab().sort_descending ? cmp > 0 : cmp < 0;
@@ -809,8 +819,8 @@ void reload_dir(AppState& app) {
   app.cur_tab().visible_entries.clear();
   for (int i = 0; i < static_cast<int>(app.cur_tab().entries.size()); ++i) {
     if (!app.show_hidden && app.cur_tab().entries[i].is_hidden) continue;
-    if (!app.search_query.empty()) {
-      auto q = app.search_query;
+    if (!(app.active_pane ? app.r_search_query : app.search_query).empty()) {
+      auto q = (app.active_pane ? app.r_search_query : app.search_query);
       std::transform(q.begin(), q.end(), q.begin(), ::tolower);
       auto n = app.cur_tab().entries[i].name;
       std::transform(n.begin(), n.end(), n.begin(), ::tolower);
@@ -839,6 +849,10 @@ void reload_dir(AppState& app) {
     }
   }
   app.precache_idx = 0;
+
+  // Rebuild tree entries if in tree mode
+  if (app.cur_tab().view_mode == ViewMode::Tree)
+    build_tree_entries(app);
 }
 
 void clear_thumb_cache(AppState& app) {
@@ -898,6 +912,7 @@ void navigate_to(AppState& app, const std::string& path) {
     app.cur_tab().view_mode = it->second.view_mode;
     app.cur_tab().sort_field = it->second.sort_field;
     app.cur_tab().sort_descending = it->second.sort_descending;
+    app.cur_tab().group_by_type = it->second.group_by_type;
   } else if (app.cur_tab().view_mode == ViewMode::Computer) {
     app.cur_tab().view_mode = ViewMode::List;
   }
@@ -1149,12 +1164,25 @@ void unmount_drive(AppState& app, int sb_idx) {
 // ── open files ───────────────────────────────────────────────────
 
 void open_selected(AppState& app) {
-  if (app.cur_tab().selected_idx < 0 ||
-      app.cur_tab().selected_idx >= static_cast<int>(app.cur_tab().visible_entries.size()))
+  auto& tab = app.cur_tab();
+  // Tree view: selected_idx is into tree_entries
+  if (tab.view_mode == ViewMode::Tree) {
+    if (tab.selected_idx < 0 || tab.selected_idx >= static_cast<int>(tab.tree_entries.size())) return;
+    auto& te = tab.tree_entries[tab.selected_idx];
+    std::error_code ec;
+    if (fs::is_directory(te.path, ec)) {
+      navigate_to(app, te.path);
+    } else {
+      xdg::open_path_in_default_application(te.path);
+    }
+    return;
+  }
+  if (tab.selected_idx < 0 ||
+      tab.selected_idx >= static_cast<int>(tab.visible_entries.size()))
     return;
 
-  int real_idx = app.cur_tab().visible_entries[app.cur_tab().selected_idx];
-  if (real_idx < 0 || real_idx >= static_cast<int>(app.cur_tab().entries.size())) return;
+  int real_idx = tab.visible_entries[tab.selected_idx];
+  if (real_idx < 0 || real_idx >= static_cast<int>(tab.entries.size())) return;
 
   auto& entry = app.cur_tab().entries[real_idx];
   if (entry.is_dir) {
@@ -1551,8 +1579,8 @@ bool process_pending_thumbnails(AppState& app) {
   drain_video_thumbnails(app);
 
   // Poll recursive search results (both local and home-wide)
-  bool search_is_active = app.search_active || app.recursive_search_active;
-  if (search_is_active && !app.search_query.empty()) {
+  bool search_is_active = (app.active_pane ? app.r_search_active : app.search_active) || (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active);
+  if (search_is_active && !(app.active_pane ? app.r_search_query : app.search_query).empty()) {
     bool got_any = false;
     SearchResult sr;
     while (recursive_search_worker().poll(sr)) {
@@ -1630,7 +1658,7 @@ bool process_pending_thumbnails(AppState& app) {
     }
     if (got_any) {
       app.cur_tab().visible_entries.clear();
-      bool has_filters = app.filter_type_idx > 0 || app.filter_size_idx > 0 || app.filter_date_idx > 0;
+      bool has_filters = (app.active_pane ? app.r_filter_type_idx : app.filter_type_idx) > 0 || (app.active_pane ? app.r_filter_size_idx : app.filter_size_idx) > 0 || (app.active_pane ? app.r_filter_date_idx : app.filter_date_idx) > 0;
       for (int i = 0; i < static_cast<int>(app.cur_tab().entries.size()); ++i) {
         if (!has_filters || matches_filter(app, app.cur_tab().entries[i]))
           app.cur_tab().visible_entries.push_back(i);

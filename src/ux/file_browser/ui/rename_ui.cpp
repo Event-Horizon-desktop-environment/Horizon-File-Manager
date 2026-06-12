@@ -14,13 +14,11 @@ void draw_rename_ui(AppState& app, cairo_t* cr) {
   int dlg_h = 190;
   int dlg_x = (w - dlg_w) / 2;
   int dlg_y = (h - dlg_h) / 2;
-  double sa = app.surface_opacity_pct / 100.0;
-
   cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
   cairo_rectangle(cr, 0, 0, w, h);
   cairo_fill(cr);
 
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, sa);
+  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, 1.0);
   draw_rounded_rect(cr, dlg_x, dlg_y, dlg_w, dlg_h, 12);
   cairo_fill(cr);
 
@@ -171,7 +169,7 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
   cairo_fill(cr);
 
   // Card bg
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, sa);
+  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, 1.0);
   draw_rounded_rect(cr, dlg_x, dlg_y, dlg_w, dlg_h, 12);
   cairo_fill(cr);
 

@@ -135,6 +135,7 @@ FileBrowserSettings read_file_browser_toml() {
     fbs.sort_descending = tbl["sort_descending"].value_or(false);
     fbs.show_hidden = tbl["show_hidden"].value_or(false);
     fbs.window_controls_left = tbl["window_controls_left"].value_or(false);
+    fbs.group_by_type = tbl["group_by_type"].value_or(false);
 
     if (auto* fav = tbl["favorites"].as_array()) {
       for (auto& el : *fav) {
@@ -149,6 +150,7 @@ FileBrowserSettings read_file_browser_toml() {
           if (auto* v = t->get("view_mode")) p.view_mode = v->value_or(0);
           if (auto* v = t->get("sort_field")) p.sort_field = v->value_or(0);
           if (auto* v = t->get("sort_descending")) p.sort_descending = v->value_or(false);
+          if (auto* v = t->get("group_by_type")) p.group_by_type = v->value_or(false);
           fbs.per_folder[std::string{path.str()}] = p;
         }
       }
@@ -175,6 +177,7 @@ bool write_file_browser_toml(const FileBrowserSettings& fbs) {
     tbl.emplace("sort_descending", fbs.sort_descending);
     tbl.emplace("show_hidden", fbs.show_hidden);
     tbl.emplace("window_controls_left", fbs.window_controls_left);
+    tbl.emplace("group_by_type", fbs.group_by_type);
 
     toml::array favs;
     for (const auto& f : fbs.favorites) favs.push_back(f);
@@ -186,6 +189,7 @@ bool write_file_browser_toml(const FileBrowserSettings& fbs) {
       p.emplace("view_mode", pf.view_mode);
       p.emplace("sort_field", pf.sort_field);
       p.emplace("sort_descending", pf.sort_descending);
+      p.emplace("group_by_type", pf.group_by_type);
       pf_tbl.emplace(path, std::move(p));
     }
     tbl.emplace("per_folder", std::move(pf_tbl));

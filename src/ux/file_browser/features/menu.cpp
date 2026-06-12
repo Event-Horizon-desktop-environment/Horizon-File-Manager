@@ -173,14 +173,17 @@ void execute_context_menu_action(AppState& app, int item_idx) {
 
   // ── Path editing context menu actions ──
   if (app.context_menu_file_idx == -3) {
+    auto& m_buf = app.active_pane ? app.r_path_edit_buf : app.path_edit_buf;
+    auto& m_sel_start = app.active_pane ? app.r_path_edit_sel_start : app.path_edit_sel_start;
+    auto& m_sel_end = app.active_pane ? app.r_path_edit_sel_end : app.path_edit_sel_end;
     if (action == AppState::ContextMenuAction::Copy) {
-      if (app.path_edit_sel_start >= 0 && app.path_edit_sel_start != app.path_edit_sel_end) {
-        int sel_a = std::min(app.path_edit_sel_start, app.path_edit_sel_end);
-        int sel_b = std::max(app.path_edit_sel_start, app.path_edit_sel_end);
-        std::string sel = app.path_edit_buf.substr(sel_a, sel_b - sel_a);
+      if (m_sel_start >= 0 && m_sel_start != m_sel_end) {
+        int sel_a = std::min(m_sel_start, m_sel_end);
+        int sel_b = std::max(m_sel_start, m_sel_end);
+        std::string sel = m_buf.substr(sel_a, sel_b - sel_a);
         if (!sel.empty()) app.clipboard.copy_text(sel);
       } else {
-        app.clipboard.copy_text(app.path_edit_buf);
+        app.clipboard.copy_text(m_buf);
       }
       draw(app);
       return;
@@ -495,6 +498,7 @@ void execute_context_menu_action(AppState& app, int item_idx) {
         dup.view_mode = src_view;
         dup.sort_field = src_sort;
         dup.sort_descending = src_desc;
+        dup.group_by_type = app.tabs[app.context_menu_tab_idx].group_by_type;
         app.active_tab = idx;
         navigate_to(app, dup.current_path);
       }
@@ -1099,7 +1103,8 @@ void save_current_folder_settings(AppState& app) {
   app.per_folder_settings[app.cur_tab().current_path] = {
     app.cur_tab().view_mode,
     app.cur_tab().sort_field,
-    app.cur_tab().sort_descending
+    app.cur_tab().sort_descending,
+    app.cur_tab().group_by_type
   };
 }
 
@@ -1117,12 +1122,14 @@ void save_file_browser_settings(AppState& app) {
   fbs.view_mode = static_cast<int>(app.cur_tab().view_mode);
   fbs.sort_field = static_cast<int>(app.cur_tab().sort_field);
   fbs.sort_descending = app.cur_tab().sort_descending;
+  fbs.group_by_type = app.cur_tab().group_by_type;
   fbs.show_hidden = app.show_hidden;
   for (const auto& [path, fs] : app.per_folder_settings) {
     eh::config::FileBrowserSettings::PerFolder pf;
     pf.view_mode = static_cast<int>(fs.view_mode);
     pf.sort_field = static_cast<int>(fs.sort_field);
     pf.sort_descending = fs.sort_descending;
+    pf.group_by_type = fs.group_by_type;
     fbs.per_folder[path] = pf;
   }
   fbs.favorites = app.favorites;
@@ -1147,12 +1154,14 @@ void settings_apply(AppState& app) {
     fbs.view_mode = static_cast<int>(app.cur_tab().view_mode);
     fbs.sort_field = static_cast<int>(app.cur_tab().sort_field);
     fbs.sort_descending = app.cur_tab().sort_descending;
+    fbs.group_by_type = app.cur_tab().group_by_type;
     fbs.show_hidden = app.show_hidden;
     for (const auto& [path, fs] : app.per_folder_settings) {
       eh::config::FileBrowserSettings::PerFolder pf;
       pf.view_mode = static_cast<int>(fs.view_mode);
       pf.sort_field = static_cast<int>(fs.sort_field);
       pf.sort_descending = fs.sort_descending;
+      pf.group_by_type = fs.group_by_type;
       fbs.per_folder[path] = pf;
     }
     fbs.favorites = app.favorites;
@@ -1244,6 +1253,7 @@ void reload_settings_from_config(AppState& app) {
   app.cur_tab().view_mode = static_cast<ViewMode>(fbs.view_mode);
   app.cur_tab().sort_field = static_cast<SortField>(std::clamp(fbs.sort_field, 0, 3));
   app.cur_tab().sort_descending = fbs.sort_descending;
+  app.cur_tab().group_by_type = fbs.group_by_type;
   app.show_hidden = fbs.show_hidden;
   app.entry_height = std::max(20, static_cast<int>(36.0 * app.zoom_pct / 100.0));
   int icon_sz = static_cast<int>(48.0 * app.zoom_pct / 100.0);
@@ -1259,7 +1269,8 @@ void reload_settings_from_config(AppState& app) {
     app.per_folder_settings[path] = {
       static_cast<ViewMode>(pf.view_mode),
       static_cast<SortField>(pf.sort_field),
-      pf.sort_descending
+      pf.sort_descending,
+      pf.group_by_type
     };
   }
 }
