@@ -220,6 +220,9 @@ struct AppState {
 
   bool embedded = false;
 
+  // ── Initial navigation (set before event loop starts) ──
+  std::string initial_navigate_path;
+
   // ── Picker modes ──
   bool select_dir_mode = false;
   bool select_file_mode = false;
@@ -371,6 +374,7 @@ struct AppState {
     ExtractTo,
     Settings,
     OpenInNewTab,
+    OpenInNewWindow,
     EmptyTrash,
     OpenFileLocation,
     CloseTab,

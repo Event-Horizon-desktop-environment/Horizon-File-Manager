@@ -35,7 +35,16 @@ bool dbus_filemanager_show_items_select_uri(const std::string&) { return false; 
 
 void open_properties_for_desktop_file(const std::string&) {}
 
-void open_file_location(const std::string&, const DesktopEntryInfo*) {}
+void open_file_location(const std::string& desktop_abs_path, const DesktopEntryInfo*) {
+  // Determine the directory containing the .desktop file and open it
+  // in the file manager. We rely on the file manager being on PATH.
+  auto slash = desktop_abs_path.rfind('/');
+  if (slash != std::string::npos) {
+    std::string dir = desktop_abs_path.substr(0, slash);
+    std::string cmd = "horizon-files '" + dir + "' &";
+    std::system(cmd.c_str());
+  }
+}
 
 void clipboard_files_cut_copy(bool, const std::string&) {}
 

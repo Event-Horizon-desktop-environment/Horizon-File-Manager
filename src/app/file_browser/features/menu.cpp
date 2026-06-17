@@ -82,6 +82,8 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
       app.context_menu_items.push_back(
         AppState::menu_item(AppState::ContextMenuAction::OpenInNewTab, "Open in new tab"));
       app.context_menu_items.push_back(
+        AppState::menu_item(AppState::ContextMenuAction::OpenInNewWindow, "Open in new window"));
+      app.context_menu_items.push_back(
         AppState::menu_item(AppState::ContextMenuAction::OpenInTerminal, term_label));
       app.context_menu_items.push_back(
         AppState::menu_item(AppState::ContextMenuAction::AddToFavorites, "Add to Favorites"));
@@ -431,6 +433,33 @@ void execute_context_menu_action(AppState& app, int item_idx) {
       app.tabs[idx].current_path = target_dir;
       app.active_tab = idx;
       navigate_to(app, target_dir);
+    }
+    draw(app);
+    return;
+  }
+
+  // ── Open in new window ──
+  if (action == AppState::ContextMenuAction::OpenInNewWindow) {
+    std::string target_dir;
+    if (app.context_menu_file_idx == -2) {
+      if (app.context_menu_sidebar_idx >= 0 &&
+          app.context_menu_sidebar_idx < static_cast<int>(app.sidebar_locations.size())) {
+        target_dir = app.sidebar_locations[app.context_menu_sidebar_idx].path;
+      }
+    } else if (app.context_menu_file_idx >= 0 &&
+        app.context_menu_file_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+      int real_idx = app.cur_tab().visible_entries[app.context_menu_file_idx];
+      if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
+          app.cur_tab().entries[real_idx].is_dir) {
+        target_dir = app.cur_tab().entries[real_idx].path;
+      }
+    }
+    if (!target_dir.empty()) {
+      pid_t pid = fork();
+      if (pid == 0) {
+        execlp("horizon-files", "horizon-files", target_dir.c_str(), nullptr);
+        _exit(1);
+      }
     }
     draw(app);
     return;

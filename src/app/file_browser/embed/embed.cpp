@@ -223,9 +223,10 @@ static bool create_window(AppState& app) {
 
 // ── run standalone ───────────────────────────────────────────────
 
-[[nodiscard]] int run_standalone() {
+[[nodiscard]] int run_standalone(const std::string& initial_path) {
   g_app = std::make_unique<AppState>();
   AppState& app = *g_app;
+  app.initial_navigate_path = initial_path;
 
   if (!app.wl.connect()) {
     std::cerr << "WAYLAND_DISPLAY not set or compositor unavailable.\n";
@@ -313,7 +314,11 @@ static bool create_window(AppState& app) {
 
   // Initialize
   refresh_sidebar(app);
-  reload_dir(app);
+  if (!app.initial_navigate_path.empty()) {
+    navigate_to(app, app.initial_navigate_path);
+  } else {
+    reload_dir(app);
+  }
 
   // Wire up input event callbacks
   if (app.seat.pointer()) {

@@ -578,23 +578,44 @@ const IconEntry* IconCache::resolve_and_cache(const std::string& key, const std:
   IconEntry entry;
   int load_size = 256;
 
-  for (const auto& theme_dir : d_->searchDirs) {
-    ICON_DBG("  trying dir: %s\n", theme_dir.c_str());
-    auto path = find_icon_file(theme_dir, icon_name, load_size);
-    if (!path.empty()) {
-      ICON_DBG("  found file: %s\n", path.c_str());
+  // If icon_name is an absolute path to an existing file, load it directly
+  if (!icon_name.empty() && icon_name[0] == '/') {
+    if (fs::exists(icon_name) && !fs::is_directory(icon_name)) {
+      ICON_DBG("  loading absolute path: %s\n", icon_name.c_str());
       cairo_surface_t* surf = nullptr;
-      if (path.ends_with(".svg")) {
-        surf = load_svg(path, load_size);
-      } else {
-        surf = load_png(path, load_size);
-      }
+      if (icon_name.ends_with(".svg"))
+        surf = load_svg(icon_name, load_size);
+      else
+        surf = load_png(icon_name, load_size);
       if (surf) {
         entry.surface = surf;
         entry.width = cairo_image_surface_get_width(surf);
         entry.height = cairo_image_surface_get_height(surf);
         entry.bytes = static_cast<std::size_t>(entry.width) * entry.height * 4;
-        break;
+      }
+    }
+  }
+
+  // Theme lookup fallback
+  if (!entry.surface) {
+    for (const auto& theme_dir : d_->searchDirs) {
+      ICON_DBG("  trying dir: %s\n", theme_dir.c_str());
+      auto path = find_icon_file(theme_dir, icon_name, load_size);
+      if (!path.empty()) {
+        ICON_DBG("  found file: %s\n", path.c_str());
+        cairo_surface_t* surf = nullptr;
+        if (path.ends_with(".svg")) {
+          surf = load_svg(path, load_size);
+        } else {
+          surf = load_png(path, load_size);
+        }
+        if (surf) {
+          entry.surface = surf;
+          entry.width = cairo_image_surface_get_width(surf);
+          entry.height = cairo_image_surface_get_height(surf);
+          entry.bytes = static_cast<std::size_t>(entry.width) * entry.height * 4;
+          break;
+        }
       }
     }
   }
