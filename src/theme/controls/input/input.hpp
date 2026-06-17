@@ -10,6 +10,7 @@
 #include <cairo/cairo.h>
 #include <pango/pangocairo.h>
 
+#include "theme/core/context.hpp"
 #include "theme/core/focus_ring.hpp"
 #include "theme/core/glyph.hpp"
 #include "theme/core/label.hpp"
@@ -57,7 +58,7 @@ public:
   }
 
   void paint(cairo_t* cr) const;
-  void paint(cairo_t* cr, uint64_t nowMs);
+  void paint(cairo_t* cr, const ThemeContext& ctx = {});
 
 private:
   void drawFilled(cairo_t* cr, float* outCX) const;
@@ -88,10 +89,10 @@ private:
 };
 
 void Input::paint(cairo_t* cr) const {
-  const_cast<Input*>(this)->paint(cr, 0);
+  const_cast<Input*>(this)->paint(cr, {});
 }
 
-void Input::paint(cairo_t* cr, uint64_t nowMs) {
+void Input::paint(cairo_t* cr, const ThemeContext& ctx) {
   if (w_ <= 0 || h_ <= 0) return;
 
   const float inputH = kHeight;
@@ -113,7 +114,7 @@ void Input::paint(cairo_t* cr, uint64_t nowMs) {
   focusRing_.setColor(invalid_ ? 0.91f : accentR_, invalid_ ? 0.42f : accentG_, invalid_ ? 0.35f : accentB_);
   const float fr = variant_ == Variant::Outlined ? 4.0f : 4.0f;
   focusRing_.setRadius(fr);
-  focusRing_.paint(cr, x_, iy, w_, inputH);
+  focusRing_.paint(cr, x_, iy, w_, inputH, ctx);
 }
 
 void Input::drawFilled(cairo_t* cr, float* outCX) const {

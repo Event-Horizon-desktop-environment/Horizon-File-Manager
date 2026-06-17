@@ -2,6 +2,8 @@
 
 #include <cstdint>
 
+#include "theme/core/context.hpp"
+
 namespace m3 {
 
 // Flexible empty space for layout. Occupies available space in Flex containers.
@@ -20,7 +22,7 @@ public:
   [[nodiscard]] float minWidth() const noexcept { return minW_; }
   [[nodiscard]] float minHeight() const noexcept { return minH_; }
 
-  void paint(cairo_t*) const {}
+  void paint(cairo_t*, const ThemeContext& = {}) const {}
 
 private:
   float minW_ = 0.0f, minH_ = 0.0f;

@@ -11,6 +11,7 @@
 #include <pango/pangocairo.h>
 
 #include "theme/core/primitives/box.hpp"
+#include "theme/core/context.hpp"
 #include "theme/core/focus_ring.hpp"
 #include "theme/core/glyph.hpp"
 #include "theme/core/label.hpp"
@@ -133,7 +134,7 @@ public:
   void setOnRelease(std::function<void()> cb) { onRelease_ = std::move(cb); }
 
   // --- Rendering ---
-  void paint(cairo_t* cr, uint64_t nowMs = 0) {
+  void paint(cairo_t* cr, const ThemeContext& ctx = {}) {
     if (w_ <= 0.0f || h_ <= 0.0f) return;
 
     if (pointerEnabled_)
@@ -143,20 +144,20 @@ public:
     stateLayer_.setRadius(radius());
     stateLayer_.setHovered(hovered_);
     stateLayer_.setPressed(pressed_);
-    stateLayer_.tick(nowMs);
+    stateLayer_.tick(ctx.now_ms);
 
     resolveColors();
-    drawContainer(cr);
-    stateLayer_.paint(cr, nowMs);
-    drawContent(cr);
-    drawFocusRing(cr);
+    drawContainer(cr, ctx);
+    stateLayer_.paint(cr, ctx);
+    drawContent(cr, ctx);
+    drawFocusRing(cr, ctx);
   }
 
   void paint(cairo_t* cr) const {
     // Non-animated paint — uses current state directly.
     if (w_ <= 0.0f || h_ <= 0.0f) return;
 
-    const_cast<Button*>(this)->paint(cr, 0);
+    const_cast<Button*>(this)->paint(cr, {});
   }
 
 private:
@@ -188,7 +189,7 @@ private:
     // (To be replaced with m3::Palette::colorForRole() in Sprint 5.)
   }
 
-  void drawContainer(cairo_t* cr) {
+  void drawContainer(cairo_t* cr, const ThemeContext& ctx) {
     const float r = radius();
     const float alpha = enabled_ ? 1.0f : 0.12f;
 
@@ -239,7 +240,7 @@ private:
     container.setRadius(r);
     container.setGeometry(x_, y_, w_, h_);
     container.setGlassy(true);
-    container.paint(cr);
+    container.paint(cr, ctx);
 
     // Outline
     if (style_ == Style::Outlined) {
@@ -272,7 +273,7 @@ private:
     stateLayer_.setColor(fgR, fgG, fgB);
   }
 
-  void drawContent(cairo_t* cr) {
+  void drawContent(cairo_t* cr, const ThemeContext& ctx) {
     const float fgA = enabled_ ? 1.0f : 0.38f;
     const bool hasGlyph = !glyph_.glyph().empty();
     const bool hasLabel = !label_.text().empty();
@@ -290,53 +291,53 @@ private:
 
       if (hasLabel) {
         float iw = 0, ih = 0;
-        glyph_.measureExtents(iw, ih);
+        glyph_.measureExtents(iw, ih, ctx);
         const float gap = 6.0f;
 
         label_.setFontSize(fontForSize());
         float lw = 0, lh = 0;
-        label_.measureExtents(lw, lh);
+        label_.measureExtents(lw, lh, ctx);
 
         const float totalW = iw + gap + lw;
         const float baseX = std::round((w_ - totalW) * 0.5f);
         const float iy = std::round((h_ - ih) * 0.5f);
         const float ly = std::round((h_ - lh) * 0.5f);
 
-        glyph_.paintAt(cr, baseX, iy);
+        glyph_.paintAt(cr, baseX, iy, ctx);
         label_.setColor(resolvedFgR_, resolvedFgG_, resolvedFgB_, fgA);
-        label_.paintAt(cr, baseX + iw + gap, ly);
+        label_.paintAt(cr, baseX + iw + gap, ly, ctx);
       } else {
         float iw = 0, ih = 0;
-        glyph_.measureExtents(iw, ih);
+        glyph_.measureExtents(iw, ih, ctx);
         const float gx = std::round((w_ - iw) * 0.5f);
         const float gy = std::round((h_ - ih) * 0.5f);
-        glyph_.paintAt(cr, gx, gy);
+        glyph_.paintAt(cr, gx, gy, ctx);
       }
     } else if (hasLabel) {
       label_.setFontSize(fontForSize());
       label_.setColor(resolvedFgR_, resolvedFgG_, resolvedFgB_, fgA);
 
       float lw = 0, lh = 0;
-      label_.measureExtents(lw, lh);
+      label_.measureExtents(lw, lh, ctx);
       const float lx = std::round((w_ - lw) * 0.5f);
       const float ly = std::round((h_ - lh) * 0.5f);
       label_.setColor(0, 0, 0, fgA * 0.35f);
-      label_.paintAt(cr, lx + 1.0f, ly + 1.0f);
+      label_.paintAt(cr, lx + 1.0f, ly + 1.0f, ctx);
       label_.setColor(resolvedFgR_, resolvedFgG_, resolvedFgB_, fgA);
-      label_.paintAt(cr, lx, ly);
+      label_.paintAt(cr, lx, ly, ctx);
     }
 
     cairo_restore(cr);
   }
 
-  void drawFocusRing(cairo_t* cr) {
+  void drawFocusRing(cairo_t* cr, const ThemeContext& ctx) {
     if (!focused_) return;
     focusRing_.setFocused(true);
     focusRing_.setColor(outlineR_ ? outlineR_ : 0.6f,
                          outlineG_ ? outlineG_ : 0.6f,
                          outlineB_ ? outlineB_ : 0.6f);
     focusRing_.setRadius(radius());
-    focusRing_.paint(cr, x_, y_, w_, h_);
+    focusRing_.paint(cr, x_, y_, w_, h_, ctx);
   }
 
   // State

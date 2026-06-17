@@ -10,6 +10,7 @@
 #include <cairo/cairo.h>
 
 #include "theme/core/animation.hpp"
+#include "theme/core/context.hpp"
 #include "theme/core/focus_ring.hpp"
 #include "theme/core/glyph.hpp"
 #include "theme/core/label.hpp"
@@ -93,7 +94,7 @@ public:
     return true;
   }
 
-  void paint(cairo_t* cr, uint64_t nowMs = 0) {
+  void paint(cairo_t* cr, const ThemeContext& ctx = {}) {
     if (w_ <= 0 || h_ <= 0) return;
 
     const float r = 8.0f;          // corner.small
@@ -104,7 +105,7 @@ public:
     const float alpha = enabled_ ? 1.0f : 0.38f;
 
     // ---- Resolve colours from variant ----
-    const float selectT = variant_ == Variant::Filter ? selectTween_.value(nowMs) : 0.0f;
+    const float selectT = variant_ == Variant::Filter ? selectTween_.value(ctx.now_ms) : 0.0f;
 
     float bgR, bgG, bgB, bgA;
     float fgR, fgG, fgB;
@@ -154,7 +155,7 @@ public:
       bgBox.setRadius(r);
       bgBox.setGeometry(x_, y_, w_, h_);
       bgBox.setGlassy(true);
-      bgBox.paint(cr);
+      bgBox.paint(cr, ctx);
     }
 
     cairo_translate(cr, x_, y_);
@@ -180,15 +181,15 @@ public:
     if (!leadingGlyph_.glyph().empty()) {
       leadingGlyph_.setSize(iconSize);
       leadingGlyph_.setColor(fgR, fgG, fgB, alpha * 0.78f);
-      leadingGlyph_.paintAt(cr, cx, cy - iconSize * 0.5f);
+      leadingGlyph_.paintAt(cr, cx, cy - iconSize * 0.5f, ctx);
       cx += iconSize + iconPad;
     }
 
     // Label
     float lw = 0, lh = 0;
-    label_.measureExtents(lw, lh);
+    label_.measureExtents(lw, lh, ctx);
     label_.setColor(fgR, fgG, fgB, alpha);
-    label_.paintAt(cr, cx, cy - lh * 0.5f);
+    label_.paintAt(cr, cx, cy - lh * 0.5f, ctx);
     cx += lw;
 
     // Trailing icon
@@ -196,7 +197,7 @@ public:
       cx += iconPad;
       trailingGlyph_.setSize(iconSize);
       trailingGlyph_.setColor(fgR, fgG, fgB, alpha * 0.78f);
-      trailingGlyph_.paintAt(cr, cx, cy - iconSize * 0.5f);
+      trailingGlyph_.paintAt(cr, cx, cy - iconSize * 0.5f, ctx);
       cx += iconSize;
     }
 
@@ -205,7 +206,7 @@ public:
       cx += iconPad;
       closeGlyph_.setSize(closeSize);
       closeGlyph_.setColor(fgR, fgG, fgB, alpha * 0.78f);
-      closeGlyph_.paintAt(cr, cx, cy - closeSize * 0.5f);
+      closeGlyph_.paintAt(cr, cx, cy - closeSize * 0.5f, ctx);
     }
 
     cairo_restore(cr);
@@ -217,18 +218,18 @@ public:
     stateLayer_.setHovered(hovered_);
     stateLayer_.setPressed(pressed_);
     stateLayer_.setFocused(focused_);
-    stateLayer_.tick(nowMs);
-    stateLayer_.paint(cr, nowMs);
+    stateLayer_.tick(ctx.now_ms);
+    stateLayer_.paint(cr, ctx);
 
     // Focus ring
     focusRing_.setFocused(focused_);
     focusRing_.setColor(outlineR_, outlineG_, outlineB_);
     focusRing_.setRadius(r);
-    focusRing_.paint(cr, x_, y_, w_, h_);
+    focusRing_.paint(cr, x_, y_, w_, h_, ctx);
   }
 
   void paint(cairo_t* cr) const {
-    const_cast<Chip*>(this)->paint(cr, 0);
+    const_cast<Chip*>(this)->paint(cr, {});
   }
 
 private:

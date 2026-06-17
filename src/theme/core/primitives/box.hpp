@@ -5,6 +5,8 @@
 
 #include <cairo/cairo.h>
 
+#include "theme/core/context.hpp"
+
 namespace m3 {
 
 // Colored rounded rectangle.
@@ -22,7 +24,7 @@ public:
   [[nodiscard]] float width() const noexcept { return w_; }
   [[nodiscard]] float height() const noexcept { return h_; }
 
-  void paint(cairo_t* cr) const {
+  void paint(cairo_t* cr, const ThemeContext& ctx) const {
     if (w_ <= 0 || h_ <= 0 || ca_ <= 0) return;
 
     cairo_save(cr);
@@ -45,7 +47,7 @@ public:
 
     if (glassy_) {
       const double op = ca_;
-      const double refH = 36.0;
+      const double refH = 36.0 * ctx.effective_scale();
       const double s = std::max(0.6, std::min(1.6, static_cast<double>(h_) / refH));
 
       auto build_path = [&](double ix, double iy, double iw, double ih, double ir) {

@@ -4,6 +4,8 @@
 
 #include <cairo/cairo.h>
 
+#include "theme/core/context.hpp"
+
 namespace m3 {
 
 // Horizontal or vertical divider line.
@@ -19,7 +21,7 @@ public:
   void setLength(float l) { length_ = l; }
   void setGeometry(float x, float y, float w, float h) { x_ = x; y_ = y; w_ = w; h_ = h; }
 
-  void paint(cairo_t* cr) const {
+  void paint(cairo_t* cr, const ThemeContext& = {}) const {
     if (ca_ <= 0) return;
 
     cairo_save(cr);

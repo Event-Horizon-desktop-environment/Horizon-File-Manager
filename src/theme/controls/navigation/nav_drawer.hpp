@@ -10,6 +10,7 @@
 
 #include <cairo/cairo.h>
 
+#include "theme/core/context.hpp"
 #include "theme/core/primitives/state_layer.hpp"
 
 namespace m3 {
@@ -60,7 +61,7 @@ public:
 
   bool handlePointerDown(float, float) { return false; }
 
-  void paint(cairo_t* cr) {
+  void paint(cairo_t* cr, const ThemeContext& ctx = {}) {
     if (!open_ || sw_ <= 0) return;
 
     drawerW_ = std::min(drawerW_, sw_ * 0.85f);

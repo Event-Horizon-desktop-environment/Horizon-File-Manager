@@ -259,7 +259,7 @@ struct AppState {
   double rubber_x0 = 0, rubber_y0 = 0;
 
   // ── Sidebar ──
-  double sidebar_scale = 1.0;          // < 1.0 when items don't fit vertically
+  int sidebar_content_h = 0;           // total content height for scroll clamping
   std::vector<SidebarLocation> sidebar_locations;
   int sidebar_hover_idx = -1;
   int sidebar_mount_hover_idx = -1;    // sidebar item index whose mount indicator is hovered

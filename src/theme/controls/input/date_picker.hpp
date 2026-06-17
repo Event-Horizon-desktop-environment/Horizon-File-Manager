@@ -9,6 +9,7 @@
 
 #include <cairo/cairo.h>
 
+#include "theme/core/context.hpp"
 #include "theme/core/primitives/state_layer.hpp"
 
 namespace m3 {
@@ -32,7 +33,7 @@ public:
   [[nodiscard]] float width() const noexcept { return w_; }
   [[nodiscard]] float height() const noexcept { return h_; }
 
-  void paint(cairo_t* cr) {
+  void paint(cairo_t* cr, const ThemeContext& ctx = {}) {
     if (w_ <= 0 || h_ <= 0) return;
 
     const float pad = 16.0f;

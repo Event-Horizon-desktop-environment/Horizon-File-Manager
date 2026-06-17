@@ -8,6 +8,8 @@
 #include <cairo/cairo.h>
 #include <pango/pangocairo.h>
 
+#include "theme/core/context.hpp"
+
 namespace m3 {
 
 // Material Symbols Rounded icon glyph.
@@ -24,11 +26,11 @@ public:
   [[nodiscard]] float size() const noexcept { return size_; }
 
   // Measure icon pixel extent.
-  void measureExtents(float& outW, float& outH) const {
+  void measureExtents(float& outW, float& outH, const ThemeContext& ctx = {}) const {
     if (glyph_.empty()) { outW = 0; outH = 0; return; }
     auto* surface = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
     auto* cr = cairo_create(surface);
-    applyLayout(cr, [&](cairo_t*, PangoLayout* layout) {
+    applyLayout(cr, ctx, [&](cairo_t*, PangoLayout* layout) {
       int pw, ph;
       pango_layout_get_pixel_size(layout, &pw, &ph);
       outW = static_cast<float>(pw);
@@ -38,33 +40,33 @@ public:
     cairo_surface_destroy(surface);
   }
 
-  void paint(cairo_t* cr) const {
+  void paint(cairo_t* cr, const ThemeContext& ctx) const {
     if (glyph_.empty()) return;
-    applyLayout(cr, [&](cairo_t* ctx, PangoLayout* layout) {
-      cairo_set_source_rgba(ctx, cr_, cg_, cb_, ca_);
-      pango_cairo_show_layout(ctx, layout);
+    applyLayout(cr, ctx, [&](cairo_t* cr2, PangoLayout* layout) {
+      cairo_set_source_rgba(cr2, cr_, cg_, cb_, ca_);
+      pango_cairo_show_layout(cr2, layout);
     });
   }
 
-  void paintAt(cairo_t* cr, float px, float py) const {
+  void paintAt(cairo_t* cr, float px, float py, const ThemeContext& ctx = {}) const {
     if (glyph_.empty()) return;
     cairo_save(cr);
     cairo_translate(cr, px, py);
-    applyLayout(cr, [&](cairo_t* ctx, PangoLayout* layout) {
-      cairo_set_source_rgba(ctx, cr_, cg_, cb_, ca_);
-      pango_cairo_show_layout(ctx, layout);
+    applyLayout(cr, ctx, [&](cairo_t* cr2, PangoLayout* layout) {
+      cairo_set_source_rgba(cr2, cr_, cg_, cb_, ca_);
+      pango_cairo_show_layout(cr2, layout);
     });
     cairo_restore(cr);
   }
 
 private:
   template <typename Fn>
-  void applyLayout(cairo_t* cr, Fn&& fn) const {
+  void applyLayout(cairo_t* cr, const ThemeContext& ctx, Fn&& fn) const {
     auto* layout = pango_cairo_create_layout(cr);
     auto* desc = pango_font_description_new();
     pango_font_description_set_family(desc, "Material Symbols Rounded");
     pango_font_description_set_weight(desc, PANGO_WEIGHT_NORMAL);
-    pango_font_description_set_absolute_size(desc, static_cast<int>(size_ * PANGO_SCALE));
+    pango_font_description_set_absolute_size(desc, static_cast<int>(size_ * ctx.effective_scale() * PANGO_SCALE));
     pango_layout_set_font_description(layout, desc);
 
     PangoAttribute* fea = pango_attr_font_features_new("liga");
@@ -73,7 +75,6 @@ private:
       fea->end_index = G_MAXUINT;
       PangoAttrList* attrs = pango_attr_list_new();
       pango_attr_list_insert(attrs, fea);
-      pango_layout_set_attributes(layout, attrs);
       pango_attr_list_unref(attrs);
     }
 

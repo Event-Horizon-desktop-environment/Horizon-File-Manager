@@ -432,8 +432,8 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
 
   int drives_start = fav_start;
 
-  // Compute sidebar scale to fit all items vertically when they don't fit
-  // Sidebar uses fixed base sizes (no zoom from zoom_pct)
+  // Compute total sidebar content height for scroll clamping
+  // Items keep a fixed readable size and overflow scrolls
   {
     int p_count = places_end;
     int f_count = fav_start - places_end;
@@ -447,14 +447,13 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
     int panel_h = (app.op_progress && app.op_progress->active) ? 100 : 0;
     app.progress_panel_h = panel_h;
     int available = app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height - panel_h;
-    if (total_needed > available && total_needed > 0)
-      app.sidebar_scale = std::max(0.5, static_cast<double>(available) / total_needed);
-    else
-      app.sidebar_scale = 1.0;
+    app.sidebar_content_h = total_needed;
+    // Clamp scroll to prevent blank space below last item
+    int max_scroll = std::max(0, total_needed - available);
+    if (app.sidebar_scroll_px > max_scroll)
+      app.sidebar_scroll_px = max_scroll;
   }
-  zf = 1.2 * app.sidebar_scale;
-  if (app.sidebar_scale < 1.0 && app.sidebar_scroll_px > 0)
-    app.sidebar_scroll_px = 0;
+  zf = 1.2;
 
   // HTML has py-6 (24px) padding at top of sidebar
   int y = top_y - app.sidebar_scroll_px + static_cast<int>(24.0 * zf);
@@ -3636,11 +3635,11 @@ int hit_test_grid(AppState& app, int x, int y) {
 int hit_test_sidebar(AppState& app, int x, int y) {
   if (!app.sidebar_expanded) return -1;
   if (x < 0 || x >= app.sidebar_width) return -1;
-  if (y < static_cast<int>(24.0 * 1.2 * app.sidebar_scale) ||
+  if (y < static_cast<int>(24.0 * 1.2) ||
       y >= app.height - app.status_bar_height)
     return -1;
 
-  double zf = 1.2 * app.sidebar_scale;
+  double zf = 1.2;
   int total = static_cast<int>(app.sidebar_locations.size());
 
   // Section boundaries (must match draw_sidebar)
@@ -3703,11 +3702,11 @@ int hit_test_sidebar(AppState& app, int x, int y) {
 bool hit_test_fav_section(AppState& app, int x, int y) {
   if (!app.sidebar_expanded) return false;
   if (x < 0 || x >= app.sidebar_width) return false;
-  if (y < static_cast<int>(24.0 * 1.2 * app.sidebar_scale) ||
+  if (y < static_cast<int>(24.0 * 1.2) ||
       y >= app.height - app.status_bar_height)
     return false;
 
-  double zf = 1.2 * app.sidebar_scale;
+  double zf = 1.2;
   int total = static_cast<int>(app.sidebar_locations.size());
 
   int places_end = 0;

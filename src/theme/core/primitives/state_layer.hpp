@@ -6,6 +6,7 @@
 #include <cairo/cairo.h>
 
 #include "theme/core/animation.hpp"
+#include "theme/core/context.hpp"
 
 namespace m3 {
 
@@ -41,8 +42,8 @@ public:
   // Animate opacity toward target. Call tick() each frame.
   void tick(uint64_t nowMs) { opacityTween_.start(opacityTween_.value(nowMs), targetOpacity(), nowMs, 100, kStandardDecelerate); }
 
-  void paint(cairo_t* cr, uint64_t nowMs = 0) const {
-    const float alpha = opacityTween_.active ? opacityTween_.value(nowMs) : targetOpacity();
+  void paint(cairo_t* cr, const ThemeContext& ctx = {}) const {
+    const float alpha = opacityTween_.active ? opacityTween_.value(ctx.now_ms) : targetOpacity();
     if (alpha <= 0.0f || gw_ <= 0 || gh_ <= 0) return;
 
     cairo_save(cr);
@@ -84,7 +85,7 @@ public:
   void setRadius(float rad) { radius_ = rad; }
   void setFocused(bool f) { focused_ = f; }
 
-  void paint(cairo_t* cr, float x, float y, float w, float h) const {
+  void paint(cairo_t* cr, float x, float y, float w, float h, const ThemeContext& = {}) const {
     if (!focused_) return;
     const float outerX = x - gap_ - width_;
     const float outerY = y - gap_ - width_;

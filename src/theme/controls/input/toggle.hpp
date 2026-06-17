@@ -8,6 +8,7 @@
 #include <cairo/cairo.h>
 
 #include "theme/core/animation.hpp"
+#include "theme/core/context.hpp"
 #include "theme/core/focus_ring.hpp"
 #include "theme/core/primitives/state_layer.hpp"
 
@@ -81,11 +82,11 @@ public:
     return true;
   }
 
-  void paint(cairo_t* cr, uint64_t nowMs = 0) {
+  void paint(cairo_t* cr, const ThemeContext& ctx = {}) {
     if (w_ <= 0 || h_ <= 0) return;
 
-    const float thumbPos = thumbTween_.value(nowMs);
-    const float trackT = trackTween_.value(nowMs);
+    const float thumbPos = thumbTween_.value(ctx.now_ms);
+    const float trackT = trackTween_.value(ctx.now_ms);
 
     // Size constants
     float trackW = 32, trackH = 20, thumbD = 16;
@@ -168,18 +169,18 @@ public:
     stateLayer_.setHovered(hovered_);
     stateLayer_.setPressed(pressed_);
     stateLayer_.setFocused(focused_);
-    stateLayer_.tick(nowMs);
-    stateLayer_.paint(cr, nowMs);
+    stateLayer_.tick(ctx.now_ms);
+    stateLayer_.paint(cr, ctx);
 
     // Focus ring
     focusRing_.setFocused(focused_);
     focusRing_.setColor(outlineR_, outlineG_, outlineB_);
     focusRing_.setRadius(handleR + 4);
-    focusRing_.paint(cr, hx - handleR - 4, hy - handleR - 4, (handleR + 4) * 2, (handleR + 4) * 2);
+    focusRing_.paint(cr, hx - handleR - 4, hy - handleR - 4, (handleR + 4) * 2, (handleR + 4) * 2, ctx);
   }
 
   void paint(cairo_t* cr) const {
-    const_cast<Toggle*>(this)->paint(cr, 0);
+    const_cast<Toggle*>(this)->paint(cr, {});
   }
 
 private:
