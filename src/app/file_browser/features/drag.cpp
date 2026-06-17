@@ -725,8 +725,8 @@ void data_device_drop(void* data, wl_data_device*) {
 
   close(fds[0]);
 
-  // Parse the first file:// URI from the received data
-  std::string path;
+  // Parse all file:// URIs from the received data
+  std::vector<std::string> paths;
   size_t pos = 0;
   while (pos < buf.size()) {
     auto end = buf.find_first_of("\r\n", pos);
@@ -745,8 +745,7 @@ void data_device_drop(void* data, wl_data_device*) {
           decoded += raw[i];
         }
       }
-      path = decoded;
-      break;
+      paths.push_back(decoded);
     }
     if (end >= buf.size()) break;
     pos = end + 1;
@@ -759,12 +758,43 @@ void data_device_drop(void* data, wl_data_device*) {
   wl_data_offer_destroy(app.drop_offer);
   app.drop_offer = nullptr;
 
-  if (!path.empty()) {
-    std::error_code ec;
-    auto parent = std::filesystem::path(path).parent_path();
-    if (!parent.empty()) {
-      navigate_to(app, parent.string());
-    }
+  if (paths.empty()) return;
+
+  // Determine target directory
+  std::string target = app.drop_target_is_valid ? app.drop_target_path : app.cur_tab().current_path;
+
+  // Copy or move based on Ctrl state
+  bool ctrl = false;
+  if (auto* xkb = app.seat.xkb_state_ptr()) {
+    ctrl = xkb_state_mod_name_is_active(xkb, XKB_MOD_NAME_CTRL,
+                                        XKB_STATE_MODS_EFFECTIVE) != 0;
+  }
+
+  // Start async copy/move
+  {
+    auto prog = std::make_shared<OperationProgress>();
+    prog->type = ctrl ? OperationType::Copy : OperationType::Move;
+    start_async_op(paths, target, !ctrl, prog,
+        [&app, ctrl](bool cancelled) {
+          if (!cancelled) {
+            app.operation_status = ctrl ? "Copied" : "Moved";
+            app.operation_status_expires_ms =
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now().time_since_epoch()).count() + 3000;
+          }
+          app.op_progress.reset();
+          app.drop_target_path.clear();
+          app.drop_target_idx = -1;
+          app.drop_target_is_sidebar = false;
+          app.drop_target_sidebar_idx = -1;
+          app.drop_target_fav_section = false;
+          app.drop_target_is_valid = false;
+          app.drop_x = 0;
+          app.drop_y = 0;
+          reload_dir(app);
+          app.pendingRedraw = true;
+        });
+    app.op_progress = prog;
   }
 }
 
