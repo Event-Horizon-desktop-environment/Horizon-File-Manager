@@ -869,6 +869,8 @@ struct AppState {
   int drop_target_sidebar_idx = -1;   // sidebar_locations index, or -1
   bool drop_target_fav_section = false; // true = drag over Favorites section (add new favorite)
   bool drop_target_is_valid = false;  // whether target accepts drops (directory)
+  uint32_t drop_enter_serial = 0;     // serial from data_device.enter, reused for accept
+  uint32_t drop_chosen_action = 2;    // negotiated DnD action (default MOVE=2)
 
   // ── Undo support ──
   struct UndoRecord {

@@ -116,7 +116,10 @@ void data_source_dnd_finished(void* data, wl_data_source*) {
   cancel_drag(app);
 }
 
-void data_source_action(void*, wl_data_source*, uint32_t) {
+void data_source_action(void*, wl_data_source*, uint32_t dnd_action) {
+  // The compositor has chosen an action for our drag.
+  // For within-app drops this isn't used (we Ctrl-check instead),
+  // but for other apps receiving our drag it's informational.
 }
 
 // ── Start drag ────────────────────────────────────────────────
@@ -144,6 +147,9 @@ void start_drag(AppState& app) {
   wl_data_source_offer(app.drag_source, "text/uri-list");
   wl_data_source_offer(app.drag_source, "x-special/gnome-copied-files");
 
+  wl_data_source_set_actions(app.drag_source,
+      WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
+      WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
   wl_data_source_add_listener(app.drag_source, &kDataSourceListener, &app);
 
   // Determine file info for the ghost icon
@@ -428,6 +434,8 @@ void cancel_drag(AppState& app) {
   app.drop_target_is_valid = false;
   app.drop_x = 0;
   app.drop_y = 0;
+  app.drop_enter_serial = 0;
+  app.drop_chosen_action = WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
 }
 
 void update_drag_icon(AppState& app) {
@@ -439,6 +447,7 @@ void update_drag_icon(AppState& app) {
 namespace {
 
 struct DropOfferData {
+  AppState* app;
   std::vector<std::string> mime_types;
 };
 
@@ -447,8 +456,15 @@ void data_offer_offer(void* data, wl_data_offer*, const char* mime_type) {
   od.mime_types.emplace_back(mime_type);
 }
 
-void data_offer_source_actions(void*, wl_data_offer*, uint32_t) {}
-void data_offer_action(void*, wl_data_offer*, uint32_t) {}
+void data_offer_source_actions(void* data, wl_data_offer*, uint32_t source_actions) {
+  auto& od = *static_cast<DropOfferData*>(data);
+  od.app->drop_chosen_action = source_actions;
+}
+void data_offer_action(void* data, wl_data_offer*, uint32_t dnd_action) {
+  auto& od = *static_cast<DropOfferData*>(data);
+  if (dnd_action != WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE)
+    od.app->drop_chosen_action = dnd_action;
+}
 
 constexpr wl_data_offer_listener kDataOfferListener = {
   .offer = data_offer_offer,
@@ -473,19 +489,24 @@ void data_device_data_offer(void* data, wl_data_device*, wl_data_offer* offer) {
     wl_data_offer_destroy(app.drop_offer);
   }
   app.drop_offer = offer;
-  auto* offer_data = new DropOfferData;
+  auto* offer_data = new DropOfferData{&app, {}};
   wl_data_offer_set_user_data(offer, offer_data);
   wl_data_offer_add_listener(offer, &kDataOfferListener, offer_data);
 }
 
-void data_device_enter(void*, wl_data_device*, uint32_t serial, wl_surface*,
+void data_device_enter(void* data, wl_data_device*, uint32_t serial, wl_surface*,
                        wl_fixed_t, wl_fixed_t, wl_data_offer* offer) {
+  auto& app = *static_cast<AppState*>(data);
+  app.drop_enter_serial = serial;
+  app.drop_chosen_action = WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
   auto* offer_data = static_cast<DropOfferData*>(wl_data_offer_get_user_data(offer));
   if (offer_data && has_mime(*offer_data, "text/uri-list")) {
     wl_data_offer_accept(offer, serial, "text/uri-list");
+    wl_data_offer_set_actions(offer,
+        WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
+        WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE,
+        WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
   }
-  // Clear previous drop target when entering with a new drag
-  // (state is set/replaced by data_device_motion)
 }
 
 void data_device_leave(void* data, wl_data_device*) {
@@ -498,6 +519,8 @@ void data_device_leave(void* data, wl_data_device*) {
   app.drop_target_is_valid = false;
   app.drop_x = 0;
   app.drop_y = 0;
+  app.drop_enter_serial = 0;
+  app.drop_chosen_action = WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
   app.pendingRedraw = true;
   if (app.drop_offer) {
     auto* offer_data = static_cast<DropOfferData*>(wl_data_offer_get_user_data(app.drop_offer));
@@ -513,6 +536,11 @@ void data_device_motion(void* data, wl_data_device*, uint32_t, wl_fixed_t x, wl_
   int sy = wl_fixed_to_int(y);
   app.drop_x = sx;
   app.drop_y = sy;
+
+  // Re-accept the offer on every motion so the compositor knows we're still interested
+  if (app.drop_offer) {
+    wl_data_offer_accept(app.drop_offer, app.drop_enter_serial, "text/uri-list");
+  }
 
   // Check sidebar first (higher priority)
   int sb_idx = hit_test_sidebar(app, sx, sy);
@@ -763,21 +791,17 @@ void data_device_drop(void* data, wl_data_device*) {
   // Determine target directory
   std::string target = app.drop_target_is_valid ? app.drop_target_path : app.cur_tab().current_path;
 
-  // Copy or move based on Ctrl state
-  bool ctrl = false;
-  if (auto* xkb = app.seat.xkb_state_ptr()) {
-    ctrl = xkb_state_mod_name_is_active(xkb, XKB_MOD_NAME_CTRL,
-                                        XKB_STATE_MODS_EFFECTIVE) != 0;
-  }
+  // Use the compositor-negotiated action to decide copy vs move
+  bool is_move = app.drop_chosen_action == WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
 
   // Start async copy/move
   {
     auto prog = std::make_shared<OperationProgress>();
-    prog->type = ctrl ? OperationType::Copy : OperationType::Move;
-    start_async_op(paths, target, !ctrl, prog,
-        [&app, ctrl](bool cancelled) {
+    prog->type = is_move ? OperationType::Move : OperationType::Copy;
+    start_async_op(paths, target, is_move, prog,
+        [&app, is_move](bool cancelled) {
           if (!cancelled) {
-            app.operation_status = ctrl ? "Copied" : "Moved";
+            app.operation_status = is_move ? "Moved" : "Copied";
             app.operation_status_expires_ms =
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::steady_clock::now().time_since_epoch()).count() + 3000;
