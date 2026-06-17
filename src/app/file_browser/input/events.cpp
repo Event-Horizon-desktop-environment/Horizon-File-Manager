@@ -1977,6 +1977,8 @@ void handle_click(AppState& app, int x, int y, int button) {
             AppState::menu_item(AppState::ContextMenuAction::CloseOtherTabs, "Close Other Tabs"),
             AppState::menu_item(AppState::ContextMenuAction::CloseAllTabs, "Close All Tabs"),
             AppState::menu_item(AppState::ContextMenuAction::DuplicateTab, "Duplicate Tab"),
+            AppState::menu_item(AppState::ContextMenuAction::Separator, ""),
+            AppState::menu_item(AppState::ContextMenuAction::OpenInNewWindow, "Open in new window"),
           };
           draw(app);
           return;
@@ -2074,6 +2076,7 @@ void handle_click(AppState& app, int x, int y, int button) {
         if (!app.context_menu_items.empty())
           app.context_menu_items.push_back(AppState::menu_separator());
         app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::OpenInNewTab, "Open in new tab"));
+        app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::OpenInNewWindow, "Open in new window"));
       }
 
       draw(app);

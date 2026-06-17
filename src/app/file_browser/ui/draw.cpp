@@ -2028,20 +2028,11 @@ void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int pane_x, int 
   app.tab_hits.resize(tab_count);
 
   int sidebar_w;
-  int content_right;
   if (pane_w > 0) {
     sidebar_w = pane_x;
-    content_right = pane_x + pane_w;
   } else {
     sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
-    content_right = w;
   }
-
-  // Tab bar background — use surface opacity (same as content area)
-  double sa = app.surface_opacity_pct / 100.0;
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, sa);
-  cairo_rectangle(cr, sidebar_w, 0, content_right - sidebar_w, tab_h);
-  cairo_fill(cr);
 
   int x = sidebar_w;
   int close_icon_sz = static_cast<int>(7.0 * zf);
