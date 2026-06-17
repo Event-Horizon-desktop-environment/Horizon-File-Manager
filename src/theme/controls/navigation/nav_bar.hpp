@@ -11,6 +11,7 @@
 #include <cairo/cairo.h>
 
 #include "theme/core/primitives/box.hpp"
+#include "theme/core/context.hpp"
 #include "theme/core/focus_ring.hpp"
 #include "theme/core/glyph.hpp"
 #include "theme/core/label.hpp"
@@ -75,7 +76,7 @@ public:
     return true;
   }
 
-  void paint(cairo_t* cr) {
+  void paint(cairo_t* cr, const ThemeContext& ctx = {}) {
     if (w_ <= 0 || h_ <= 0 || dests_.empty()) return;
 
     const float n = static_cast<float>(dests_.size());

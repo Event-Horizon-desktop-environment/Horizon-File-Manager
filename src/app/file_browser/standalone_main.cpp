@@ -22,5 +22,9 @@ int main(int argc, char** argv) {
     }
     return ret;
   }
+  // If the first non-flag argument is a path, navigate to it
+  if (argc > 1 && argv[1][0] != '-') {
+    return eh::file_browser::run_standalone(argv[1]);
+  }
   return eh::file_browser::run_standalone();
 }

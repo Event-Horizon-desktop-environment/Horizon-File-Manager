@@ -1,5 +1,6 @@
 #include "../app.hpp"
 
+#include "app/file_browser/features/desktop_icon_parser.hpp"
 #include "app/file_browser/features/recursive_search_worker.hpp"
 #include "app/file_browser/features/video_worker.hpp"
 #include "app/file_browser/features/svg_preview.hpp"
@@ -750,25 +751,8 @@ void reload_dir(AppState& app) {
         std::string ext = name.substr(dot + 1);
         for (auto& c : ext) c = std::tolower(c);
         if (ext == "desktop") {
-          FILE* fp = fopen(full.c_str(), "r");
-          if (fp) {
-            char line[512];
-            bool in_entry = false;
-            while (fgets(line, sizeof(line), fp)) {
-              if (strcmp(line, "[Desktop Entry]\n") == 0) { in_entry = true; continue; }
-              if (in_entry) {
-                if (line[0] == '[' || line[0] == '\n') break;
-                if (strncmp(line, "Icon=", 5) == 0) {
-                  std::string icon(line + 5);
-                  while (!icon.empty() && (icon.back() == '\n' || icon.back() == '\r' || icon.back() == ' ' || icon.back() == '\t'))
-                    icon.pop_back();
-                  e.icon_name = std::move(icon);
-                  break;
-                }
-              }
-            }
-            fclose(fp);
-          }
+          auto icon = parse_desktop_icon(full);
+          if (!icon.empty()) e.icon_name = std::move(icon);
         }
       }
     }
@@ -1628,25 +1612,8 @@ bool process_pending_thumbnails(AppState& app) {
           std::string ext = entry.name.substr(dot + 1);
           for (auto& c : ext) c = std::tolower(c);
           if (ext == "desktop") {
-            FILE* fp = fopen(entry.path.c_str(), "r");
-            if (fp) {
-              char line[512];
-              bool in_entry = false;
-              while (fgets(line, sizeof(line), fp)) {
-                if (strcmp(line, "[Desktop Entry]\n") == 0) { in_entry = true; continue; }
-                if (in_entry) {
-                  if (line[0] == '[' || line[0] == '\n') break;
-                  if (strncmp(line, "Icon=", 5) == 0) {
-                    std::string icon(line + 5);
-                    while (!icon.empty() && (icon.back() == '\n' || icon.back() == '\r' || icon.back() == ' ' || icon.back() == '\t'))
-                      icon.pop_back();
-                    entry.icon_name = std::move(icon);
-                    break;
-                  }
-                }
-              }
-              fclose(fp);
-            }
+            auto icon = parse_desktop_icon(entry.path);
+            if (!icon.empty()) entry.icon_name = std::move(icon);
           }
         }
       }

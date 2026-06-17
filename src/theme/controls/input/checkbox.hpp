@@ -8,6 +8,7 @@
 #include <cairo/cairo.h>
 
 #include "theme/core/animation.hpp"
+#include "theme/core/context.hpp"
 #include "theme/core/focus_ring.hpp"
 #include "theme/core/primitives/state_layer.hpp"
 
@@ -81,9 +82,9 @@ public:
     return true;
   }
 
-  void paint(cairo_t* cr) { paint(cr, 0); }
+  void paint(cairo_t* cr) { paint(cr, {}); }
 
-  void paint(cairo_t* cr, uint64_t nowMs) {
+  void paint(cairo_t* cr, const ThemeContext& ctx = {}) {
     if (w_ <= 0 || h_ <= 0) return;
 
     const float cx = x_ + w_ * 0.5f;
@@ -96,7 +97,7 @@ public:
 
     const bool isChecked = state_ == State::Checked;
     const bool isIndet = state_ == State::Indeterminate;
-    const float animT = animTween_.value(nowMs);
+    const float animT = animTween_.value(ctx.now_ms);
 
     // Colors
     float bgR, bgG, bgB, bgA;
@@ -206,14 +207,14 @@ public:
     stateLayer_.setHovered(hovered_);
     stateLayer_.setPressed(pressed_);
     stateLayer_.setFocused(focused_);
-    stateLayer_.tick(nowMs);
-    stateLayer_.paint(cr, nowMs);
+    stateLayer_.tick(ctx.now_ms);
+    stateLayer_.paint(cr, ctx);
 
     // Focus ring
     focusRing_.setFocused(focused_);
     focusRing_.setColor(textR_, textG_, textB_);
     focusRing_.setRadius(boxSize * 0.5f + 4);
-    focusRing_.paint(cr, cx - halfBox - 4, cy - halfBox - 4, boxSize + 8, boxSize + 8);
+    focusRing_.paint(cr, cx - halfBox - 4, cy - halfBox - 4, boxSize + 8, boxSize + 8, ctx);
   }
 
 private:

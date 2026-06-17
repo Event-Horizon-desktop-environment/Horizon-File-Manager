@@ -9,6 +9,7 @@
 #include <cairo/cairo.h>
 
 #include "theme/core/animation.hpp"
+#include "theme/core/context.hpp"
 #include "theme/core/focus_ring.hpp"
 #include "theme/core/primitives/state_layer.hpp"
 
@@ -80,7 +81,7 @@ public:
   bool handleScroll(float delta);
 
   void paint(cairo_t* cr) const;
-  void paint(cairo_t* cr, uint64_t nowMs);
+  void paint(cairo_t* cr, const ThemeContext& ctx = {});
 
 private:
   void applyValue(float raw);
@@ -278,15 +279,15 @@ inline void Slider::drawValuePopup(cairo_t* cr, float tc, float ty, float tw, fl
 }
 
 inline void Slider::paint(cairo_t* cr) const {
-  const_cast<Slider*>(this)->paint(cr, 0);
+  const_cast<Slider*>(this)->paint(cr, {});
 }
 
-inline void Slider::paint(cairo_t* cr, uint64_t nowMs) {
+inline void Slider::paint(cairo_t* cr, const ThemeContext& ctx) {
   if (w_ <= 0 || h_ <= 0) return;
 
   const bool isHov = forceHover_ ? hovered_ : (hovered_ || dragging_);
   const bool isDrag = forcePressed_ ? dragging_ : dragging_;
-  const float pv = animatedValue(nowMs);
+  const float pv = animatedValue(ctx.now_ms);
 
   const int si = static_cast<int>(size_);
   const float thumbSize = kThumbSize[si];
@@ -334,8 +335,8 @@ inline void Slider::paint(cairo_t* cr, uint64_t nowMs) {
   stateLayer_.setGeometry(tc - thumbR - 8.0f, ty - thumbR - 8.0f, ts + 16.0f, ts + 16.0f);
   stateLayer_.setHovered(isHov);
   stateLayer_.setPressed(isDrag);
-  stateLayer_.tick(nowMs);
-  stateLayer_.paint(cr, nowMs);
+  stateLayer_.tick(ctx.now_ms);
+  stateLayer_.paint(cr, ctx);
 
   // Thumb circle
   cairo_set_source_rgba(cr, accentR_, accentG_, accentB_, alpha);
@@ -349,7 +350,7 @@ inline void Slider::paint(cairo_t* cr, uint64_t nowMs) {
   focusRing_.setFocused(focused_);
   focusRing_.setColor(accentR_, accentG_, accentB_);
   focusRing_.setRadius(thumbR + 6);
-  focusRing_.paint(cr, tc - thumbR - 6, ty - thumbR - 6, (thumbR + 6) * 2, (thumbR + 6) * 2);
+  focusRing_.paint(cr, tc - thumbR - 6, ty - thumbR - 6, (thumbR + 6) * 2, (thumbR + 6) * 2, ctx);
 }
 
 } // namespace m3

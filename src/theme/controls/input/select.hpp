@@ -11,6 +11,7 @@
 #include <cairo/cairo.h>
 
 #include "theme/core/primitives/box.hpp"
+#include "theme/core/context.hpp"
 #include "theme/core/focus_ring.hpp"
 #include "theme/core/glyph.hpp"
 #include "theme/core/label.hpp"
@@ -65,7 +66,7 @@ public:
   bool handlePointerMove(float px, float py);
   bool handlePointerUp(float px, float py);
 
-  void paint(cairo_t* cr) const;
+  void paint(cairo_t* cr, const ThemeContext& ctx = {}) const;
 
 private:
   static constexpr std::size_t kNpos = static_cast<std::size_t>(-1);
@@ -76,8 +77,8 @@ private:
   [[nodiscard]] std::size_t optionAt(float px, float py) const noexcept;
   [[nodiscard]] float dropTop() const noexcept;
 
-  void paintTrigger(cairo_t* cr) const;
-  void paintMenu(cairo_t* cr) const;
+  void paintTrigger(cairo_t* cr, const ThemeContext& ctx) const;
+  void paintMenu(cairo_t* cr, const ThemeContext& ctx) const;
 
   std::vector<std::string> options_;
   std::size_t sel_ = kNpos;
@@ -189,12 +190,12 @@ bool Select::handlePointerUp(float, float) {
   return false;
 }
 
-void Select::paint(cairo_t* cr) const {
-  paintTrigger(cr);
-  if (open_) paintMenu(cr);
+void Select::paint(cairo_t* cr, const ThemeContext& ctx) const {
+  paintTrigger(cr, ctx);
+  if (open_) paintMenu(cr, ctx);
 }
 
-void Select::paintTrigger(cairo_t* cr) const {
+void Select::paintTrigger(cairo_t* cr, const ThemeContext& ctx) const {
   const float inputH = h_;
   const float r = 4.0f;
 
@@ -207,7 +208,7 @@ void Select::paintTrigger(cairo_t* cr) const {
   bgBox.setRadius(r);
   bgBox.setGeometry(x_, y_, w_, inputH);
   bgBox.setGlassy(true);
-  bgBox.paint(cr);
+  bgBox.paint(cr, ctx);
 
   // Bottom line
   float lineR = focused_ ? accentR_ : outlineR_;
@@ -227,13 +228,13 @@ void Select::paintTrigger(cairo_t* cr) const {
     lbl.setText(options_[sel_]);
     lbl.setFontSize(fontSize_);
     lbl.setColor(textR_, textG_, textB_, enabled_ ? 1.0f : 0.38f);
-    lbl.paintAt(cr, x_ + padding_, y_ + (inputH - 18) * 0.5f);
+    lbl.paintAt(cr, x_ + padding_, y_ + (inputH - 18) * 0.5f, ctx);
   } else {
     Label lbl;
     lbl.setText(placeholder_.empty() ? "Select..." : placeholder_);
     lbl.setFontSize(fontSize_);
     lbl.setColor(textR_, textG_, textB_, enabled_ ? 0.4f : 0.2f);
-    lbl.paintAt(cr, x_ + padding_, y_ + (inputH - 18) * 0.5f);
+    lbl.paintAt(cr, x_ + padding_, y_ + (inputH - 18) * 0.5f, ctx);
   }
 
   // Caret
@@ -241,7 +242,7 @@ void Select::paintTrigger(cairo_t* cr) const {
   caret.setGlyph(open_ ? "expand_less" : "expand_more");
   caret.setSize(20);
   caret.setColor(textR_, textG_, textB_, enabled_ ? 1.0f : 0.38f);
-  caret.paintAt(cr, x_ + w_ - padding_ - 20, y_ + (inputH - 20) * 0.5f);
+  caret.paintAt(cr, x_ + w_ - padding_ - 20, y_ + (inputH - 20) * 0.5f, ctx);
 
   // State layer
   stateLayer_.setColor(textR_, textG_, textB_);
@@ -250,16 +251,16 @@ void Select::paintTrigger(cairo_t* cr) const {
   stateLayer_.setHovered(trigHovered_);
   stateLayer_.setPressed(trigPressed_);
   stateLayer_.setFocused(focused_);
-  stateLayer_.paint(cr, 0);
+  stateLayer_.paint(cr, ctx);
 
   // Focus ring
   focusRing_.setFocused(focused_);
   focusRing_.setColor(accentR_, accentG_, accentB_);
   focusRing_.setRadius(r);
-  focusRing_.paint(cr, x_, y_, w_, inputH);
+  focusRing_.paint(cr, x_, y_, w_, inputH, ctx);
 }
 
-void Select::paintMenu(cairo_t* cr) const {
+void Select::paintMenu(cairo_t* cr, const ThemeContext& ctx) const {
   const float my = dropTop();
   const std::size_t n = std::min(options_.size(), maxVisible_);
   const float mh = static_cast<float>(n) * optH_;
@@ -309,7 +310,7 @@ void Select::paintMenu(cairo_t* cr) const {
     lbl.setText(options_[i]);
     lbl.setFontSize(fontSize_ - 1);
     lbl.setColor(textR_, textG_, textB_, 1.0f);
-    lbl.paintAt(cr, x_ + padding_, iy + (optH_ - 16) * 0.5f);
+    lbl.paintAt(cr, x_ + padding_, iy + (optH_ - 16) * 0.5f, ctx);
   }
 }
 

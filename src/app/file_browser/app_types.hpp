@@ -220,6 +220,9 @@ struct AppState {
 
   bool embedded = false;
 
+  // ── Initial navigation (set before event loop starts) ──
+  std::string initial_navigate_path;
+
   // ── Picker modes ──
   bool select_dir_mode = false;
   bool select_file_mode = false;
@@ -256,7 +259,7 @@ struct AppState {
   double rubber_x0 = 0, rubber_y0 = 0;
 
   // ── Sidebar ──
-  double sidebar_scale = 1.0;          // < 1.0 when items don't fit vertically
+  int sidebar_content_h = 0;           // total content height for scroll clamping
   std::vector<SidebarLocation> sidebar_locations;
   int sidebar_hover_idx = -1;
   int sidebar_mount_hover_idx = -1;    // sidebar item index whose mount indicator is hovered
@@ -371,6 +374,7 @@ struct AppState {
     ExtractTo,
     Settings,
     OpenInNewTab,
+    OpenInNewWindow,
     EmptyTrash,
     OpenFileLocation,
     CloseTab,
@@ -865,6 +869,8 @@ struct AppState {
   int drop_target_sidebar_idx = -1;   // sidebar_locations index, or -1
   bool drop_target_fav_section = false; // true = drag over Favorites section (add new favorite)
   bool drop_target_is_valid = false;  // whether target accepts drops (directory)
+  uint32_t drop_enter_serial = 0;     // serial from data_device.enter, reused for accept
+  uint32_t drop_chosen_action = 2;    // negotiated DnD action (default MOVE=2)
 
   // ── Undo support ──
   struct UndoRecord {

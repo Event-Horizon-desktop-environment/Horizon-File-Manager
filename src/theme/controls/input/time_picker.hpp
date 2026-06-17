@@ -8,6 +8,7 @@
 
 #include <cairo/cairo.h>
 
+#include "theme/core/context.hpp"
 #include "theme/core/primitives/state_layer.hpp"
 
 namespace m3 {
@@ -25,7 +26,7 @@ public:
   void setHour(int h) { hour_ = std::clamp(h, 1, 12); }
   void setMinute(int m) { minute_ = std::clamp(m, 0, 59); }
 
-  void paint(cairo_t* cr) {
+  void paint(cairo_t* cr, const ThemeContext& ctx = {}) {
     if (w_ <= 0 || h_ <= 0) return;
 
     const float cx = x_ + w_ * 0.5f;

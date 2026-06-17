@@ -1977,6 +1977,8 @@ void handle_click(AppState& app, int x, int y, int button) {
             AppState::menu_item(AppState::ContextMenuAction::CloseOtherTabs, "Close Other Tabs"),
             AppState::menu_item(AppState::ContextMenuAction::CloseAllTabs, "Close All Tabs"),
             AppState::menu_item(AppState::ContextMenuAction::DuplicateTab, "Duplicate Tab"),
+            AppState::menu_item(AppState::ContextMenuAction::Separator, ""),
+            AppState::menu_item(AppState::ContextMenuAction::OpenInNewWindow, "Open in new window"),
           };
           draw(app);
           return;
@@ -2074,6 +2076,7 @@ void handle_click(AppState& app, int x, int y, int button) {
         if (!app.context_menu_items.empty())
           app.context_menu_items.push_back(AppState::menu_separator());
         app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::OpenInNewTab, "Open in new tab"));
+        app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::OpenInNewWindow, "Open in new window"));
       }
 
       draw(app);
@@ -2184,7 +2187,7 @@ void handle_pointer_move(AppState& app, int x, int y) {
     int fav_count = fav_start - places_end;
 
     // Compute which fav slot the cursor is over
-    double zf = 1.2 * app.sidebar_scale;
+    double zf = 1.2;
     int item_h = static_cast<int>(36.0 * zf);
     int header_h = static_cast<int>(24.0 * zf);
     int div_pad = static_cast<int>(8.0 * zf);
@@ -2854,7 +2857,7 @@ void handle_pointer_move(AppState& app, int x, int y) {
   if (sb_idx >= 0 && sb_idx < static_cast<int>(app.sidebar_locations.size())) {
     auto& loc = app.sidebar_locations[sb_idx];
     if (loc.kind == SidebarLocation::Kind::Drive && loc.is_mounted) {
-      double zf = 1.2 * app.sidebar_scale;
+      double zf = 1.2;
       int ind_sz = static_cast<int>(18.0 * zf);
       int ind_x = app.sidebar_width - static_cast<int>(24.0 * zf);
       if (x >= ind_x - 4 && x <= ind_x + ind_sz + 4)
@@ -3032,7 +3035,10 @@ void handle_scroll(AppState& app, int x, int, double, double dy) {
   }
 
   if (x < (app.sidebar_expanded ? app.sidebar_width : 0)) {
-    app.sidebar_scroll_px = std::max(0, app.sidebar_scroll_px - static_cast<int>(dy * 10));
+    int panel_h = (app.op_progress && app.op_progress->active) ? 100 : 0;
+    int available = app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height - panel_h;
+    int max_scroll = std::max(0, app.sidebar_content_h - available);
+    app.sidebar_scroll_px = std::clamp(app.sidebar_scroll_px - static_cast<int>(dy * 3), 0, max_scroll);
     draw(app);
     return;
   }

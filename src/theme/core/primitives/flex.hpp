@@ -6,6 +6,8 @@
 
 #include <cairo/cairo.h>
 
+#include "theme/core/context.hpp"
+
 namespace m3 {
 
 // Flex layout container — arranges children in a row or column.
@@ -25,7 +27,7 @@ public:
     bool visible = true;
 
     // Paint function for custom/unknown types
-    void (*paintFn)(void*, cairo_t*) = nullptr;
+    void (*paintFn)(void*, cairo_t*, const ThemeContext&) = nullptr;
   };
 
   Flex() = default;
@@ -46,14 +48,14 @@ public:
   [[nodiscard]] float height() const noexcept { return h_; }
 
   Child& addChild(void* widget, Child::Type type, float minW = 0, float minH = 0,
-                  float flexGrow = 0, void (*paintFn)(void*, cairo_t*) = nullptr) {
+                  float flexGrow = 0, void (*paintFn)(void*, cairo_t*, const ThemeContext&) = nullptr) {
     return children_.emplace_back(Child{widget, type, minW, minH, flexGrow, true, paintFn});
   }
 
   void clear() { children_.clear(); }
 
   // Lay out children and paint them.
-  void paint(cairo_t* cr) const {
+  void paint(cairo_t* cr, const ThemeContext& ctx = {}) const {
     if (children_.empty()) return;
 
     const float contentX = x_ + padL_;
@@ -62,40 +64,40 @@ public:
     const float contentH = std::max(0.0f, h_ - padT_ - padB_);
 
     if (dir_ == Direction::Horizontal) {
-      layoutHorizontal(cr, contentX, contentY, contentW, contentH);
+      layoutHorizontal(cr, ctx, contentX, contentY, contentW, contentH);
     } else {
-      layoutVertical(cr, contentX, contentY, contentW, contentH);
+      layoutVertical(cr, ctx, contentX, contentY, contentW, contentH);
     }
   }
 
 private:
-  void paintChild(void* widget, Child::Type type, cairo_t* cr,
+  void paintChild(void* widget, Child::Type type, cairo_t* cr, const ThemeContext& ctx,
                   float cx, float cy, float cw, float ch,
-                  void (*customPaint)(void*, cairo_t*)) const {
+                  void (*customPaint)(void*, cairo_t*, const ThemeContext&)) const {
     // Set geometry on each child before painting
     switch (type) {
       case Child::Box: {
         auto* b = static_cast<class Box*>(widget);
         b->setGeometry(cx, cy, cw, ch);
-        b->paint(cr);
+        b->paint(cr, ctx);
         break;
       }
       case Child::Label: {
         auto* l = static_cast<class Label*>(widget);
         l->setGeometry(cx, cy, cw, ch);
-        l->paint(cr);
+        l->paint(cr, ctx);
         break;
       }
       case Child::Glyph: {
         auto* g = static_cast<class Glyph*>(widget);
         g->setGeometry(cx, cy, cw, ch);
-        g->paint(cr);
+        g->paint(cr, ctx);
         break;
       }
       case Child::Separator: {
         auto* s = static_cast<class Separator*>(widget);
         s->setGeometry(cx, cy, cw, ch);
-        s->paint(cr);
+        s->paint(cr, ctx);
         break;
       }
       case Child::Spacer: {
@@ -106,162 +108,162 @@ private:
       case Child::Button: {
         auto* b = static_cast<class Button*>(widget);
         b->setGeometry(cx, cy, cw, ch);
-        b->paint(cr);
+        b->paint(cr, ctx);
         break;
       }
       case Child::Slider: {
         auto* s = static_cast<class Slider*>(widget);
         s->setGeometry(cx, cy, cw, ch);
-        s->paint(cr);
+        s->paint(cr, ctx);
         break;
       }
       case Child::Toggle: {
         auto* t = static_cast<class Toggle*>(widget);
         t->setGeometry(cx, cy, cw, ch);
-        t->paint(cr);
+        t->paint(cr, ctx);
         break;
       }
       case Child::Checkbox: {
         auto* c = static_cast<class Checkbox*>(widget);
         c->setGeometry(cx, cy, cw, ch);
-        c->paint(cr);
+        c->paint(cr, ctx);
         break;
       }
       case Child::RadioButton: {
         auto* r = static_cast<class RadioButton*>(widget);
         r->setGeometry(cx, cy, cw, ch);
-        r->paint(cr);
+        r->paint(cr, ctx);
         break;
       }
       case Child::Input: {
         auto* i = static_cast<class Input*>(widget);
         i->setGeometry(cx, cy, cw, ch);
-        i->paint(cr);
+        i->paint(cr, ctx);
         break;
       }
       case Child::Select: {
         auto* s = static_cast<class Select*>(widget);
         s->setGeometry(cx, cy, cw, ch);
-        s->paint(cr);
+        s->paint(cr, ctx);
         break;
       }
       case Child::Flex: {
         auto* f = static_cast<Flex*>(widget);
         f->setGeometry(cx, cy, cw, ch);
-        f->paint(cr);
+        f->paint(cr, ctx);
         break;
       }
       case Child::Chip: {
         auto* c = static_cast<class Chip*>(widget);
         c->setGeometry(cx, cy, cw, ch);
-        c->paint(cr);
+        c->paint(cr, ctx);
         break;
       }
       case Child::Card: {
         auto* c = static_cast<class Card*>(widget);
         c->setGeometry(cx, cy, cw, ch);
-        c->paint(cr);
+        c->paint(cr, ctx);
         break;
       }
       case Child::Dialog: {
         auto* d = static_cast<class Dialog*>(widget);
         d->setGeometry(cx, cy, cw, ch);
-        d->paint(cr);
+        d->paint(cr, ctx);
         break;
       }
       case Child::NavBar: {
         auto* n = static_cast<class NavBar*>(widget);
         n->setGeometry(cx, cy, cw, ch);
-        n->paint(cr);
+        n->paint(cr, ctx);
         break;
       }
       case Child::NavRail: {
         auto* n = static_cast<class NavRail*>(widget);
         n->setGeometry(cx, cy, cw, ch);
-        n->paint(cr);
+        n->paint(cr, ctx);
         break;
       }
       case Child::NavDrawer: {
         auto* n = static_cast<class NavDrawer*>(widget);
         n->setGeometry(cx, cy, cw, ch);
-        n->paint(cr);
+        n->paint(cr, ctx);
         break;
       }
       case Child::Tabs: {
         auto* t = static_cast<class Tabs*>(widget);
         t->setGeometry(cx, cy, cw, ch);
-        t->paint(cr);
+        t->paint(cr, ctx);
         break;
       }
       case Child::FAB: {
         auto* f = static_cast<class FAB*>(widget);
         f->setGeometry(cx, cy, cw, ch);
-        f->paint(cr);
+        f->paint(cr, ctx);
         break;
       }
       case Child::TopAppBar: {
         auto* t = static_cast<class TopAppBar*>(widget);
         t->setGeometry(cx, cy, cw, ch);
-        t->paint(cr);
+        t->paint(cr, ctx);
         break;
       }
       case Child::BottomAppBar: {
         auto* b = static_cast<class BottomAppBar*>(widget);
         b->setGeometry(cx, cy, cw, ch);
-        b->paint(cr);
+        b->paint(cr, ctx);
         break;
       }
       case Child::Snackbar: {
         auto* s = static_cast<class Snackbar*>(widget);
         s->setGeometry(cx, cy, cw, ch);
-        s->paint(cr);
+        s->paint(cr, ctx);
         break;
       }
       case Child::Banner: {
         auto* b = static_cast<class Banner*>(widget);
         b->setGeometry(cx, cy, cw, ch);
-        b->paint(cr);
+        b->paint(cr, ctx);
         break;
       }
       case Child::BottomSheet: {
         auto* b = static_cast<class BottomSheet*>(widget);
         b->setGeometry(cx, cy, cw, ch);
-        b->paint(cr);
+        b->paint(cr, ctx);
         break;
       }
       case Child::SearchBar: {
         auto* s = static_cast<class SearchBar*>(widget);
         s->setGeometry(cx, cy, cw, ch);
-        s->paint(cr);
+        s->paint(cr, ctx);
         break;
       }
       case Child::DatePicker: {
         auto* d = static_cast<class DatePicker*>(widget);
         d->setGeometry(cx, cy, cw, ch);
-        d->paint(cr);
+        d->paint(cr, ctx);
         break;
       }
       case Child::TimePicker: {
         auto* t = static_cast<class TimePicker*>(widget);
         t->setGeometry(cx, cy, cw, ch);
-        t->paint(cr);
+        t->paint(cr, ctx);
         break;
       }
       case Child::Carousel: {
         auto* c = static_cast<class Carousel*>(widget);
         c->setGeometry(cx, cy, cw, ch);
-        c->paint(cr);
+        c->paint(cr, ctx);
         break;
       }
       case Child::Custom:
-        if (customPaint) customPaint(widget, cr);
+        if (customPaint) customPaint(widget, cr, ctx);
         break;
       default:
         break;
     }
   }
 
-  void layoutHorizontal(cairo_t* cr, float cx, float cy, float cw, float ch) const {
+  void layoutHorizontal(cairo_t* cr, const ThemeContext& ctx, float cx, float cy, float cw, float ch) const {
     // Measure fixed-size children, compute total flex grow
     float fixedSize = 0.0f;
     float totalGrow = 0.0f;
@@ -319,12 +321,12 @@ private:
         childY = cy + ch - childH;
       }
 
-      paintChild(child.widget, child.type, cr, curX, childY, childW, childH, child.paintFn);
+      paintChild(child.widget, child.type, cr, ctx, curX, childY, childW, childH, child.paintFn);
       curX += childW + spacing_;
     }
   }
 
-  void layoutVertical(cairo_t* cr, float cx, float cy, float cw, float ch) const {
+  void layoutVertical(cairo_t* cr, const ThemeContext& ctx, float cx, float cy, float cw, float ch) const {
     float fixedSize = 0.0f;
     float totalGrow = 0.0f;
     int visibleCount = 0;
@@ -369,7 +371,7 @@ private:
         childX = cx + cw - childW;
       }
 
-      paintChild(child.widget, child.type, cr, childX, curY, childW, childH, child.paintFn);
+      paintChild(child.widget, child.type, cr, ctx, childX, curY, childW, childH, child.paintFn);
       curY += childH + spacing_;
     }
   }

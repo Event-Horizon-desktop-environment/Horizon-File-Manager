@@ -10,6 +10,7 @@
 #include <cairo/cairo.h>
 
 #include "theme/core/primitives/box.hpp"
+#include "theme/core/context.hpp"
 #include "theme/core/primitives/state_layer.hpp"
 
 namespace m3 {
@@ -38,7 +39,7 @@ public:
     return px >= x_ && px < x_ + w_ && py >= y_ && py < y_ + h_;
   }
 
-  void paint(cairo_t* cr) {
+  void paint(cairo_t* cr, const ThemeContext& ctx = {}) {
     if (w_ <= 0 || h_ <= 0) return;
 
     const float r = h_ * 0.5f;
@@ -52,7 +53,7 @@ public:
     bgBox.setRadius(r);
     bgBox.setGeometry(x_, y_, w_, h_);
     bgBox.setGlassy(true);
-    bgBox.paint(cr);
+    bgBox.paint(cr, ctx);
 
     // Outline on focus
     if (focused_) {

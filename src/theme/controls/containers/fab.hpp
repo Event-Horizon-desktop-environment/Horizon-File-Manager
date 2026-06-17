@@ -8,6 +8,7 @@
 
 #include <cairo/cairo.h>
 
+#include "theme/core/context.hpp"
 #include "theme/core/focus_ring.hpp"
 #include "theme/core/primitives/box.hpp"
 #include "theme/core/primitives/state_layer.hpp"
@@ -58,7 +59,7 @@ public:
     return true;
   }
 
-  void paint(cairo_t* cr) {
+  void paint(cairo_t* cr, const ThemeContext& ctx = {}) {
     if (w_ <= 0 || h_ <= 0) return;
 
     // Size constants
@@ -98,7 +99,7 @@ public:
       bgBox.setRadius(r);
       bgBox.setGeometry(cx - r, cy - r, d, d);
       bgBox.setGlassy(true);
-      bgBox.paint(cr);
+      bgBox.paint(cr, ctx);
     }
 
     cairo_restore(cr);
@@ -140,14 +141,14 @@ public:
     stateLayer_.setHovered(hovered_);
     stateLayer_.setPressed(pressed_);
     stateLayer_.setFocused(focused_);
-    stateLayer_.tick(0);
-    stateLayer_.paint(cr, 0);
+    stateLayer_.tick(ctx.now_ms);
+    stateLayer_.paint(cr, ctx);
 
     // Focus ring
     focusRing_.setFocused(focused_);
     focusRing_.setColor(outlineR_, outlineG_, outlineB_);
     focusRing_.setRadius(r + 4);
-    focusRing_.paint(cr, cx - r - 4, cy - r - 4, d + 8, d + 8);
+    focusRing_.paint(cr, cx - r - 4, cy - r - 4, d + 8, d + 8, ctx);
   }
 
 private:

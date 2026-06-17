@@ -10,6 +10,7 @@
 
 #include <cairo/cairo.h>
 
+#include "theme/core/context.hpp"
 #include "theme/core/focus_ring.hpp"
 #include "theme/core/primitives/state_layer.hpp"
 
@@ -56,7 +57,7 @@ public:
 
   bool handlePointerDown(float, float) { return false; }
 
-  void paint(cairo_t* cr) {
+  void paint(cairo_t* cr, const ThemeContext& ctx = {}) {
     if (w_ <= 0 || h_ <= 0 || dests_.empty()) return;
 
     const float railW = (w_ > 0) ? w_ : 72.0f;

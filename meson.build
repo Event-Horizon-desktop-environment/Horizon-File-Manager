@@ -64,6 +64,7 @@ sources = files(
   # File browser core
   'src/app/file_browser/embed/embed.cpp',
   'src/app/file_browser/features/compress.cpp',
+  'src/app/file_browser/features/desktop_icon_parser.cpp',
   'src/app/file_browser/features/drag.cpp',
   'src/app/file_browser/features/epub_preview.cpp',
   'src/app/file_browser/features/image_preview.cpp',
