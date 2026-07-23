@@ -34,6 +34,7 @@ void clipboard_files_cut_copy_multi(bool cut, const std::vector<std::string>& ab
                                                   bool* out_was_cut = nullptr);
 
 [[nodiscard]] bool trash_file(const std::string& abs_path);
+[[nodiscard]] bool restore_from_trash(const std::string& trash_file_path);
 
 void launch_expanded_exec_line(const std::string& expanded_exec, bool wrap_terminal);
 

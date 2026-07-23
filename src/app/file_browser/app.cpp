@@ -106,6 +106,24 @@ void paint(AppState& app, cairo_t* cr) {
     app.scroll_needs_redraw = false;
   }
 
+  // ── Operations panel slide animation ──
+  {
+    double target = app.ops_panel_open ? 1.0 : 0.0;
+    double diff = target - app.ops_panel_slide;
+    if (std::abs(diff) > 0.01) {
+      double factor = 0.12;
+      app.ops_panel_slide += diff * factor;
+      app.scroll_needs_redraw = true;
+    } else {
+      app.ops_panel_slide = target;
+    }
+  }
+
+  // Close ops panel when operation finishes
+  if (app.ops_panel_open && app.op_progress && !app.op_progress->active.load()) {
+    app.ops_panel_open = false;
+  }
+
   int w = app.width;
   int h = app.height;
   int top_h = app.top_bar_height;
@@ -139,9 +157,14 @@ void paint(AppState& app, cairo_t* cr) {
     app.info_panel_width = std::max(200, static_cast<int>(280 * app.zoom_pct / 100.0));
     info_panel_w = app.info_panel_width;
   }
+  int ops_panel_w = 0;
+  if (app.ops_panel_slide > 0.01) {
+    app.ops_panel_width = std::max(240, static_cast<int>(320 * app.zoom_pct / 100.0));
+    ops_panel_w = static_cast<int>(app.ops_panel_width * app.ops_panel_slide);
+  }
   int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
   int content_x = sidebar_w;
-  int content_w = w - sidebar_w - info_panel_w;
+  int content_w = w - sidebar_w - info_panel_w - ops_panel_w;
   int selector_h = (app.select_dir_mode || app.select_file_mode) ? app.select_bar_h : 0;
   int content_y = top_h + tab_h;
   int view_h = h - top_h - tab_h - status_h - selector_h;
@@ -363,6 +386,7 @@ void paint(AppState& app, cairo_t* cr) {
   if (app.rename_ui_open) draw_rename_ui(app, cr);
   if (app.batch_rename_open) draw_batch_rename(app, cr);
   if (app.confirm_open) draw_confirm_dialog(app, cr);
+  if (app.password_dialog_open) draw_password_dialog(app, cr);
   if (app.compress_dialog_open) draw_compress_dialog(app, cr);
   if (app.term_chooser_open) draw_terminal_chooser(app, cr);
   if (app.properties.open) draw_properties_dialog(app, cr);
@@ -391,6 +415,9 @@ void paint(AppState& app, cairo_t* cr) {
 
   // Info panel (F11)
   draw_info_panel(app, cr);
+
+  // Operations panel (right sidebar)
+  draw_operations_panel(app, cr);
 }
 
 // ── main draw ────────────────────────────────────────────────────
@@ -444,6 +471,12 @@ void schedule_frame(AppState& app) {
   if (!need_anim && app.split_view)
     need_anim =
       std::abs(app.right_pane.scroll_smooth_current - app.right_pane.scroll_smooth_target) > 0.5;
+
+  // Operations panel slide animation
+  if (!need_anim) {
+    double ops_target = app.ops_panel_open ? 1.0 : 0.0;
+    need_anim = std::abs(app.ops_panel_slide - ops_target) > 0.01;
+  }
 
   if (!need_anim && !app.scroll_needs_redraw) return;
 

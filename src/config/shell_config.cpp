@@ -22,6 +22,13 @@ static std::string config_dir() {
   return home ? std::string(home) + "/.config/event-horizon" : ".config/event-horizon";
 }
 
+static std::string state_dir() {
+  const char* xdg = std::getenv("XDG_STATE_HOME");
+  if (xdg && *xdg) return std::string(xdg) + "/event-horizon";
+  const char* home = std::getenv("HOME");
+  return home ? std::string(home) + "/.local/state/event-horizon" : ".local/state/event-horizon";
+}
+
 static std::string file_browser_toml_path() {
   return config_dir() + "/file-browser.toml";
 }
@@ -80,6 +87,20 @@ void shell_config_reload_from_disk_now() {
   } catch (const std::exception& e) {
     std::cerr << "[horizon-files] TOML parse error: " << e.what() << "\n";
   }
+
+  // Also read wallpaper image from the component file if not in state-settings
+  if (g_snapshot.wallpaperImage.empty()) {
+    try {
+      std::string wp_path = state_dir() + "/wallpaper/wallpaper.toml";
+      std::ifstream wf(wp_path);
+      if (wf.is_open()) {
+        toml::table wtbl = toml::parse(wf);
+        if (auto* sec = wtbl["wallpaper"].as_table()) {
+          if (auto* v = sec->get("image")) g_snapshot.wallpaperImage = v->value_or("");
+        }
+      }
+    } catch (...) {}
+  }
 }
 
 void shell_config_apply_from_memory(ShellConfig sc) {
@@ -90,11 +111,41 @@ void shell_config_apply_from_memory(ShellConfig sc) {
 
 ChromePaintColors derived_chrome_colors(const ShellAppearance& appearance) {
   ChromePaintColors mc;
-  // From the palette data: default dark theme
-  mc.accentR = 0.30; mc.accentG = 0.58; mc.accentB = 0.90;
-  mc.textR = 0.94; mc.textG = 0.94; mc.textB = 0.96;
-  mc.panelFillR = 0.08; mc.panelFillG = 0.08; mc.panelFillB = 0.10;
-  mc.outlineR = 0.06; mc.outlineG = 0.06; mc.outlineB = 0.08;
+  if (appearance.matugenThemingEnabled && appearance.matugenPaletteOk) {
+    mc.accentR = appearance.matugenAccentR;
+    mc.accentG = appearance.matugenAccentG;
+    mc.accentB = appearance.matugenAccentB;
+    mc.textR = appearance.matugenTextR;
+    mc.textG = appearance.matugenTextG;
+    mc.textB = appearance.matugenTextB;
+    mc.panelFillR = appearance.matugenPanelFillR;
+    mc.panelFillG = appearance.matugenPanelFillG;
+    mc.panelFillB = appearance.matugenPanelFillB;
+    mc.outlineR = appearance.matugenOutlineR;
+    mc.outlineG = appearance.matugenOutlineG;
+    mc.outlineB = appearance.matugenOutlineB;
+    mc.dockFillR = appearance.matugenDockFillR;
+    mc.dockFillG = appearance.matugenDockFillG;
+    mc.dockFillB = appearance.matugenDockFillB;
+    mc.drawerDimR = appearance.matugenDrawerDimR;
+    mc.drawerDimG = appearance.matugenDrawerDimG;
+    mc.drawerDimB = appearance.matugenDrawerDimB;
+    mc.notifCriticalBgR = appearance.matugenNotifCriticalBgR;
+    mc.notifCriticalBgG = appearance.matugenNotifCriticalBgG;
+    mc.notifCriticalBgB = appearance.matugenNotifCriticalBgB;
+    mc.notifCriticalOutlineR = appearance.matugenNotifCriticalOutlineR;
+    mc.notifCriticalOutlineG = appearance.matugenNotifCriticalOutlineG;
+    mc.notifCriticalOutlineB = appearance.matugenNotifCriticalOutlineB;
+  } else {
+    mc.accentR = 0.30; mc.accentG = 0.58; mc.accentB = 0.90;
+    mc.textR = 0.94; mc.textG = 0.94; mc.textB = 0.96;
+    mc.panelFillR = 0.08; mc.panelFillG = 0.08; mc.panelFillB = 0.10;
+    mc.outlineR = 0.06; mc.outlineG = 0.06; mc.outlineB = 0.08;
+    mc.dockFillR = 0.12; mc.dockFillG = 0.12; mc.dockFillB = 0.14;
+    mc.drawerDimR = 0.11; mc.drawerDimG = 0.11; mc.drawerDimB = 0.13;
+    mc.notifCriticalBgR = 0.18; mc.notifCriticalBgG = 0.06; mc.notifCriticalBgB = 0.06;
+    mc.notifCriticalOutlineR = 0.70; mc.notifCriticalOutlineG = 0.10; mc.notifCriticalOutlineB = 0.10;
+  }
   return mc;
 }
 

@@ -18,6 +18,7 @@
 #include "config/shell_config.hpp"
 #include "services/udisks2/udisks2_drive_service.hpp"
 #include "app/file_browser/features/drag.hpp"
+#include "base/thread/thread_dispatch.hpp"
 #include "platform/common/asset/asset_loader.hpp"
 #include "platform/common/bench/startup_trace.hpp"
 #include "platform/common/palette/matugen_palette.hpp"
@@ -474,7 +475,8 @@ static bool create_window(AppState& app) {
 
     bool search_pending = ((app.search_active || app.recursive_search_active) && !app.search_query.empty()) || ((app.r_search_active || app.r_recursive_search_active) && !app.r_search_query.empty());
     bool mount_wake = app.mount_poll_wake.exchange(false, std::memory_order_acq_rel);
-    int poll_ms = (!app.thumb_pending_queue.empty() || search_pending || app.key_repeat_sym != 0 || mount_wake) ? 0 : kPollMs;
+    bool op_active = app.op_progress && app.op_progress->active.load();
+    int poll_ms = (!app.thumb_pending_queue.empty() || search_pending || app.key_repeat_sym != 0 || mount_wake || op_active) ? 0 : kPollMs;
     int pr = poll(&pf, 1, poll_ms);
     if (pr < 0) {
       if (errno == EINTR) {
@@ -557,6 +559,36 @@ static bool create_window(AppState& app) {
     // ── hover preview timer check ─────────────────────────────────
     check_hover_preview(app);
 
+    // ── folder hover-to-open during drag ──────────────────────────
+    if (app.drop_hover_open_start_ms > 0 && !app.drop_hover_open_path.empty()) {
+      auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
+      if (now_ms - app.drop_hover_open_start_ms >= 800) {
+        std::string path = app.drop_hover_open_path;
+        app.drop_hover_open_start_ms = 0;
+        app.drop_hover_open_path.clear();
+        navigate_to(app, path);
+        app.pendingRedraw = true;
+      }
+    }
+
+    // ── tab hover-to-switch during drag ───────────────────────────
+    if (app.drop_target_tab_idx >= 0 && app.drop_tab_switch_start_ms > 0 &&
+        app.tabs.size() > 1) {
+      auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          std::chrono::steady_clock::now().time_since_epoch()).count();
+      if (now_ms - app.drop_tab_switch_start_ms >= 600) {
+        int target_tab = app.drop_target_tab_idx;
+        app.drop_target_tab_idx = -1;
+        app.drop_tab_switch_start_ms = 0;
+        if (target_tab >= 0 && target_tab < static_cast<int>(app.tabs.size())) {
+          app.active_tab = target_tab;
+          reload_dir(app);
+          app.pendingRedraw = true;
+        }
+      }
+    }
+
     // ── application-level key repeat ───────────────────────────────
     if (app.key_repeat_sym != 0) {
       auto now = std::chrono::steady_clock::now();
@@ -568,6 +600,7 @@ static bool create_window(AppState& app) {
         uint64_t delta = now_ms - app.key_repeat_last_ms;
         if (delta >= kRepeatRate) {
           int sym = app.key_repeat_sym;
+          bool repeat_done = false;
           if (app.rename_ui_open) {
             if (sym == XKB_KEY_BackSpace && !app.rename_ui_buf.empty()) {
               if (app.rename_ui_cursor_pos > 0) {
@@ -575,6 +608,10 @@ static bool create_window(AppState& app) {
                 --app.rename_ui_cursor_pos;
               }
               app.pendingRedraw = true;
+              if (app.rename_ui_buf.empty()) {
+                app.key_repeat_sym = 0;
+                repeat_done = true;
+              }
             } else if (sym == XKB_KEY_Delete && !app.rename_ui_buf.empty()) {
               if (app.rename_ui_cursor_pos < static_cast<int>(app.rename_ui_buf.size()))
                 app.rename_ui_buf.erase(app.rename_ui_cursor_pos, 1);
@@ -583,6 +620,10 @@ static bool create_window(AppState& app) {
               if (app.rename_ui_cursor_pos > static_cast<int>(app.rename_ui_buf.size()))
                 app.rename_ui_cursor_pos = static_cast<int>(app.rename_ui_buf.size());
               app.pendingRedraw = true;
+              if (app.rename_ui_buf.empty()) {
+                app.key_repeat_sym = 0;
+                repeat_done = true;
+              }
             } else if (sym == XKB_KEY_Left && app.rename_ui_cursor_pos > 0) {
               --app.rename_ui_cursor_pos;
               app.pendingRedraw = true;
@@ -591,9 +632,31 @@ static bool create_window(AppState& app) {
               app.pendingRedraw = true;
             }
           }
+          if (!repeat_done && app.create_dialog_open) {
+            if (sym == XKB_KEY_BackSpace && !app.create_buf.empty()) {
+              app.create_buf.pop_back();
+              app.create_cursor_pos = static_cast<int>(app.create_buf.size());
+              app.pendingRedraw = true;
+              if (app.create_buf.empty()) {
+                app.key_repeat_sym = 0;
+                repeat_done = true;
+              }
+            }
+          }
           if (app.pendingRedraw)
             app.key_repeat_last_ms = now_ms;
         }
+      }
+    }
+
+    DeferredCall::drain();
+
+    if (op_active) {
+      static auto last_progress_draw = std::chrono::steady_clock::time_point{};
+      auto now_tp = std::chrono::steady_clock::now();
+      if (now_tp - last_progress_draw > std::chrono::milliseconds(30)) {
+        last_progress_draw = now_tp;
+        app.pendingRedraw = true;
       }
     }
 

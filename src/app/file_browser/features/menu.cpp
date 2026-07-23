@@ -10,6 +10,7 @@
 #include <ctime>
 #include <filesystem>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 #include <grp.h>
@@ -78,6 +79,12 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
     int real_idx = app.cur_tab().visible_entries[item_idx];
     bool is_dir = real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
                   app.cur_tab().entries[real_idx].is_dir;
+    bool is_executable = real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
+                         app.cur_tab().entries[real_idx].type == FileType::Executable;
+    if (is_executable) {
+      app.context_menu_items.push_back(
+        AppState::menu_item(AppState::ContextMenuAction::RunProgram, "Run as Program"));
+    }
     if (is_dir) {
       app.context_menu_items.push_back(
         AppState::menu_item(AppState::ContextMenuAction::OpenInNewTab, "Open in new tab"));
@@ -132,7 +139,25 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
     }
 
     app.context_menu_items.push_back(AppState::menu_separator());
-    app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::MoveToTrash, "Move to Trash"));
+
+    bool in_trash = false;
+    {
+      const char* home = std::getenv("HOME");
+      if (home) {
+        std::string trash_prefix = std::string(home) + "/.local/share/Trash/files";
+        const auto& cp = app.cur_tab().current_path;
+        if (cp == trash_prefix || (cp.size() > trash_prefix.size() && cp.compare(0, trash_prefix.size(), trash_prefix) == 0 && cp[trash_prefix.size()] == '/'))
+          in_trash = true;
+      }
+    }
+
+    if (in_trash) {
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::RestoreFromTrash, "Restore"));
+      app.context_menu_items.push_back(AppState::menu_separator());
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::PermanentDelete, "Delete"));
+    } else {
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::MoveToTrash, "Move to Trash"));
+    }
     app.context_menu_items.push_back(AppState::menu_separator());
     app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Properties, "Properties"));
   } else {
@@ -301,6 +326,7 @@ void execute_context_menu_action(AppState& app, int item_idx) {
             draw(app);
           });
       app.op_progress = prog;
+      app.ops_panel_open = true;
     }
     draw(app);
     return;
@@ -589,6 +615,16 @@ void execute_context_menu_action(AppState& app, int item_idx) {
       draw(app);
       return;
 
+    case AppState::ContextMenuAction::RunProgram: {
+      pid_t pid = fork();
+      if (pid == 0) {
+        setsid();
+        execlp(entry.path.c_str(), entry.path.c_str(), nullptr);
+        _exit(1);
+      }
+      break;
+    }
+
     case AppState::ContextMenuAction::Cut: {
       if (app.cur_tab().multi_selected.size() > 1) {
         std::vector<std::string> paths;
@@ -631,23 +667,28 @@ void execute_context_menu_action(AppState& app, int item_idx) {
       std::string dest;
       if (!eh::dialog::show_native_folder_picker(&dest)) { draw(app); return; }
       if (!dest.empty()) {
-        fs::path src = entry.path;
-        fs::path dst = fs::path(dest) / src.filename();
+        std::vector<std::string> src_paths;
+        for (int vis_idx : app.cur_tab().multi_selected) {
+          if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
+          int r = app.cur_tab().visible_entries[vis_idx];
+          if (r >= 0 && r < static_cast<int>(app.cur_tab().entries.size()))
+            src_paths.push_back(app.cur_tab().entries[r].path);
+        }
 
-        // Push undo record first
+        // Push undo record
         {
           AppState::UndoRecord rec{AppState::UndoRecord::Type::PasteCopy, {}, {}};
-          rec.paths_b.push_back(dst.string());
+          for (const auto& src : src_paths)
+            rec.paths_b.push_back((fs::path(dest) / fs::path(src).filename()).string());
           app.redo_stack.clear();
           app.undo_stack.push_back(std::move(rec));
           if (app.undo_stack.size() > app.kMaxUndo)
             app.undo_stack.erase(app.undo_stack.begin());
         }
 
-        // Start async copy
         auto prog = std::make_shared<OperationProgress>();
         prog->type = OperationType::Copy;
-        start_async_op({src.string()}, dest, false, prog,
+        start_async_op(src_paths, dest, false, prog,
             [&app](bool cancelled) {
               if (!cancelled) {
                 app.operation_status = "Copied to destination";
@@ -658,6 +699,7 @@ void execute_context_menu_action(AppState& app, int item_idx) {
               draw(app);
             });
         app.op_progress = prog;
+        app.ops_panel_open = true;
       }
       draw(app);
       return;
@@ -667,24 +709,30 @@ void execute_context_menu_action(AppState& app, int item_idx) {
       std::string dest;
       if (!eh::dialog::show_native_folder_picker(&dest)) { draw(app); return; }
       if (!dest.empty()) {
-        fs::path src = entry.path;
-        fs::path dst = fs::path(dest) / src.filename();
+        std::vector<std::string> src_paths;
+        for (int vis_idx : app.cur_tab().multi_selected) {
+          if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
+          int r = app.cur_tab().visible_entries[vis_idx];
+          if (r >= 0 && r < static_cast<int>(app.cur_tab().entries.size()))
+            src_paths.push_back(app.cur_tab().entries[r].path);
+        }
 
-        // Push undo record first
+        // Push undo record
         {
           AppState::UndoRecord rec{AppState::UndoRecord::Type::PasteCut, {}, {}};
-          rec.paths_a.push_back(src.string());
-          rec.paths_b.push_back(dst.string());
+          for (const auto& src : src_paths) {
+            rec.paths_a.push_back(src);
+            rec.paths_b.push_back((fs::path(dest) / fs::path(src).filename()).string());
+          }
           app.redo_stack.clear();
           app.undo_stack.push_back(std::move(rec));
           if (app.undo_stack.size() > app.kMaxUndo)
             app.undo_stack.erase(app.undo_stack.begin());
         }
 
-        // Start async move
         auto prog = std::make_shared<OperationProgress>();
         prog->type = OperationType::Move;
-        start_async_op({src.string()}, dest, true, prog,
+        start_async_op(src_paths, dest, true, prog,
             [&app](bool cancelled) {
               if (!cancelled) {
                 app.operation_status = "Moved to destination";
@@ -695,6 +743,7 @@ void execute_context_menu_action(AppState& app, int item_idx) {
               draw(app);
             });
         app.op_progress = prog;
+        app.ops_panel_open = true;
       }
       draw(app);
       return;
@@ -746,6 +795,34 @@ void execute_context_menu_action(AppState& app, int item_idx) {
         app.rename_ui_cursor_pos = static_cast<int>(entry.name.size());
         app.rename_ui_entry_path = entry.path;
       }
+      break;
+    }
+
+    case AppState::ContextMenuAction::RestoreFromTrash: {
+      std::vector<std::string> restore_paths;
+      bool is_multi = app.cur_tab().multi_selected.size() > 1;
+      if (is_multi) {
+        for (int vis_idx : app.cur_tab().multi_selected) {
+          if (vis_idx >= 0 && vis_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+            int r = app.cur_tab().visible_entries[vis_idx];
+            if (r >= 0 && r < static_cast<int>(app.cur_tab().entries.size()))
+              restore_paths.push_back(app.cur_tab().entries[r].path);
+          }
+        }
+      } else {
+        restore_paths.push_back(entry.path);
+      }
+      int restored = 0;
+      for (const auto& p : restore_paths) {
+        if (xdg::restore_from_trash(p)) ++restored;
+      }
+      reload_dir(app);
+      if (restored > 0) {
+        app.operation_status = "Restored " + std::to_string(restored) + " item" + (restored > 1 ? "s" : "");
+      } else {
+        app.operation_status = "Restore failed";
+      }
+      app.operation_status_expires_ms = menu_expiry_3s();
       break;
     }
 
@@ -837,7 +914,13 @@ void execute_context_menu_action(AppState& app, int item_idx) {
     }
 
     case AppState::ContextMenuAction::Extract: {
-      execute_extract_async(app, entry.path, default_extract_dir(entry.path));
+      for (int vis_idx : app.cur_tab().multi_selected) {
+        if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
+        int r = app.cur_tab().visible_entries[vis_idx];
+        if (r < 0 || r >= static_cast<int>(app.cur_tab().entries.size())) continue;
+        execute_extract_async(app, app.cur_tab().entries[r].path,
+                              default_extract_dir(app.cur_tab().entries[r].path));
+      }
       draw(app);
       return;
     }
@@ -846,7 +929,12 @@ void execute_context_menu_action(AppState& app, int item_idx) {
       std::string dest;
       if (!eh::dialog::show_native_folder_picker(&dest)) { draw(app); return; }
       if (!dest.empty()) {
-        execute_extract_async(app, entry.path, dest);
+        for (int vis_idx : app.cur_tab().multi_selected) {
+          if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
+          int r = app.cur_tab().visible_entries[vis_idx];
+          if (r < 0 || r >= static_cast<int>(app.cur_tab().entries.size())) continue;
+          execute_extract_async(app, app.cur_tab().entries[r].path, dest);
+        }
       }
       draw(app);
       return;
@@ -888,20 +976,28 @@ void execute_context_menu_action(AppState& app, int item_idx) {
 
     case AppState::ContextMenuAction::Duplicate: {
       {
-        fs::path src(entry.path);
-        fs::path parent = src.parent_path();
-        fs::path target = parent / (src.stem().string() + " (copy)" + src.extension().string());
-        int n = 2;
         std::error_code ec;
-        while (fs::exists(target, ec)) {
-          target = parent / (src.stem().string() + " (" + std::to_string(n) + ")" + src.extension().string());
-          n++;
+        int dup_count = 0;
+        for (int vis_idx : app.cur_tab().multi_selected) {
+          if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
+          int r = app.cur_tab().visible_entries[vis_idx];
+          if (r < 0 || r >= static_cast<int>(app.cur_tab().entries.size())) continue;
+          auto& e = app.cur_tab().entries[r];
+          fs::path src(e.path);
+          fs::path parent = src.parent_path();
+          fs::path target = parent / (src.stem().string() + " (copy)" + src.extension().string());
+          int n = 2;
+          while (fs::exists(target, ec)) {
+            target = parent / (src.stem().string() + " (" + std::to_string(n) + ")" + src.extension().string());
+            n++;
+          }
+          if (e.is_dir)
+            fs::copy(src, target, fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec);
+          else
+            fs::copy_file(src, target, fs::copy_options::copy_symlinks, ec);
+          if (!ec) ++dup_count;
         }
-        if (entry.is_dir)
-          fs::copy(src, target, fs::copy_options::recursive | fs::copy_options::copy_symlinks, ec);
-        else
-          fs::copy_file(src, target, fs::copy_options::copy_symlinks, ec);
-        if (!ec) {
+        if (dup_count > 0) {
           reload_dir(app);
           app.operation_status = "Duplicated";
           app.operation_status_expires_ms = menu_expiry_3s();
@@ -914,14 +1010,27 @@ void execute_context_menu_action(AppState& app, int item_idx) {
       std::string dest;
       if (!eh::dialog::show_native_folder_picker(&dest)) { draw(app); return; }
       if (!dest.empty()) {
-        fs::path src = entry.path;
-        fs::path link_path = fs::path(dest) / (entry.name + " (link)");
         std::error_code ec;
-        if (entry.is_dir)
-          fs::create_directory_symlink(src, link_path, ec);
-        else
-          fs::create_symlink(src, link_path, ec);
-        if (!ec) {
+        int link_count = 0;
+        for (int vis_idx : app.cur_tab().multi_selected) {
+          if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
+          int r = app.cur_tab().visible_entries[vis_idx];
+          if (r < 0 || r >= static_cast<int>(app.cur_tab().entries.size())) continue;
+          auto& e = app.cur_tab().entries[r];
+          fs::path src(e.path);
+          fs::path link_path = fs::path(dest) / (e.name + " (link)");
+          int n = 2;
+          while (fs::exists(link_path, ec)) {
+            link_path = fs::path(dest) / (e.name + " (link " + std::to_string(n) + ")");
+            n++;
+          }
+          if (e.is_dir)
+            fs::create_directory_symlink(src, link_path, ec);
+          else
+            fs::create_symlink(src, link_path, ec);
+          if (!ec) ++link_count;
+        }
+        if (link_count > 0) {
           reload_dir(app);
           app.operation_status = "Symlink created";
           app.operation_status_expires_ms = menu_expiry_3s();
@@ -930,11 +1039,21 @@ void execute_context_menu_action(AppState& app, int item_idx) {
       draw(app);
       return;
     }
-    case AppState::ContextMenuAction::CopyPath:
-      app.clipboard.copy_text(entry.path);
+    case AppState::ContextMenuAction::CopyPath: {
+      std::string joined;
+      for (int vis_idx : app.cur_tab().multi_selected) {
+        if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
+        int r = app.cur_tab().visible_entries[vis_idx];
+        if (r < 0 || r >= static_cast<int>(app.cur_tab().entries.size())) continue;
+        if (!joined.empty()) joined += '\n';
+        joined += app.cur_tab().entries[r].path;
+      }
+      if (joined.empty()) joined = entry.path;
+      app.clipboard.copy_text(joined);
       app.operation_status = "Path copied";
       app.operation_status_expires_ms = menu_expiry_3s();
       break;
+    }
     case AppState::ContextMenuAction::Properties:
       show_properties(app, entry.path, entry.icon_name);
       break;
@@ -1062,17 +1181,100 @@ void open_with_open(AppState& app, const std::string& file_path) {
   const std::string mime_type = detect_mime_type(file_path);
   auto entries = eh::app_drawer::copy_desktop_entries();
 
-  auto recommended_ids = get_mime_associations(mime_type);
-  std::unordered_set<std::string> rec_set;
-  for (const auto& id : recommended_ids) rec_set.insert(id);
+  // Build a set of MIME types to search: the exact type, its parent, and wildcard
+  std::vector<std::string> mime_variants;
+  mime_variants.push_back(mime_type);
+  {
+    // "text/x-diff" → "text/plain" (subtype parent)
+    auto slash = mime_type.find('/');
+    if (slash != std::string::npos) {
+      std::string top = mime_type.substr(0, slash);
+      mime_variants.push_back(top + "/*");
+      mime_variants.push_back(top + "/plain");
+      // "text/x-diff" → "text" (bare top-level)
+      mime_variants.push_back(top);
+    }
+  }
 
-  // Also scan desktop file MimeType fields for exact match
-  if (!mime_type.empty()) {
+  std::unordered_set<std::string> rec_set;
+
+  // Look up MIME associations for each variant
+  for (const auto& mv : mime_variants) {
+    auto ids = get_mime_associations(mv);
+    for (const auto& id : ids) rec_set.insert(id);
+  }
+
+  // Also scan desktop file MimeType fields — check exact, wildcard, and parent
+  // Split desktop MimeType string into individual types
+  auto split_semi = [](const std::string& s) {
+    std::vector<std::string> out;
+    size_t start = 0;
+    while (start < s.size()) {
+      size_t semi = s.find(';', start);
+      std::string token = (semi == std::string::npos) ? s.substr(start) : s.substr(start, semi - start);
+      while (!token.empty() && token.front() == ' ') token.erase(token.begin());
+      while (!token.empty() && token.back() == ' ') token.pop_back();
+      if (!token.empty()) out.push_back(std::move(token));
+      if (semi == std::string::npos) break;
+      start = semi + 1;
+    }
+    return out;
+  };
+
+  for (const auto& ent : entries) {
+    if (ent.noDisplay || ent.hidden) continue;
+    if (ent.mimeTypesLower.empty()) continue;
+
+    auto app_types = split_semi(ent.mimeTypesLower);
+    bool matched = false;
+
+    for (const auto& mv : mime_variants) {
+      if (mv.empty()) continue;
+      for (const auto& at : app_types) {
+        // Exact match
+        if (at == mv) { matched = true; break; }
+        // Desktop file declares wildcard like "text/*" — check if mv starts with "text/"
+        if (at.size() >= 2 && at[at.size() - 1] == '*' && at[at.size() - 2] == '/') {
+          std::string prefix = at.substr(0, at.size() - 1);
+          if (mv.size() >= prefix.size() && mv.compare(0, prefix.size(), prefix) == 0) {
+            matched = true; break;
+          }
+        }
+      }
+      if (matched) break;
+    }
+    if (matched) {
+      std::string id = fs::path(ent.path).stem().string();
+      rec_set.insert(id);
+      rec_set.insert(id + ".desktop");
+    }
+  }
+
+  // For text/* MIME types, also recommend apps that identify as text editors
+  // via GenericName or Categories (catches apps like VS Code that don't
+  // declare text/plain in their MimeType field).
+  if (!mime_type.empty() && mime_type.compare(0, 5, "text/") == 0) {
     for (const auto& ent : entries) {
       if (ent.noDisplay || ent.hidden) continue;
-      bool found = (";" + ent.mimeTypesLower + ";").find(";" + mime_type + ";") != std::string::npos;
-      if (found) {
-        std::string id = fs::path(ent.path).stem().string();
+      std::string id = fs::path(ent.path).stem().string();
+      if (rec_set.count(id) || rec_set.count(id + ".desktop")) continue;
+      bool is_text_editor = false;
+      // Check GenericName for text/code editor specifically
+      {
+        std::string gn = ent.genericName;
+        for (auto& c : gn) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (gn.find("text editor") != std::string::npos ||
+            gn.find("code editor") != std::string::npos ||
+            gn.find("source code") != std::string::npos)
+          is_text_editor = true;
+      }
+      // Check Categories for TextEditor
+      {
+        std::string cats = ent.categories;
+        for (auto& c : cats) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        if (cats.find("texteditor") != std::string::npos) is_text_editor = true;
+      }
+      if (is_text_editor) {
         rec_set.insert(id);
         rec_set.insert(id + ".desktop");
       }
@@ -1132,6 +1334,11 @@ void open_settings(AppState& app) {
   app.settings_topbar_opacity_pct = app.topbar_opacity_pct;
   app.settings_statusbar_opacity_pct = app.statusbar_opacity_pct;
   app.settings_preview_opacity_pct = app.preview_opacity_pct;
+
+  {
+    const auto& sc = eh::config::shell_config_snapshot();
+    app.settings_matugen_theming = sc.appearance.matugenThemingEnabled;
+  }
 
   // Build terminal options list
   scan_terminal_apps(app);
@@ -1243,6 +1450,7 @@ void settings_apply(AppState& app) {
     } else {
       sc.defaultApps.terminal.clear();
     }
+    sc.appearance.matugenThemingEnabled = app.settings_matugen_theming;
     (void)eh::config::write_state_settings_toml(sc);
     eh::config::shell_config_apply_from_memory(std::move(sc));
   }
@@ -1308,6 +1516,8 @@ void reload_colors_from_config(AppState& app) {
 void reload_settings_from_config(AppState& app) {
   reload_colors_from_config(app);
   eh::config::FileBrowserSettings fbs = eh::config::read_file_browser_toml();
+  const auto& sc = eh::config::shell_config_snapshot_skip_matugen();
+  app.settings_matugen_theming = sc.appearance.matugenThemingEnabled;
   app.zoom_pct = fbs.zoom_pct;
   app.settings_zoom_pct = app.zoom_pct;
   app.folders_before_files = fbs.folders_before_files;
@@ -1317,7 +1527,7 @@ void reload_settings_from_config(AppState& app) {
   app.statusbar_opacity_pct = fbs.statusbar_opacity_pct;
   app.preview_opacity_pct = fbs.preview_opacity_pct;
   app.cur_tab().view_mode = static_cast<ViewMode>(fbs.view_mode);
-  app.cur_tab().sort_field = static_cast<SortField>(std::clamp(fbs.sort_field, 0, 3));
+  app.cur_tab().sort_field = static_cast<SortField>(std::clamp(fbs.sort_field, 0, 5));
   app.cur_tab().sort_descending = fbs.sort_descending;
   app.cur_tab().group_by_type = fbs.group_by_type;
   app.show_hidden = fbs.show_hidden;

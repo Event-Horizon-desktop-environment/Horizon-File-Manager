@@ -1,0 +1,10 @@
+[Desktop Entry]
+Name=Horizon-Files
+Comment=Browse and manage your files
+Exec=horizon-files %F
+Icon=horizon-filesv2
+Type=Application
+Categories=Utility;FileManager;
+StartupNotify=true
+Terminal=false
+MimeType=inode/directory;

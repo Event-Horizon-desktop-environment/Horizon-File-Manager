@@ -1,13 +1,23 @@
 #include "app/file_browser/features/compress.hpp"
 #include "app/file_browser/app.hpp"
 #include "app/file_browser/app_types.hpp"
+#include "app/file_browser/features/progress.hpp"
+#include "base/thread/thread_dispatch.hpp"
 
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
+
+#ifdef EH_HAVE_LIBARCHIVE
+#include <archive.h>
+#include <archive_entry.h>
+#endif
 
 
 namespace fs = std::filesystem;
@@ -209,6 +219,376 @@ std::string format_extract_cmd(const std::string& archive_path,
   return format_extract_cmd_internal(archive_path, dest_dir);
 }
 
+#ifdef EH_HAVE_LIBARCHIVE
+
+static std::string sanitize_archive_path(const std::string& raw) {
+  std::string p = raw;
+  while (!p.empty() && p[0] == '/') p.erase(p.begin());
+  std::istringstream ss(p);
+  std::string seg;
+  std::vector<std::string> clean;
+  while (std::getline(ss, seg, '/')) {
+    if (seg == "..") {
+      if (!clean.empty()) clean.pop_back();
+    } else if (!seg.empty() && seg != ".") {
+      clean.push_back(seg);
+    }
+  }
+  std::string result;
+  for (size_t i = 0; i < clean.size(); ++i) {
+    if (i > 0) result += '/';
+    result += clean[i];
+  }
+  return result;
+}
+
+bool archive_is_encrypted(const std::string& archive_path) {
+  struct archive* a = archive_read_new();
+  archive_read_support_format_all(a);
+  archive_read_support_filter_all(a);
+
+  if (archive_read_open_filename(a, archive_path.c_str(), 10240) != ARCHIVE_OK) {
+    archive_read_free(a);
+    return false;
+  }
+
+  int has_enc = archive_read_has_encrypted_entries(a);
+
+  bool encrypted = false;
+  struct archive_entry* ae = nullptr;
+  int r = ARCHIVE_OK;
+  while ((r = archive_read_next_header(a, &ae)) == ARCHIVE_OK) {
+    if (archive_entry_is_encrypted(ae)) {
+      encrypted = true;
+      break;
+    }
+  }
+
+  if (!encrypted && r != ARCHIVE_OK && r != ARCHIVE_EOF) {
+    const char* err = archive_error_string(a);
+    if (err) {
+      std::string msg = err;
+      for (auto& c : msg) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      if (msg.find("encrypt") != std::string::npos ||
+          msg.find("password") != std::string::npos) {
+        encrypted = true;
+      }
+    }
+  }
+
+  if (!encrypted && has_enc > 0) encrypted = true;
+
+  archive_read_close(a);
+  archive_read_free(a);
+  return encrypted;
+}
+
+static bool shell_extract_supported(const std::string& archive_path) {
+  std::string lower = archive_path;
+  for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  if (lower.ends_with(".rar")) return tool_available("unrar");
+  if (lower.ends_with(".zip")) return tool_available("unzip") || tool_available("7z");
+  if (lower.ends_with(".7z"))  return tool_available("7z");
+  return false;
+}
+
+static std::string format_extract_cmd_with_password(const std::string& archive_path,
+                                                     const std::string& dest_dir,
+                                                     const std::string& password) {
+  std::string lower = archive_path;
+  for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+  std::string qsrc = shell_quote(archive_path);
+  std::string qdst = shell_quote(dest_dir);
+  std::string qpw  = shell_quote(password);
+
+  if (lower.ends_with(".rar")) {
+    if (tool_available("unrar"))
+      return "unrar x -o+ -p" + qpw + " " + qsrc + " " + qdst;
+  }
+  if (lower.ends_with(".zip")) {
+    if (tool_available("7z"))
+      return "7z x -p" + qpw + " -y " + qsrc + " -o" + qdst;
+  }
+  if (lower.ends_with(".7z")) {
+    if (tool_available("7z"))
+      return "7z x -p" + qpw + " -y " + qsrc + " -o" + qdst;
+  }
+  return {};
+}
+
+static bool do_shell_extract(const std::string& archive_path,
+                              const std::string& dest_dir,
+                              const std::string& password,
+                              std::shared_ptr<OperationProgress> prog) {
+  std::string cmd;
+  if (!password.empty())
+    cmd = format_extract_cmd_with_password(archive_path, dest_dir, password);
+  if (cmd.empty())
+    cmd = format_extract_cmd_internal(archive_path, dest_dir);
+  if (cmd.empty()) return false;
+
+  cmd += " 2>/dev/null";
+  int ret = std::system(cmd.c_str());
+  return ret == 0;
+}
+
+static bool do_libarchive_extract_inner(const std::string& archive_path,
+                                         const std::string& dest_dir,
+                                         std::shared_ptr<OperationProgress> prog,
+                                         const std::string& password = {}) {
+  struct archive* a = archive_read_new();
+  archive_read_support_format_all(a);
+  archive_read_support_filter_all(a);
+
+  if (!password.empty()) {
+    archive_read_add_passphrase(a, password.c_str());
+  }
+
+  if (archive_read_open_filename(a, archive_path.c_str(), 10240) != ARCHIVE_OK) {
+    archive_read_free(a);
+    return false;
+  }
+
+  struct archive_entry* ae = nullptr;
+  int r;
+
+  std::vector<std::pair<std::string, int64_t>> entries;
+  while ((r = archive_read_next_header(a, &ae)) == ARCHIVE_OK) {
+    entries.emplace_back(archive_entry_pathname(ae), archive_entry_size(ae));
+  }
+
+  if (entries.empty() && r != ARCHIVE_EOF) {
+    archive_read_close(a);
+    archive_read_free(a);
+    return false;
+  }
+
+  archive_read_close(a);
+  archive_read_free(a);
+
+  int total = static_cast<int>(entries.size());
+  uint64_t total_bytes = 0;
+  for (auto& [name, sz] : entries)
+    if (sz > 0) total_bytes += static_cast<uint64_t>(sz);
+  prog->total_files.store(total);
+  prog->total_bytes.store(total_bytes);
+  prog->start_time = std::chrono::steady_clock::now();
+
+  a = archive_read_new();
+  archive_read_support_format_all(a);
+  archive_read_support_filter_all(a);
+
+  if (!password.empty()) {
+    archive_read_add_passphrase(a, password.c_str());
+  }
+
+  if (archive_read_open_filename(a, archive_path.c_str(), 10240) != ARCHIVE_OK) {
+    archive_read_free(a);
+    return false;
+  }
+
+  struct archive* disk = archive_write_disk_new();
+  archive_write_disk_set_options(disk,
+    ARCHIVE_EXTRACT_TIME |
+    ARCHIVE_EXTRACT_PERM |
+    ARCHIVE_EXTRACT_ACL |
+    ARCHIVE_EXTRACT_FFLAGS |
+    ARCHIVE_EXTRACT_SECURE_SYMLINKS |
+    ARCHIVE_EXTRACT_SECURE_NODOTDOT |
+    ARCHIVE_EXTRACT_UNLINK);
+  archive_write_disk_set_standard_lookup(disk);
+
+  int processed = 0;
+  ae = nullptr;
+
+  while ((r = archive_read_next_header(a, &ae)) == ARCHIVE_OK) {
+    if (prog->cancel.load()) break;
+
+    std::string entry_path = archive_entry_pathname(ae);
+    std::string clean = sanitize_archive_path(entry_path);
+    if (clean.empty()) { archive_read_data_skip(a); continue; }
+
+    std::string full = dest_dir + "/" + clean;
+    archive_entry_set_pathname(ae, full.c_str());
+
+    const char* hardlink = archive_entry_hardlink(ae);
+    if (hardlink) {
+      std::string hl_clean = sanitize_archive_path(hardlink);
+      std::string hl_full = dest_dir + "/" + hl_clean;
+      archive_entry_set_hardlink(ae, hl_full.c_str());
+    }
+
+    r = archive_write_header(disk, ae);
+    if (r != ARCHIVE_OK && r < ARCHIVE_WARN) {
+      archive_read_data_skip(a);
+    } else {
+      if (archive_entry_size(ae) > 0 && !hardlink) {
+        char buf[65536];
+        ssize_t len;
+        while ((len = archive_read_data(a, buf, sizeof(buf))) > 0) {
+          archive_write_data(disk, buf, len);
+        }
+      }
+      archive_write_finish_entry(disk);
+    }
+
+    ++processed;
+    prog->copied_files.store(processed);
+    prog->progress.store(total > 0 ? static_cast<double>(processed) / total : 0.0);
+    int64_t entry_sz = archive_entry_size_is_set(ae) ? archive_entry_size(ae) : 0;
+    if (entry_sz > 0)
+      prog->done_bytes.fetch_add(static_cast<uint64_t>(entry_sz));
+
+    std::string fname = fs::path(entry_path).filename().string();
+    if (fname.size() > 40) fname = fname.substr(0, 37) + "...";
+    prog->current_file = std::move(fname);
+  }
+
+  archive_write_close(disk);
+  archive_write_free(disk);
+  archive_read_close(a);
+  archive_read_free(a);
+
+  return true;
+}
+
+static void do_libarchive_extract(const std::string& archive_path,
+                                   const std::string& dest_dir,
+                                   std::shared_ptr<OperationProgress> prog,
+                                   const std::string& password = {}) {
+  if (do_libarchive_extract_inner(archive_path, dest_dir, prog, password)) {
+    prog->active = false;
+    prog->current_file.clear();
+    return;
+  }
+
+  if (shell_extract_supported(archive_path)) {
+    prog->total_files.store(0);
+    prog->current_file = "Extracting...";
+    bool ok = do_shell_extract(archive_path, dest_dir, password, prog);
+    prog->active = false;
+    prog->current_file.clear();
+    if (ok) return;
+  }
+
+  prog->success = false;
+  prog->active = false;
+  prog->current_file.clear();
+}
+
+static void start_extract_thread(AppState& app, const std::string& archive_path,
+                                  const std::string& dest_dir,
+                                  const std::string& password) {
+  std::error_code ec;
+  fs::create_directories(dest_dir, ec);
+
+  auto prog = std::make_shared<OperationProgress>();
+  prog->type = OperationType::Extract;
+  prog->active.store(true);
+
+  app.op_progress = prog;
+  app.ops_panel_open = true;
+  draw(app);
+
+  std::string arc_path = archive_path;
+  std::string dst_dir = dest_dir;
+  std::string pw = password;
+
+  std::thread([&app, prog, arc_path, dst_dir, pw]() {
+    do_libarchive_extract(arc_path, dst_dir, prog, pw);
+
+    bool cancelled = prog->cancel.load();
+    bool success = prog->success.load();
+    DeferredCall::callLater([&app, cancelled, success]() {
+      if (cancelled)
+        app.operation_status = "Extraction cancelled";
+      else if (success)
+        app.operation_status = "Extraction complete";
+      else
+        app.operation_status = "Extraction failed";
+      app.operation_status_expires_ms = cmp_expiry_3s();
+      reload_dir(app);
+      draw(app);
+    });
+  }).detach();
+}
+
+void show_password_dialog(AppState& app, const std::string& archive_path,
+                           const std::string& dest_dir) {
+  app.password_dialog_open = true;
+  app.password_buf.clear();
+  app.password_cursor_pos = 0;
+  app.password_archive_path = archive_path;
+  app.password_dest_dir = dest_dir;
+  draw(app);
+}
+
+void execute_extract_with_password(AppState& app, const std::string& archive_path,
+                                   const std::string& dest_dir,
+                                   const std::string& password) {
+  start_extract_thread(app, archive_path, dest_dir, password);
+}
+
+void execute_extract_async(AppState& app, const std::string& archive_path,
+                            const std::string& dest_dir) {
+  if (archive_is_encrypted(archive_path)) {
+    show_password_dialog(app, archive_path, dest_dir);
+    return;
+  }
+  start_extract_thread(app, archive_path, dest_dir, {});
+}
+
+#else
+
+bool archive_is_encrypted(const std::string&) {
+  return false;
+}
+
+void show_password_dialog(AppState& app, const std::string&,
+                           const std::string&) {
+  app.operation_status = "libarchive not available";
+  app.operation_status_expires_ms = cmp_expiry_3s();
+  draw(app);
+}
+
+void execute_extract_with_password(AppState& app, const std::string& archive_path,
+                                   const std::string& dest_dir,
+                                   const std::string&) {
+  std::error_code ec;
+  fs::create_directories(dest_dir, ec);
+
+  std::string cmd = format_extract_cmd_internal(archive_path, dest_dir);
+  if (cmd.empty()) {
+    app.operation_status = "Unsupported archive format";
+    app.operation_status_expires_ms = cmp_expiry_3s();
+    draw(app);
+    return;
+  }
+  cmd += " 2>/dev/null";
+
+  auto prog = std::make_shared<OperationProgress>();
+  prog->type = OperationType::Extract;
+  prog->active.store(true);
+  app.op_progress = prog;
+  app.ops_panel_open = true;
+  draw(app);
+
+  std::string shell_cmd = cmd;
+
+  std::thread([&app, prog, shell_cmd]() {
+    int ret = std::system(shell_cmd.c_str());
+
+    prog->active = false;
+    DeferredCall::callLater([&app, ret]() {
+      app.operation_status = (ret == 0) ? "Extraction complete" : "Extraction failed";
+      app.operation_status_expires_ms = cmp_expiry_3s();
+      reload_dir(app);
+      draw(app);
+    });
+  }).detach();
+}
+
 void execute_extract_async(AppState& app, const std::string& archive_path,
                             const std::string& dest_dir) {
   std::error_code ec;
@@ -223,17 +603,28 @@ void execute_extract_async(AppState& app, const std::string& archive_path,
   }
   cmd += " 2>/dev/null";
 
-  app.operation_in_progress = true;
-  app.operation_status = "Extracting...";
+  auto prog = std::make_shared<OperationProgress>();
+  prog->type = OperationType::Extract;
+  prog->active.store(true);
+  app.op_progress = prog;
+  app.ops_panel_open = true;
   draw(app);
 
-  int ret = std::system(cmd.c_str());
+  std::string shell_cmd = cmd;
 
-  app.operation_in_progress = false;
-  app.operation_status = (ret == 0) ? "Extraction complete" : "Extraction failed";
-  app.operation_status_expires_ms = cmp_expiry_3s();
-  reload_dir(app);
-  draw(app);
+  std::thread([&app, prog, shell_cmd]() {
+    int ret = std::system(shell_cmd.c_str());
+
+    prog->active = false;
+    DeferredCall::callLater([&app, ret]() {
+      app.operation_status = (ret == 0) ? "Extraction complete" : "Extraction failed";
+      app.operation_status_expires_ms = cmp_expiry_3s();
+      reload_dir(app);
+      draw(app);
+    });
+  }).detach();
 }
+
+#endif
 
 } // namespace eh::file_browser

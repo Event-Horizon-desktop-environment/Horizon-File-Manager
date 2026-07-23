@@ -27,6 +27,9 @@
 #include <unistd.h>
 
 #include <mntent.h>
+#include <sys/statvfs.h>
+
+#include "services/udisks2/drive_filter.hpp"
 
 #include <gio/gio.h>
 
@@ -792,11 +795,24 @@ void reload_dir(AppState& app) {
           if (a.modified_sec < b.modified_sec) cmp = -1;
           else if (a.modified_sec > b.modified_sec) cmp = 1;
           break;
+        case SortField::FirstModified:
+          if (a.modified_sec < b.modified_sec) cmp = -1;
+          else if (a.modified_sec > b.modified_sec) cmp = 1;
+          break;
+        case SortField::LastModified:
+          if (a.modified_sec > b.modified_sec) cmp = -1;
+          else if (a.modified_sec < b.modified_sec) cmp = 1;
+          break;
         case SortField::Type:
           cmp = static_cast<int>(a.type) - static_cast<int>(b.type);
           if (cmp == 0) cmp = strverscmp(a.name.c_str(), b.name.c_str());
           break;
       }
+      // FirstModified/LastModified have fixed directions, ignore sort_descending
+      if (app.cur_tab().sort_field == SortField::FirstModified)
+        return cmp < 0;
+      if (app.cur_tab().sort_field == SortField::LastModified)
+        return cmp > 0;
       return app.cur_tab().sort_descending ? cmp > 0 : cmp < 0;
     });
 
@@ -982,17 +998,8 @@ void refresh_sidebar(AppState& app) {
   }
 
   // ── Drives ──
-  add_location(SidebarLocation::Kind::Root, "File System", "/", "drive-harddisk");
 
-  // Build a map of device path → UDisks2 info (if available).
-  // This gives us drive_id for mount/unmount and accurate mount status.
-  auto& udisks = drives::UDisks2DriveService::instance();
-  auto udisks_drives = udisks.query_drives();
-  std::map<std::string, const drives::DriveInfo*> udisk_map;
-  for (const auto& d : udisks_drives)
-    udisk_map[d.device] = &d;
-
-  // Build device → mountpoint map from /proc/mounts
+  // Build device → mountpoint map from /proc/mounts (needed for root label + drive filtering)
   std::map<std::string, std::string> mount_map;
   {
     auto* f = setmntent("/proc/mounts", "r");
@@ -1007,18 +1014,39 @@ void refresh_sidebar(AppState& app) {
     }
   }
 
+  // Build a map of device path → UDisks2 info (if available).
+  // This gives us drive_id for mount/unmount and accurate mount status.
+  auto& udisks = drives::UDisks2DriveService::instance();
+  auto udisks_drives = udisks.query_drives();
+  std::map<std::string, const drives::DriveInfo*> udisk_map;
+  for (const auto& d : udisks_drives)
+    udisk_map[d.device] = &d;
+
   std::set<std::string> seen_devs;
   std::vector<SidebarLocation> drive_locs;
 
   auto add_drive = [&](const std::string& label, const std::string& dev) {
     if (!seen_devs.insert(dev).second) return;
+
+    // Determine mount point and fs type for filtering
+    std::string mp;
+    std::string fs;
+    auto ui = udisk_map.find(dev);
+    if (ui != udisk_map.end()) {
+      mp = ui->second->mounted ? ui->second->mount_point : "";
+      fs = ui->second->id_type;
+    } else {
+      auto mi = mount_map.find(dev);
+      if (mi != mount_map.end()) mp = mi->second;
+    }
+
+    if (drives::should_hide_drive(dev, mp, fs, label)) return;
+
     SidebarLocation loc;
     loc.kind = SidebarLocation::Kind::Drive;
     loc.label = label;
     loc.icon_name = "drive-harddisk";
 
-    // Prefer UDisks2 for mount status + drive_id
-    auto ui = udisk_map.find(dev);
     if (ui != udisk_map.end()) {
       loc.drive_id = ui->second->object_path;
       loc.is_mounted = ui->second->mounted;
@@ -1052,6 +1080,83 @@ void refresh_sidebar(AppState& app) {
     return dev;
   };
 
+  // Find root device and its filesystem label
+  std::string root_dev;
+  std::string root_label;
+  for (auto& [dev, mp] : mount_map) {
+    if (mp == "/") { root_dev = dev; break; }
+  }
+  if (!root_dev.empty()) {
+    // Try filesystem label on the root device itself
+    auto* dlabel = opendir("/dev/disk/by-label");
+    if (dlabel) {
+      struct dirent* entry;
+      while ((entry = readdir(dlabel)) != nullptr) {
+        if (entry->d_name[0] == '.') continue;
+        std::string link = resolve_dev(std::string("/dev/disk/by-label/") + entry->d_name);
+        if (link == root_dev) {
+          root_label = unescape_name(entry->d_name);
+          break;
+        }
+      }
+      closedir(dlabel);
+    }
+    // If no label on root device, try any partition on the same disk
+    if (root_label.empty()) {
+      std::string root_disk = drives::disk_device_from_partition(root_dev);
+      auto* dlabel = opendir("/dev/disk/by-label");
+      if (dlabel) {
+        struct dirent* entry;
+        while ((entry = readdir(dlabel)) != nullptr) {
+          if (entry->d_name[0] == '.') continue;
+          std::string link = resolve_dev(std::string("/dev/disk/by-label/") + entry->d_name);
+          if (drives::disk_device_from_partition(link) == root_disk) {
+            root_label = unescape_name(entry->d_name);
+            break;
+          }
+        }
+        closedir(dlabel);
+      }
+    }
+    if (root_label.empty()) {
+      // Try partition label from by-partlabel
+      auto* plabel = opendir("/dev/disk/by-partlabel");
+      if (plabel) {
+        struct dirent* entry;
+        while ((entry = readdir(plabel)) != nullptr) {
+          if (entry->d_name[0] == '.') continue;
+          std::string link = resolve_dev(std::string("/dev/disk/by-partlabel/") + entry->d_name);
+          if (link == root_dev) {
+            root_label = unescape_name(entry->d_name);
+            break;
+          }
+        }
+        closedir(plabel);
+      }
+    }
+    if (root_label.empty() || drives::is_generic_partition_label(root_label)) {
+      uint64_t size = drives::get_device_size_bytes(root_dev);
+      if (size > 0)
+        root_label = drives::format_device_size(size);
+      else if (root_label.empty())
+        root_label = root_dev.substr(5);
+    }
+  }
+  add_location(SidebarLocation::Kind::Root,
+               root_label.empty() ? "File System" : root_label.c_str(),
+               "/", "drive-harddisk");
+  {
+    struct statvfs vfs;
+    if (statvfs("/", &vfs) == 0) {
+      auto& root = app.sidebar_locations.back();
+      root.total_bytes = static_cast<uint64_t>(vfs.f_frsize) * vfs.f_blocks;
+      root.free_bytes = static_cast<uint64_t>(vfs.f_frsize) * vfs.f_bavail;
+    }
+  }
+
+  // Exclude root device from drive scans (it's already shown as the Root entry above)
+  if (!root_dev.empty()) seen_devs.insert(root_dev);
+
   // Scan /dev/disk/by-label/ for filesystem labels
   auto* d = opendir("/dev/disk/by-label");
   if (d) {
@@ -1072,14 +1177,17 @@ void refresh_sidebar(AppState& app) {
     struct dirent* entry;
     while ((entry = readdir(d)) != nullptr) {
       if (entry->d_name[0] == '.') continue;
-      std::string label = unescape_name(entry->d_name);
+      std::string part_label = unescape_name(entry->d_name);
       std::string dev = resolve_dev(std::string("/dev/disk/by-partlabel/") + entry->d_name);
       if (dev.empty()) continue;
-      if (label == "EFI System Partition" ||
-          label == "Microsoft reserved partition" ||
-          label == "linux-boot" || label == "linux-efi" ||
-          label == "linux-root")
-        continue;
+      if (drives::should_hide_drive(dev, {}, {}, part_label)) continue;
+      std::string label;
+      if (drives::is_generic_partition_label(part_label)) {
+        uint64_t size = drives::get_device_size_bytes(dev);
+        label = size > 0 ? drives::format_device_size(size) : part_label;
+      } else {
+        label = part_label;
+      }
       add_drive(label, dev);
     }
     closedir(d);
@@ -1091,12 +1199,46 @@ void refresh_sidebar(AppState& app) {
     std::string label = d.label;
     if (label == d.device.substr(d.device.find_last_of('/') + 1))
       label.clear();
-    add_drive(label.empty() ? d.device : label, d.device);
+    if (label.empty() || drives::is_generic_partition_label(label)) {
+      // Try partition label from by-partlabel
+      auto* plabel = opendir("/dev/disk/by-partlabel");
+      if (plabel) {
+        struct dirent* entry;
+        while ((entry = readdir(plabel)) != nullptr) {
+          if (entry->d_name[0] == '.') continue;
+          std::string link = resolve_dev(std::string("/dev/disk/by-partlabel/") + entry->d_name);
+          if (link == d.device) {
+            std::string pl = unescape_name(entry->d_name);
+            if (!drives::is_generic_partition_label(pl)) {
+              label = pl;
+            }
+            break;
+          }
+        }
+        closedir(plabel);
+      }
+    }
+    if (label.empty()) {
+      uint64_t size = drives::get_device_size_bytes(d.device);
+      label = size > 0 ? drives::format_device_size(size) : d.device;
+    }
+    add_drive(label, d.device);
   }
 
   // Sort drives: mounted first, then unmounted
   std::stable_partition(drive_locs.begin(), drive_locs.end(),
                          [](const SidebarLocation& l) { return l.is_mounted; });
+
+  // Query disk usage for mounted drives
+  for (auto& loc : drive_locs) {
+    if (loc.is_mounted && !loc.path.empty()) {
+      struct statvfs vfs;
+      if (statvfs(loc.path.c_str(), &vfs) == 0) {
+        loc.total_bytes = static_cast<uint64_t>(vfs.f_frsize) * vfs.f_blocks;
+        loc.free_bytes = static_cast<uint64_t>(vfs.f_frsize) * vfs.f_bavail;
+      }
+    }
+  }
 
   for (auto& loc : drive_locs)
     app.sidebar_locations.push_back(std::move(loc));
@@ -1182,6 +1324,13 @@ void open_selected(AppState& app) {
   }
   if (entry.is_dir) {
     navigate_to(app, entry.path);
+  } else if (entry.type == FileType::Executable) {
+    pid_t pid = fork();
+    if (pid == 0) {
+      setsid();
+      execlp(entry.path.c_str(), entry.path.c_str(), nullptr);
+      _exit(1);
+    }
   } else {
     xdg::open_path_in_default_application(entry.path);
   }

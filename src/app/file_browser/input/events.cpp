@@ -1,4 +1,5 @@
 #include "../app.hpp"
+#include "../features/compress.hpp"
 #include "../features/drag.hpp"
 #include "../features/progress.hpp"
 #include "../features/recursive_search_worker.hpp"
@@ -98,7 +99,7 @@ int properties_hit_test(AppState& app, int x, int y) {
 
 int settings_hit_test(AppState& app, int x, int y) {
   const int card_w = 420;
-  const int card_h = 412;
+  const int card_h = 440;
   const int cx = (app.width - card_w) / 2;
   const int cy = (app.height - card_h) / 2;
   const int pad = 20;
@@ -245,6 +246,17 @@ int settings_hit_test(AppState& app, int x, int y) {
     if (x >= cx + pad + 8 && x < cx + pad + 8 + pv_slider_w &&
         y >= pv_slider_y - 10 && y < pv_slider_y + pv_slider_h + 20)
       return -17;
+  }
+
+  // Matugen theming toggle (Appearance tab)
+  if (app.settings_tab == 1) {
+    const int toggle_x = static_cast<int>(app.settings_hit_matugen_toggle[0]);
+    const int toggle_y = static_cast<int>(app.settings_hit_matugen_toggle[1]);
+    const int toggle_w = static_cast<int>(app.settings_hit_matugen_toggle[2]);
+    const int toggle_h = static_cast<int>(app.settings_hit_matugen_toggle[3]);
+    if (toggle_w > 0 && x >= toggle_x && x < toggle_x + toggle_w &&
+        y >= toggle_y && y < toggle_y + toggle_h)
+      return -18;
   }
 
   {
@@ -551,6 +563,11 @@ void handle_click(AppState& app, int x, int y, int button) {
         draw(app);
         return;
       }
+      if (hit == -18) {
+        app.settings_matugen_theming = !app.settings_matugen_theming;
+        draw(app);
+        return;
+      }
       if (hit >= 0) {
         app.settings_default_term_idx = hit + app.settings_dropdown_scroll;
         app.settings_dropdown_open = false;
@@ -600,6 +617,44 @@ void handle_click(AppState& app, int x, int y, int button) {
       app.confirm_hover_btn = -1;
       if (app.confirm_callback) app.confirm_callback(false);
       app.confirm_open = false;
+      draw(app);
+      return;
+    }
+    return;
+  }
+
+  // ── Password dialog clicks ──
+  if (app.password_dialog_open) {
+    int card_w = 400;
+    int card_h = 210;
+    int cx = (app.width - card_w) / 2;
+    int cy = (app.height - card_h) / 2;
+    int pad = 24;
+    int btn_h = 32;
+    int btn_w = 90;
+    int btn_gap = 10;
+    int btns_total = btn_w * 2 + btn_gap;
+    int btns_x = cx + (card_w - btns_total) / 2;
+    int btn_y = cy + card_h - pad - btn_h;
+
+    int extract_x = btns_x + btn_w + btn_gap;
+
+    if (button == 0x110 && x >= extract_x && x < extract_x + btn_w &&
+        y >= btn_y && y < btn_y + btn_h) {
+      std::string arc = std::move(app.password_archive_path);
+      std::string dst = std::move(app.password_dest_dir);
+      std::string pw = std::move(app.password_buf);
+      app.password_dialog_open = false;
+      draw(app);
+      execute_extract_with_password(app, arc, dst, pw);
+      return;
+    }
+
+    if (button == 0x110 && ((x >= btns_x && x < btns_x + btn_w &&
+        y >= btn_y && y < btn_y + btn_h) ||
+        (x < cx || x > cx + card_w ||
+         y < cy || y > cy + card_h))) {
+      app.password_dialog_open = false;
       draw(app);
       return;
     }
@@ -952,6 +1007,64 @@ void handle_click(AppState& app, int x, int y, int button) {
     return;
   }
 
+  // ── Open With dialog helper: write MIME default association ──
+  auto set_mime_default_app = [](const std::string& mime_type, const std::string& desktop_id) {
+    if (mime_type.empty() || desktop_id.empty()) return;
+    const char* home = std::getenv("HOME");
+    if (!home) return;
+    std::string path = std::string(home) + "/.config/mimeapps.list";
+
+    // Read existing file
+    std::vector<std::string> lines;
+    bool in_defaults = false;
+    bool found = false;
+    {
+      FILE* f = fopen(path.c_str(), "r");
+      if (f) {
+        char buf[1024];
+        std::string prefix = mime_type + "=";
+        while (fgets(buf, sizeof(buf), f)) {
+          std::string line = buf;
+          if (!line.empty() && line.back() == '\n') line.pop_back();
+          if (line == "[Default Applications]") { in_defaults = true; lines.push_back(line); continue; }
+          if (!line.empty() && line[0] == '[') { in_defaults = false; }
+          if (in_defaults && line.size() >= prefix.size() &&
+              line.compare(0, prefix.size(), prefix) == 0) {
+            std::string existing = line.substr(prefix.size());
+            if (existing.find(desktop_id) == std::string::npos) {
+              line = prefix + existing + ";" + desktop_id;
+            }
+            found = true;
+          }
+          lines.push_back(line);
+        }
+        fclose(f);
+      }
+    }
+
+    if (!found) {
+      // Ensure [Default Applications] section exists
+      bool has_section = false;
+      for (const auto& l : lines) {
+        if (l == "[Default Applications]") { has_section = true; break; }
+      }
+      if (!has_section) {
+        if (!lines.empty()) lines.push_back("");
+        lines.push_back("[Default Applications]");
+      }
+      // Append at end (after [Default Applications] header or at file end)
+      lines.push_back(mime_type + "=" + desktop_id);
+    }
+
+    FILE* f = fopen(path.c_str(), "w");
+    if (f) {
+      for (const auto& l : lines) {
+        fprintf(f, "%s\n", l.c_str());
+      }
+      fclose(f);
+    }
+  };
+
   // ── Open With dialog clicks ──
   if (app.open_with_open) {
     if (button == 0x110) {
@@ -981,6 +1094,14 @@ void handle_click(AppState& app, int x, int y, int button) {
         return;
       }
 
+      // "Set as Default" toggle
+      if (dx >= app.open_with_hit_default[0] && dx < app.open_with_hit_default[0] + app.open_with_hit_default[2] &&
+          dy >= app.open_with_hit_default[1] && dy < app.open_with_hit_default[1] + app.open_with_hit_default[3]) {
+        app.open_with_set_default = !app.open_with_set_default;
+        draw(app);
+        return;
+      }
+
       auto launch = [&](const AppState::OpenWithEntry& e) {
         std::string desktop = e.desktop_path;
         std::string file = app.open_with_file_path;
@@ -997,6 +1118,9 @@ void handle_click(AppState& app, int x, int y, int button) {
           dy >= app.open_with_hit_open[1] && dy < app.open_with_hit_open[1] + app.open_with_hit_open[3]) {
         if (app.open_with_selected >= 0 &&
             app.open_with_selected < static_cast<int>(app.open_with_apps.size())) {
+          if (app.open_with_set_default) {
+            set_mime_default_app(app.open_with_mime, app.open_with_apps[app.open_with_selected].desktop_id);
+          }
           launch(app.open_with_apps[app.open_with_selected]);
         }
         open_with_close(app);
@@ -1005,25 +1129,35 @@ void handle_click(AppState& app, int x, int y, int button) {
       }
 
       // App list
-      int pad = 16, pad_in = 12, top_bar_h = 44, entry_h = 40;
+      int pad = 16, pad_in = 12, top_bar_h = 44, entry_h = 40, section_h = 26;
       int total = static_cast<int>(app.open_with_apps.size());
-      int max_list_h = 320;
-      int visible = std::max(1, std::min(total, max_list_h / entry_h));
-      int list_h = visible * entry_h;
+      int rec_count = app.open_with_exact_count;
+      int total_content_h = total * entry_h;
+      if (rec_count > 0) total_content_h += section_h;
+      if (rec_count < total) total_content_h += section_h;
+      int list_h = std::min(total_content_h, 320);
       int list_x = static_cast<int>(app.open_with_x) + pad_in;
       int list_y = static_cast<int>(app.open_with_y) + pad + top_bar_h + pad_in;
       int list_w = static_cast<int>(app.open_with_w) - 2 * pad_in;
 
       if (dx >= list_x && dx < list_x + list_w &&
           dy >= list_y && dy < list_y + list_h) {
-        int idx = app.open_with_scroll + static_cast<int>((dy - list_y) / entry_h);
-        if (idx >= 0 && idx < total) {
-          app.open_with_selected = idx;
-          // Launch immediately on single click
-          launch(app.open_with_apps[idx]);
-          open_with_close(app);
-          draw(app);
-          return;
+        int content_y = app.open_with_scroll + static_cast<int>(dy - list_y);
+        int cy_off = 0;
+        for (int i = 0; i < total; ++i) {
+          if (i == 0 && rec_count > 0) cy_off += section_h;
+          if (i == rec_count && rec_count < total) cy_off += section_h;
+          if (content_y >= cy_off && content_y < cy_off + entry_h) {
+            app.open_with_selected = i;
+            if (app.open_with_set_default) {
+              set_mime_default_app(app.open_with_mime, app.open_with_apps[i].desktop_id);
+            }
+            launch(app.open_with_apps[i]);
+            open_with_close(app);
+            draw(app);
+            return;
+          }
+          cy_off += entry_h;
         }
       }
     }
@@ -1142,7 +1276,7 @@ void handle_click(AppState& app, int x, int y, int button) {
           y >= (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) && y < (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) + (app.active_pane ? app.r_sort_menu_h : app.sort_menu_h)) {
         int rel_y = y - (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) - 6;
         int idx = rel_y / 30;
-        if (idx >= 0 && idx <= 3) {
+        if (idx >= 0 && idx < 6) {
           app.cur_tab().sort_field = static_cast<SortField>(idx);
           (app.active_pane ? app.r_sort_menu_open : app.sort_menu_open) = false;
           save_file_browser_settings(app);
@@ -1173,7 +1307,6 @@ void handle_click(AppState& app, int x, int y, int button) {
         // Map click to global index, then to section+item or header
         int rel_y = y - click_filter_dd_y - kFilterPD;
         int gy = 0;
-        int glob = 0;
         int section = click_filter_section;
         int clicked_section = 0, clicked_item = -1;
         for (int si = 1; si <= 3; ++si) {
@@ -1183,7 +1316,6 @@ void handle_click(AppState& app, int x, int y, int button) {
             clicked_item = -1; // header click
             break;
           }
-          ++glob;
           gy += kFilterHdrH;
 
           // Items if expanded
@@ -1196,7 +1328,6 @@ void handle_click(AppState& app, int x, int y, int button) {
                 clicked_item = i;
                 break;
               }
-              ++glob;
               item_y += kFilterItemH;
             }
             gy = item_y;
@@ -1659,13 +1790,10 @@ void handle_click(AppState& app, int x, int y, int button) {
       return;
     }
 
-    // ── Progress panel cancel button ──
-    if (app.progress_panel_h > 0 && x < app.sidebar_width) {
-      int sb_bottom = app.height - app.status_bar_height;
-      int panel_y = sb_bottom - app.progress_panel_h;
-      if (y >= panel_y && y < sb_bottom &&
-          x >= app.progress_cancel_x && x < app.progress_cancel_x + app.progress_cancel_w &&
-          y >= app.progress_cancel_y && y < app.progress_cancel_y + app.progress_cancel_h) {
+    // ── Operations panel cancel button ──
+    if (app.ops_panel_open && app.ops_cancel_w > 0) {
+      if (x >= app.ops_cancel_x && x < app.ops_cancel_x + app.ops_cancel_w &&
+          y >= app.ops_cancel_y && y < app.ops_cancel_y + app.ops_cancel_h) {
         if (app.op_progress) app.op_progress->cancel = true;
         app.operation_status = "Cancelling...";
         app.operation_status_expires_ms =
@@ -1894,10 +2022,21 @@ void handle_click(AppState& app, int x, int y, int button) {
         }
         app.cur_tab().sel_anchor = idx;
       } else {
-        // Plain click: single select
-        app.cur_tab().selected_idx = idx;
-        app.cur_tab().multi_selected = {idx};
-        app.cur_tab().sel_anchor = idx;
+        // Plain click: single select — but preserve multi-selection if
+        // clicking an already-selected file (so drag picks up all items).
+        auto it = std::find(app.cur_tab().multi_selected.begin(),
+                            app.cur_tab().multi_selected.end(), idx);
+        if (it != app.cur_tab().multi_selected.end()) {
+          // Already selected — keep multi_selected intact, just update anchor
+          app.cut_paths.clear();
+          app.cur_tab().selected_idx = idx;
+          app.cur_tab().sel_anchor = idx;
+        } else {
+          app.cut_paths.clear();
+          app.cur_tab().selected_idx = idx;
+          app.cur_tab().multi_selected = {idx};
+          app.cur_tab().sel_anchor = idx;
+        }
       }
       app.last_click_ns = now_ns;
       app.last_click_x = x;
@@ -2024,13 +2163,10 @@ void handle_click(AppState& app, int x, int y, int button) {
       return;
     }
 
-    // ── Progress panel cancel (right-click too) ──
-    if (app.progress_panel_h > 0 && x < app.sidebar_width) {
-      int sb_bottom = app.height - app.status_bar_height;
-      int panel_y = sb_bottom - app.progress_panel_h;
-      if (y >= panel_y && y < sb_bottom &&
-          x >= app.progress_cancel_x && x < app.progress_cancel_x + app.progress_cancel_w &&
-          y >= app.progress_cancel_y && y < app.progress_cancel_y + app.progress_cancel_h) {
+    // ── Operations panel cancel (right-click too) ──
+    if (app.ops_panel_open && app.ops_cancel_w > 0) {
+      if (x >= app.ops_cancel_x && x < app.ops_cancel_x + app.ops_cancel_w &&
+          y >= app.ops_cancel_y && y < app.ops_cancel_y + app.ops_cancel_h) {
         if (app.op_progress) app.op_progress->cancel = true;
         app.operation_status = "Cancelling...";
         app.operation_status_expires_ms =
@@ -2470,19 +2606,36 @@ void handle_pointer_move(AppState& app, int x, int y) {
     } else if (dx >= app.open_with_hit_open[0] && dx < app.open_with_hit_open[0] + app.open_with_hit_open[2] &&
                dy >= app.open_with_hit_open[1] && dy < app.open_with_hit_open[1] + app.open_with_hit_open[3]) {
       new_hover = -4;
+    } else if (dx >= app.open_with_hit_default[0] && dx < app.open_with_hit_default[0] + app.open_with_hit_default[2] &&
+               dy >= app.open_with_hit_default[1] && dy < app.open_with_hit_default[1] + app.open_with_hit_default[3]) {
+      new_hover = -5;
     } else {
-      int pad = 16, pad_in = 12, top_bar_h = 44, entry_h = 40;
+      int pad = 16, pad_in = 12, top_bar_h = 44, entry_h = 40, section_h = 26;
       int total = static_cast<int>(app.open_with_apps.size());
-      int max_list_h = 320;
-      int visible = std::max(1, std::min(total, max_list_h / entry_h));
-      int list_h = visible * entry_h;
+      int rec_count = app.open_with_exact_count;
+      int total_content_h = total * entry_h;
+      if (rec_count > 0) total_content_h += section_h;
+      if (rec_count < total) total_content_h += section_h;
+      int list_h = std::min(total_content_h, 320);
       int list_x = static_cast<int>(app.open_with_x) + pad_in;
       int list_y = static_cast<int>(app.open_with_y) + pad + top_bar_h + pad_in;
       int list_w = static_cast<int>(app.open_with_w) - 2 * pad_in;
       if (dx >= list_x && dx < list_x + list_w &&
           dy >= list_y && dy < list_y + list_h) {
-        int idx = app.open_with_scroll + static_cast<int>((dy - list_y) / entry_h);
-        if (idx >= 0 && idx < total) new_hover = idx;
+        int content_y = app.open_with_scroll + static_cast<int>(dy - list_y);
+        int cy_off = 0;
+        for (int i = 0; i < total; ++i) {
+          if (i == 0 && rec_count > 0) {
+            if (content_y >= cy_off && content_y < cy_off + section_h) { new_hover = -1; break; }
+            cy_off += section_h;
+          }
+          if (i == rec_count && rec_count < total) {
+            if (content_y >= cy_off && content_y < cy_off + section_h) { new_hover = -1; break; }
+            cy_off += section_h;
+          }
+          if (content_y >= cy_off && content_y < cy_off + entry_h) { new_hover = i; break; }
+          cy_off += entry_h;
+        }
       }
     }
 
@@ -3001,12 +3154,20 @@ static int entry_bottom(AppState const& app, int vi) {
 void handle_scroll(AppState& app, int x, int, double, double dy) {
   if (app.open_with_open) {
     int total = static_cast<int>(app.open_with_apps.size());
-    int max_visible = std::max(1, 320 / 40);
-    int visible = std::min(total, max_visible);
-    if (total > visible) {
-      int delta = (dy > 0) ? -1 : (dy < 0) ? 1 : 0;
-      app.open_with_scroll = std::clamp(app.open_with_scroll + delta, 0, total - visible);
-      draw(app);
+    int rec_count = app.open_with_exact_count;
+    int entry_h = 40, section_h = 26;
+    int total_content_h = total * entry_h;
+    if (rec_count > 0) total_content_h += section_h;
+    if (rec_count < total) total_content_h += section_h;
+    int list_h = std::min(total_content_h, 320);
+    int max_scroll = std::max(0, total_content_h - list_h);
+    if (max_scroll > 0) {
+      int delta = static_cast<int>(-dy * 40);
+      int new_scroll = std::clamp(app.open_with_scroll + delta, 0, max_scroll);
+      if (new_scroll != app.open_with_scroll) {
+        app.open_with_scroll = new_scroll;
+        draw(app);
+      }
     }
     return;
   }
@@ -3043,22 +3204,33 @@ void handle_scroll(AppState& app, int x, int, double, double dy) {
     return;
   }
 
+  bool was_settled;
   if (app.cur_tab().view_mode == ViewMode::Computer) {
     int max_h = std::max(0, app.computer_content_h - (app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height));
-    int target = std::clamp(app.computer_scroll_px - static_cast<int>(dy * 40), 0, max_h);
+    was_settled = std::abs(app.computer_scroll_smooth_current - app.computer_scroll_smooth_target) <= 0.5;
+    int target = std::clamp(static_cast<int>(std::lround(app.computer_scroll_smooth_target)) - static_cast<int>(dy * 40), 0, max_h);
     app.computer_scroll_smooth_target = static_cast<double>(target);
-    app.computer_scroll_smooth_current = static_cast<double>(app.computer_scroll_px);
+    if (was_settled) app.computer_scroll_smooth_current = static_cast<double>(app.computer_scroll_px);
   } else {
     int max_h = std::max(0, app.cur_tab().content_h - (app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height));
-    int target = std::clamp(app.cur_tab().scroll_px - static_cast<int>(dy * 40), 0, max_h);
+    was_settled = std::abs(app.cur_tab().scroll_smooth_current - app.cur_tab().scroll_smooth_target) <= 0.5;
+    int target = std::clamp(static_cast<int>(std::lround(app.cur_tab().scroll_smooth_target)) - static_cast<int>(dy * 40), 0, max_h);
     app.cur_tab().scroll_smooth_target = static_cast<double>(target);
-    app.cur_tab().scroll_smooth_current = static_cast<double>(app.cur_tab().scroll_px);
+    if (was_settled) app.cur_tab().scroll_smooth_current = static_cast<double>(app.cur_tab().scroll_px);
   }
 
-  timespec ts{};
-  clock_gettime(CLOCK_MONOTONIC, &ts);
-  app.scroll_anim_start_ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
-                              static_cast<uint64_t>(ts.tv_nsec);
+  // Restart the ease-curve clock on every wheel tick so the decay factor is
+  // always computed relative to *this* tick's starting position — but never
+  // touch scroll_smooth_current here unless we were fully at rest, so an
+  // in-flight glide keeps its current position/velocity instead of being
+  // snapped back to the last settled pixel. This is what lets rapid wheel
+  // ticks compound into one continuous glide instead of stuttering.
+  {
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    app.scroll_anim_start_ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
+                                static_cast<uint64_t>(ts.tv_nsec);
+  }
   app.scroll_needs_redraw = true;
   draw(app);
 }
@@ -3232,6 +3404,87 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     if (sym == XKB_KEY_BackSpace && !app.create_buf.empty()) {
       app.create_buf.pop_back();
       app.create_cursor_pos = static_cast<int>(app.create_buf.size());
+      { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
+        app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
+        app.key_repeat_last_ms = app.key_repeat_start_ms; }
+      draw(app);
+      return true;
+    }
+    if (utf8 && utf8_len > 0 && utf8_len <= 4) {
+      app.create_buf.insert(app.create_cursor_pos, utf8, utf8_len);
+      app.create_cursor_pos += utf8_len;
+      draw(app);
+      return true;
+    }
+    return false;
+  }
+
+  if (app.password_dialog_open) {
+    if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+      std::string arc = std::move(app.password_archive_path);
+      std::string dst = std::move(app.password_dest_dir);
+      std::string pw = std::move(app.password_buf);
+      app.password_dialog_open = false;
+      draw(app);
+      execute_extract_with_password(app, arc, dst, pw);
+      return true;
+    }
+    if (sym == XKB_KEY_Escape) {
+      app.password_dialog_open = false;
+      draw(app);
+      return true;
+    }
+    if (ctrl && (sym == XKB_KEY_V || sym == XKB_KEY_v)) {
+      std::string clip = app.clipboard.read_selection_text(app.wl.display());
+      if (!clip.empty()) {
+        app.password_buf.insert(app.password_cursor_pos, clip);
+        app.password_cursor_pos += static_cast<int>(clip.size());
+        draw(app);
+      }
+      return true;
+    }
+    if (sym == XKB_KEY_Left) {
+      if (app.password_cursor_pos > 0) --app.password_cursor_pos;
+      draw(app);
+      return true;
+    }
+    if (sym == XKB_KEY_Right) {
+      if (app.password_cursor_pos < static_cast<int>(app.password_buf.size()))
+        ++app.password_cursor_pos;
+      draw(app);
+      return true;
+    }
+    if (sym == XKB_KEY_Home || (ctrl && (sym == XKB_KEY_A || sym == XKB_KEY_a))) {
+      app.password_cursor_pos = 0;
+      draw(app);
+      return true;
+    }
+    if (sym == XKB_KEY_End || (ctrl && (sym == XKB_KEY_E || sym == XKB_KEY_e))) {
+      app.password_cursor_pos = static_cast<int>(app.password_buf.size());
+      draw(app);
+      return true;
+    }
+    if (sym == XKB_KEY_Delete) {
+      if (app.password_cursor_pos < static_cast<int>(app.password_buf.size())) {
+        app.password_buf.erase(app.password_cursor_pos, 1);
+        draw(app);
+      }
+      return true;
+    }
+    if (sym == XKB_KEY_BackSpace) {
+      if (app.password_cursor_pos > 0) {
+        app.password_buf.erase(app.password_cursor_pos - 1, 1);
+        --app.password_cursor_pos;
+        { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
+          app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
+          app.key_repeat_last_ms = app.key_repeat_start_ms; }
+        draw(app);
+      }
+      return true;
+    }
+    if (utf8 && utf8_len > 0 && utf8_len <= 4) {
+      app.password_buf.insert(app.password_cursor_pos, utf8, utf8_len);
+      app.password_cursor_pos += utf8_len;
       draw(app);
       return true;
     }
@@ -3273,9 +3526,12 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
         app.rename_ui_buf.erase(app.rename_ui_cursor_pos - 1, 1);
         --app.rename_ui_cursor_pos;
       }
-      { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
-        app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
-        app.key_repeat_last_ms = app.key_repeat_start_ms; }
+      if (app.rename_ui_buf.empty())
+        app.key_repeat_sym = 0;
+      else
+        { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
+          app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
+          app.key_repeat_last_ms = app.key_repeat_start_ms; }
       draw(app);
       return true;
     }
@@ -3842,22 +4098,28 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   }
 
   if (ctrl && (sym == XKB_KEY_X || sym == XKB_KEY_x)) {
+    app.cut_paths.clear();
     if (!app.cur_tab().multi_selected.empty()) {
       std::vector<std::string> paths;
       for (int vis_idx : app.cur_tab().multi_selected) {
         if (vis_idx >= 0 && vis_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
           int real_idx = app.cur_tab().visible_entries[vis_idx];
-          if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()))
+          if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size())) {
             paths.push_back(app.cur_tab().entries[real_idx].path);
+            app.cut_paths.insert(app.cur_tab().entries[real_idx].path);
+          }
         }
       }
       if (!paths.empty()) app.clipboard.copy_files(true, paths);
     } else if (app.cur_tab().selected_idx >= 0 &&
                app.cur_tab().selected_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
       int real_idx = app.cur_tab().visible_entries[app.cur_tab().selected_idx];
-      if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()))
+      if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size())) {
         app.clipboard.copy_files(true, {app.cur_tab().entries[real_idx].path});
+        app.cut_paths.insert(app.cur_tab().entries[real_idx].path);
+      }
     }
+    app.pendingRedraw = true;
     return true;
   }
 
@@ -3993,6 +4255,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       start_async_op(src_paths, dest.string(), is_cut, prog,
           [&app, is_cut](bool cancelled) {
             if (!cancelled) {
+              app.cut_paths.clear();
               app.operation_status = is_cut ? "Moved" : "Pasted";
               app.operation_status_expires_ms =
                   std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -4234,15 +4497,9 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       app.cur_tab().multi_selected = {idx};
       if (app.cur_tab().view_mode == ViewMode::Grid) {
         double zf = app.zoom_pct / 100.0;
-        int icon_size = std::max(16, static_cast<int>(48.0 * zf));
-        int label_h = static_cast<int>(20.0 * zf);
-        int cell_size = app.grid_cell_size;
-        int gap = app.grid_cell_gap;
-        int row_h = icon_size + 8 + 4 + label_h + gap;
-        int top_gap = gap;
-        int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
-        int content_w = app.width - sidebar_w;
-        int cols = std::max(1, (content_w - gap) / (cell_size + gap));
+        int row_h = app.grid_row_h;
+        int cols = std::max(1, app.grid_cols);
+        int top_gap = static_cast<int>(10.0 * zf);
         int target_line = top_gap + (idx / cols) * row_h;
         if (target_line < app.cur_tab().scroll_px)
           app.cur_tab().scroll_px = target_line;
@@ -4288,15 +4545,9 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       app.cur_tab().multi_selected = {idx};
       if (app.cur_tab().view_mode == ViewMode::Grid) {
         double zf = app.zoom_pct / 100.0;
-        int icon_size = std::max(16, static_cast<int>(48.0 * zf));
-        int label_h = static_cast<int>(20.0 * zf);
-        int cell_size = app.grid_cell_size;
-        int gap = app.grid_cell_gap;
-        int row_h = icon_size + 8 + 4 + label_h + gap;
-        int top_gap = gap;
-        int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
-        int content_w = app.width - sidebar_w;
-        int cols = std::max(1, (content_w - gap) / (cell_size + gap));
+        int row_h = app.grid_row_h;
+        int cols = std::max(1, app.grid_cols);
+        int top_gap = static_cast<int>(10.0 * zf);
         int view_h = app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height;
         int target_line = top_gap + (idx / cols + 1) * row_h;
         if (target_line > app.cur_tab().scroll_px + view_h)
@@ -4330,16 +4581,10 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       }
       int idx = app.cur_tab().selected_idx >= 0 ? app.cur_tab().selected_idx : 0;
       if (app.cur_tab().view_mode == ViewMode::Grid) {
-        int cell_size = app.grid_cell_size;
-        int gap = app.grid_cell_gap;
         double zf = app.zoom_pct / 100.0;
-        int icon_size = std::max(16, static_cast<int>(48.0 * zf));
-        int label_h = static_cast<int>(20.0 * zf);
-        int row_h = icon_size + 8 + 4 + label_h + gap;
-        int top_gap = gap;
-        int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
-        int content_w = app.width - sidebar_w;
-        int cols = std::max(1, (content_w - gap) / (cell_size + gap));
+        int row_h = app.grid_row_h;
+        int cols = std::max(1, app.grid_cols);
+        int top_gap = static_cast<int>(10.0 * zf);
         idx = std::max(0, idx - cols);
         app.cur_tab().selected_idx = idx;
         app.cur_tab().multi_selected = {idx};
@@ -4379,16 +4624,10 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       int idx = app.cur_tab().selected_idx >= 0 ? app.cur_tab().selected_idx : -1;
       int max_idx = static_cast<int>(app.cur_tab().visible_entries.size()) - 1;
       if (app.cur_tab().view_mode == ViewMode::Grid) {
-        int cell_size = app.grid_cell_size;
-        int gap = app.grid_cell_gap;
         double zf = app.zoom_pct / 100.0;
-        int icon_size = std::max(16, static_cast<int>(48.0 * zf));
-        int label_h = static_cast<int>(20.0 * zf);
-        int row_h = icon_size + 8 + 4 + label_h + gap;
-        int top_gap = gap;
-        int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
-        int content_w = app.width - sidebar_w;
-        int cols = std::max(1, (content_w - gap) / (cell_size + gap));
+        int row_h = app.grid_row_h;
+        int cols = std::max(1, app.grid_cols);
+        int top_gap = static_cast<int>(10.0 * zf);
         idx = std::min(max_idx, idx + cols);
         app.cur_tab().selected_idx = idx;
         app.cur_tab().multi_selected = {idx};
@@ -4524,6 +4763,13 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     return true;
   }
 
+  if (app.password_dialog_open && utf8 && utf8_len > 0 && utf8_len <= 4) {
+    app.password_buf.append(utf8, utf8_len);
+    app.password_cursor_pos = static_cast<int>(app.password_buf.size());
+    draw(app);
+    return true;
+  }
+
   if (app.rename_ui_open && utf8 && utf8_len > 0 && utf8_len <= 4) {
     app.rename_ui_buf.append(utf8, utf8_len);
     app.rename_ui_cursor_pos = static_cast<int>(app.rename_ui_buf.size());
@@ -4534,6 +4780,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   // ── Type-to-find: printable character activates search bar ──
   if (!(app.active_pane ? app.r_search_active : app.search_active) && !(app.active_pane ? app.r_path_editing : app.path_editing) && !app.settings_open &&
       !app.confirm_open && !app.create_dialog_open && !app.rename_ui_open &&
+      !app.password_dialog_open &&
       !app.properties.open && !app.open_with_open && !app.compress_dialog_open &&
       !app.batch_rename_open && !app.settings_dropdown_open &&
       (app.active_pane ? !app.r_sort_menu_open : !app.sort_menu_open) && !app.context_menu_open &&
@@ -4567,6 +4814,15 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     reset_preview(app);
     draw(app);
     return true;
+  }
+
+  // ── Escape: clear cut indicator and selection ──
+  if (sym == XKB_KEY_Escape) {
+    if (!app.cut_paths.empty()) {
+      app.cut_paths.clear();
+      draw(app);
+      return true;
+    }
   }
 
   return false;

@@ -4,6 +4,7 @@
 #include <filesystem>
 #include <fstream>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -72,33 +73,37 @@ const std::vector<DesktopEntry>& get_cached_entries() {
 
 std::vector<DesktopEntry> copy_desktop_entries() {
   std::vector<DesktopEntry> entries;
+  std::unordered_set<std::string> seen_paths;
 
-  // Search standard XDG data directories for .desktop files
+  // Collect all XDG application directories to scan
+  std::vector<std::string> app_dirs;
   const char* xdg_data_dirs = std::getenv("XDG_DATA_DIRS");
   std::string search_paths = xdg_data_dirs ? xdg_data_dirs : "/usr/local/share:/usr/share";
   search_paths += ":" + (std::getenv("XDG_DATA_HOME") ? std::string(std::getenv("XDG_DATA_HOME")) : std::string(std::getenv("HOME")) + "/.local/share");
 
-  std::string apps_dir;
-  size_t start = 0, end;
-  while ((end = search_paths.find(':', start)) != std::string::npos) {
-    apps_dir = search_paths.substr(start, end - start) + "/applications";
-    start = end + 1;
-    if (fs::is_directory(apps_dir)) break;
+  {
+    size_t start = 0, end;
+    while ((end = search_paths.find(':', start)) != std::string::npos) {
+      std::string dir = search_paths.substr(start, end - start) + "/applications";
+      if (fs::is_directory(dir)) app_dirs.push_back(std::move(dir));
+      start = end + 1;
+    }
+    if (start < search_paths.size()) {
+      std::string dir = search_paths.substr(start) + "/applications";
+      if (fs::is_directory(dir)) app_dirs.push_back(std::move(dir));
+    }
   }
-  if (start < search_paths.size())
-    apps_dir = search_paths.substr(start) + "/applications";
-  if (!fs::is_directory(apps_dir))
-    apps_dir = "/usr/share/applications";
+  if (app_dirs.empty()) {
+    if (fs::is_directory("/usr/share/applications"))
+      app_dirs.push_back("/usr/share/applications");
+  }
 
-  if (!fs::is_directory(apps_dir)) return entries;
-
-  for (const auto& de : fs::directory_iterator(apps_dir)) {
-    if (de.path().extension() != ".desktop") continue;
-    std::ifstream f(de.path());
-    if (!f.is_open()) continue;
+  auto parse_desktop = [&](const fs::path& path) {
+    std::ifstream f(path);
+    if (!f.is_open()) return;
 
     DesktopEntry entry;
-    entry.path = de.path().string();
+    entry.path = path.string();
 
     std::string line;
     bool in_desktop_entry = false;
@@ -130,6 +135,15 @@ std::vector<DesktopEntry> copy_desktop_entries() {
 
     if (!entry.name.empty()) {
       entries.push_back(std::move(entry));
+    }
+  };
+
+  for (const auto& dir : app_dirs) {
+    std::error_code ec;
+    for (const auto& de : fs::directory_iterator(dir, ec)) {
+      if (de.path().extension() != ".desktop") continue;
+      if (!seen_paths.insert(de.path().string()).second) continue;
+      parse_desktop(de.path());
     }
   }
 

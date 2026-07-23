@@ -22,6 +22,18 @@ static int count_files_recursive(const fs::path& path) {
   return 1;
 }
 
+static uint64_t count_bytes_recursive(const fs::path& path) {
+  std::error_code ec;
+  if (fs::is_directory(path, ec)) {
+    uint64_t total = 0;
+    for (auto& de : fs::recursive_directory_iterator(path, ec))
+      if (de.is_regular_file(ec))
+        total += de.file_size(ec);
+    return total;
+  }
+  return fs::file_size(path, ec);
+}
+
 static void copy_file_with_parents(const fs::path& src, const fs::path& dest,
                                     std::error_code& ec) {
   fs::create_directories(dest.parent_path(), ec);
@@ -47,6 +59,8 @@ static void copy_recursive(const fs::path& src, const fs::path& dest,
       ++done;
       prog->copied_files.store(done.load());
       prog->progress.store(total > 0 ? static_cast<double>(done.load()) / total : 0.0);
+      uint64_t file_sz = fs::file_size(src, ec);
+      prog->done_bytes.fetch_add(file_sz);
       prog->current_file = src.filename().string();
     }
   }
@@ -56,13 +70,18 @@ static void do_operation(std::vector<std::string> src_paths,
                          std::string dest_dir, bool is_move,
                          std::shared_ptr<OperationProgress> prog,
                          OpCompleteCallback on_complete) {
-  // Phase 1: count total files
+  prog->start_time = std::chrono::steady_clock::now();
+
+  // Phase 1: count total files and bytes
   int total = 0;
+  uint64_t total_bytes = 0;
   for (auto& src : src_paths) {
     total += count_files_recursive(src);
+    total_bytes += count_bytes_recursive(src);
     if (prog->cancel.load()) { prog->active = false; goto done; }
   }
   prog->total_files.store(total);
+  prog->total_bytes.store(total_bytes);
 
   // Phase 2: copy each source
   {

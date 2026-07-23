@@ -28,5 +28,11 @@ void check_compress_tool_availability(AppState& app);
 void execute_compress_async(AppState& app);
 void execute_extract_async(AppState& app, const std::string& archive_path,
                             const std::string& dest_dir);
+void execute_extract_with_password(AppState& app, const std::string& archive_path,
+                                   const std::string& dest_dir,
+                                   const std::string& password);
+bool archive_is_encrypted(const std::string& archive_path);
+void show_password_dialog(AppState& app, const std::string& archive_path,
+                           const std::string& dest_dir);
 
 } // namespace eh::file_browser

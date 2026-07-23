@@ -16,6 +16,7 @@
 #include <mntent.h>
 
 #include "services/udisks2/udisks2_drive_service.hpp"
+#include "services/udisks2/drive_filter.hpp"
 
 namespace fs = std::filesystem;
 
@@ -113,6 +114,7 @@ void refresh_computer(AppState& app) {
   };
 
   // Parse /proc/mounts for mounted block devices
+  std::string root_dev;
   FILE* mtab = setmntent("/proc/mounts", "r");
   if (mtab) {
     struct mntent mnt_buf;
@@ -120,20 +122,14 @@ void refresh_computer(AppState& app) {
     while (getmntent_r(mtab, &mnt_buf, mnt_str_buf, sizeof(mnt_str_buf))) {
       std::string dev = mnt_buf.mnt_fsname;
       std::string mp = mnt_buf.mnt_dir;
-      // Skip pseudo-fs, /dev, /proc, /sys, tmpfs, etc.
       if (dev.empty() || dev[0] != '/') continue;
-      if (mp == "/boot" || mp == "/boot/efi" || mp == "/recovery") continue;
-      // Skip non-block devices
       if (dev.find("/dev/") != 0) continue;
-      // Skip loop, snap, zram
-      if (dev.find("loop") != std::string::npos ||
-          dev.find("zram") != std::string::npos ||
-          dev.find("snap") != std::string::npos)
-        continue;
+      if (drives::should_hide_drive(dev, mp, mnt_buf.mnt_type)) continue;
       // Skip if already seen
       if (std::find(seen_mounts.begin(), seen_mounts.end(), dev) != seen_mounts.end())
         continue;
       seen_mounts.push_back(dev);
+      if (mp == "/") root_dev = dev;
 
       ComputerItem item;
       item.shape = ComputerItem::ShapeType::Large;
@@ -145,7 +141,6 @@ void refresh_computer(AppState& app) {
 
       // Get filesystem label from /dev/disk/by-label/
       std::string dev_base = dev.substr(5); // strip "/dev/"
-      std::string label_path = "/dev/disk/by-label/";
       std::error_code ec;
       for (auto& entry : fs::directory_iterator("/dev/disk/by-label/", ec)) {
         std::error_code ec2;
@@ -156,9 +151,50 @@ void refresh_computer(AppState& app) {
           break;
         }
       }
+      // If no label on this device, try any partition on the same disk
       if (item.label.empty()) {
-        if (mp == "/") item.label = "System Disk";
-        else item.label = dev_base;
+        std::string disk = eh::drives::disk_device_from_partition(dev);
+        for (auto& entry : fs::directory_iterator("/dev/disk/by-label/", ec)) {
+          std::error_code ec2;
+          std::string target = fs::read_symlink(entry.path(), ec2).string();
+          if (ec2 || target.empty()) continue;
+          std::string link_dev;
+          if (target.size() > 6 && target.substr(0, 6) == "../../")
+            link_dev = "/dev/" + target.substr(6);
+          else if (target.size() > 3 && target.substr(0, 3) == "../")
+            link_dev = "/dev/" + target.substr(3);
+          else
+            link_dev = target;
+          if (eh::drives::disk_device_from_partition(link_dev) == disk) {
+            item.label = unescape_name(entry.path().filename().string());
+            item.is_user_label = true;
+            break;
+          }
+        }
+      }
+      // Try GPT partition label from /dev/disk/by-partlabel/
+      if (item.label.empty()) {
+        for (auto& entry : fs::directory_iterator("/dev/disk/by-partlabel/", ec)) {
+          std::error_code ec2;
+          std::string target = fs::read_symlink(entry.path(), ec2).string();
+          if (ec2 || target.empty()) continue;
+          std::string link_dev;
+          if (target.size() > 6 && target.substr(0, 6) == "../../")
+            link_dev = "/dev/" + target.substr(6);
+          else if (target.size() > 3 && target.substr(0, 3) == "../")
+            link_dev = "/dev/" + target.substr(3);
+          else
+            link_dev = target;
+          if (link_dev == dev) {
+            item.label = unescape_name(entry.path().filename().string());
+            item.is_user_label = true;
+            break;
+          }
+        }
+      }
+      if (item.label.empty()) {
+        uint64_t size = eh::drives::get_device_size_bytes(dev);
+        item.label = size > 0 ? eh::drives::format_device_size(size) : dev_base;
       }
 
       // Get space info
@@ -176,6 +212,10 @@ void refresh_computer(AppState& app) {
     endmntent(mtab);
   }
 
+  // Exclude root device from unmounted scans (already shown above)
+  std::vector<std::string> seen_devs = seen_mounts;
+  if (!root_dev.empty()) seen_devs.push_back(root_dev);
+
   // Scan /dev/disk/by-label/ for unmounted labeled drives
   {
     std::error_code ec;
@@ -191,9 +231,10 @@ void refresh_computer(AppState& app) {
       else
         dev = target;
       if (dev.size() < 5 || dev.substr(0, 5) != "/dev/") continue;
-      if (std::find(seen_mounts.begin(), seen_mounts.end(), dev) != seen_mounts.end())
+      if (drives::should_hide_drive(dev)) continue;
+      if (std::find(seen_devs.begin(), seen_devs.end(), dev) != seen_devs.end())
         continue;
-      seen_mounts.push_back(dev);
+      seen_devs.push_back(dev);
 
       ComputerItem item;
       item.shape = ComputerItem::ShapeType::Large;
@@ -222,20 +263,21 @@ void refresh_computer(AppState& app) {
       else
         dev = target;
       if (dev.size() < 5 || dev.substr(0, 5) != "/dev/") continue;
-      std::string label = unescape_name(entry.path().filename().string());
-      if (label == "EFI System Partition" ||
-          label == "Microsoft reserved partition" ||
-          label == "linux-boot" || label == "linux-efi" ||
-          label == "linux-root")
+      std::string part_label = unescape_name(entry.path().filename().string());
+      if (drives::should_hide_drive(dev, {}, {}, part_label)) continue;
+      if (std::find(seen_devs.begin(), seen_devs.end(), dev) != seen_devs.end())
         continue;
-      if (std::find(seen_mounts.begin(), seen_mounts.end(), dev) != seen_mounts.end())
-        continue;
-      seen_mounts.push_back(dev);
+      seen_devs.push_back(dev);
 
       ComputerItem item;
       item.shape = ComputerItem::ShapeType::Large;
       item.group = ComputerItem::Group::Disks;
-      item.label = label;
+      if (eh::drives::is_generic_partition_label(part_label)) {
+        uint64_t size = eh::drives::get_device_size_bytes(dev);
+        item.label = size > 0 ? eh::drives::format_device_size(size) : part_label;
+      } else {
+        item.label = part_label;
+      }
       item.drive_id = dev;
       item.is_mounted = false;
       item.icon_name = "drive-harddisk";
@@ -258,7 +300,40 @@ void refresh_computer(AppState& app) {
     ComputerItem item;
     item.shape = ComputerItem::ShapeType::Large;
     item.group = ComputerItem::Group::Disks;
-    item.label = d.label.empty() ? "Local Disk" : d.label;
+    std::string display_label = d.label;
+    if (display_label.empty() || display_label == d.device.substr(d.device.find_last_of('/') + 1) ||
+        eh::drives::is_generic_partition_label(display_label)) {
+      // Try partition label from by-partlabel
+      std::string part_label;
+      std::error_code ec2;
+      for (auto& entry : fs::directory_iterator("/dev/disk/by-partlabel/", ec2)) {
+        std::error_code ec3;
+        std::string target = fs::read_symlink(entry.path(), ec3).string();
+        if (ec3 || target.empty()) continue;
+        std::string link_dev;
+        if (target.size() > 6 && target.substr(0, 6) == "../../")
+          link_dev = "/dev/" + target.substr(6);
+        else if (target.size() > 3 && target.substr(0, 3) == "../")
+          link_dev = "/dev/" + target.substr(3);
+        else
+          link_dev = target;
+        if (link_dev == d.device) {
+          std::string pl = unescape_name(entry.path().filename().string());
+          if (!eh::drives::is_generic_partition_label(pl)) {
+            part_label = pl;
+          }
+          break;
+        }
+      }
+      if (!part_label.empty()) {
+        item.label = part_label;
+      } else {
+        uint64_t size = eh::drives::get_device_size_bytes(d.device);
+        item.label = size > 0 ? eh::drives::format_device_size(size) : "Local Disk";
+      }
+    } else {
+      item.label = display_label;
+    }
     item.drive_id = d.device;
     item.filesystem = d.id_type;
     item.path = d.mount_point;

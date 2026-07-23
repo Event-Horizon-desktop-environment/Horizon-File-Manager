@@ -185,3 +185,15 @@ executable(
   ],
   install: true,
 )
+
+# ── Desktop entry ────────────────────────────────────────────────────
+install_data('src/horizon-files.desktop',
+  install_dir: join_paths(get_option('datadir'), 'applications'))
+
+# ── Icon ─────────────────────────────────────────────────────────────
+install_data(
+  join_paths(meson.project_source_root(), 'assets', 'icons', 'Horizon-Files.svg'),
+  install_dir: join_paths(get_option('datadir'), 'icons', 'hicolor', 'scalable', 'apps'),
+  rename: 'horizon-filesv2.svg',
+)
+

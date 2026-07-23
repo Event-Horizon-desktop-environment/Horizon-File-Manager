@@ -2,6 +2,8 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -57,6 +59,43 @@ bool clipboard_paste_into_directory(const std::string&, std::vector<std::string>
 bool trash_file(const std::string& abs_path) {
   std::string cmd = "gio trash '" + abs_path + "' 2>/dev/null";
   return std::system(cmd.c_str()) == 0;
+}
+
+bool restore_from_trash(const std::string& trash_file_path) {
+  const char* home = std::getenv("HOME");
+  if (!home) return false;
+
+  std::string trash_prefix = std::string(home) + "/.local/share/Trash/files/";
+  if (trash_file_path.find(trash_prefix) != 0) return false;
+
+  std::string filename = trash_file_path.substr(trash_prefix.size());
+
+  std::string info_path = std::string(home) + "/.local/share/Trash/info/" + filename + ".trashinfo";
+
+  std::ifstream info(info_path);
+  if (!info.is_open()) return false;
+
+  std::string original_path;
+  std::string line;
+  while (std::getline(info, line)) {
+    if (line.compare(0, 5, "Path=") == 0) {
+      original_path = line.substr(5);
+      break;
+    }
+  }
+  info.close();
+
+  if (original_path.empty()) return false;
+
+  std::string mkdir_cmd = "mkdir -p '" + original_path.substr(0, original_path.rfind('/')) + "' 2>/dev/null";
+  std::system(mkdir_cmd.c_str());
+
+  std::string mv_cmd = "mv '" + trash_file_path + "' '" + original_path + "' 2>/dev/null";
+  int ret = std::system(mv_cmd.c_str());
+  if (ret != 0) return false;
+
+  std::remove(info_path.c_str());
+  return true;
 }
 
 void launch_expanded_exec_line(const std::string& expanded_exec, bool) {

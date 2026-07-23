@@ -12,6 +12,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "app/file_browser/features/progress.hpp"
@@ -44,6 +45,8 @@ enum class SortField {
   Size,
   Modified,
   Type,
+  FirstModified,
+  LastModified,
 };
 
 enum class FileType {
@@ -335,12 +338,14 @@ struct AppState {
   std::uint64_t operation_status_expires_ms = 0;
   std::shared_ptr<OperationProgress> op_progress;
 
-  // ── Sidebar progress panel ──
-  int progress_panel_h = 0;
-  int progress_cancel_x = 0;
-  int progress_cancel_y = 0;
-  int progress_cancel_w = 0;
-  int progress_cancel_h = 0;
+  // ── Operations panel (right sidebar) ──
+  bool ops_panel_open = false;
+  double ops_panel_slide = 0.0;
+  int ops_panel_width = 320;
+  int ops_cancel_x = 0;
+  int ops_cancel_y = 0;
+  int ops_cancel_w = 0;
+  int ops_cancel_h = 0;
 
   // ── Context menu ──
   enum class ContextMenuAction {
@@ -354,6 +359,7 @@ struct AppState {
     Paste,
     Rename,
     MoveToTrash,
+    RestoreFromTrash,
     PermanentDelete,
     NewFolder,
     NewDocument,
@@ -381,6 +387,7 @@ struct AppState {
     CloseOtherTabs,
     CloseAllTabs,
     DuplicateTab,
+    RunProgram,
     Separator,
   };
   struct ContextMenuItem {
@@ -498,6 +505,13 @@ struct AppState {
   int compress_hover_level = -1;
   int compress_hover_btn = -1;      // 0=Cancel, 1=Compress
 
+  // ── Password dialog (for encrypted archives) ──
+  bool password_dialog_open = false;
+  std::string password_buf;
+  int password_cursor_pos = 0;
+  std::string password_archive_path;
+  std::string password_dest_dir;
+
   std::string last_icon_theme;
 
   // ── Thumbnail cache ──
@@ -610,6 +624,8 @@ struct AppState {
   bool settings_dropdown_open = false;
   int settings_dropdown_hover = -1;
   int settings_dropdown_scroll = 0;
+  bool settings_matugen_theming = false;
+  double settings_hit_matugen_toggle[4]{};
 
   // ── Properties dialog ──
   struct PropertiesState {
@@ -858,6 +874,7 @@ struct AppState {
   wl_data_device* data_device = nullptr;
   wl_surface* drag_icon_surface = nullptr;
   bool drag_icon_attached = false;
+  bool drag_initial_is_copy = false;   // modifier state at drag start (for badge)
   wl_data_offer* drop_offer = nullptr;
 
   // ── Drop target state (enhanced within-app DnD) ──
@@ -871,6 +888,14 @@ struct AppState {
   bool drop_target_is_valid = false;  // whether target accepts drops (directory)
   uint32_t drop_enter_serial = 0;     // serial from data_device.enter, reused for accept
   uint32_t drop_chosen_action = 2;    // negotiated DnD action (default MOVE=2)
+
+  // ── Folder hover-to-open during drag ──
+  uint64_t drop_hover_open_start_ms = 0; // epoch ms when hover began on a folder (0 = inactive)
+  std::string drop_hover_open_path;      // folder path being hovered for auto-open
+
+  // ── Tab hover-to-switch during drag ──
+  int drop_target_tab_idx = -1;          // tab index being hovered during drag (-1 = none)
+  uint64_t drop_tab_switch_start_ms = 0; // epoch ms when hover began on a tab (0 = inactive)
 
   // ── Undo support ──
   struct UndoRecord {
@@ -889,6 +914,9 @@ struct AppState {
   std::vector<UndoRecord> undo_stack;
   std::vector<UndoRecord> redo_stack;
   static constexpr std::size_t kMaxUndo = 100;
+
+  // ── Cut visual indicator ──
+  std::unordered_set<std::string> cut_paths;  // paths of files marked for cut (dashed border)
 };
 
 } // namespace eh::file_browser

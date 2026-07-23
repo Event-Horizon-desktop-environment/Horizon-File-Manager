@@ -15,6 +15,7 @@
 #include <toml++/toml.hpp>
 
 #include <fcntl.h>
+#include <poll.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -2000,7 +2001,20 @@ int run_gui(const std::string& archive_path,
 
   // Main loop
   while (s.running) {
-    wl_display_dispatch(s.display);
+    // During extraction, use non-blocking poll so the progress bar updates
+    if (s.extracting) {
+      wl_display_flush(s.display);
+      int dpy_fd = wl_display_get_fd(s.display);
+      struct pollfd pf{};
+      pf.fd = dpy_fd;
+      pf.events = POLLIN | POLLERR | POLLHUP;
+      poll(&pf, 1, 30);
+      if (pf.revents & (POLLIN | POLLERR | POLLHUP))
+        wl_display_dispatch_pending(s.display);
+      s.needs_redraw = true;
+    } else {
+      wl_display_dispatch(s.display);
+    }
 
     // Handle pending panel result
     if (s.fb_pending_action != ArchiveState::FbAction::None && !s.fb_panel.active) {
