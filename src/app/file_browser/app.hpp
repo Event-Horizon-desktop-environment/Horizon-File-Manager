@@ -173,9 +173,22 @@ void draw_properties_dialog(AppState& app, cairo_t* cr);
 void draw_info_panel(AppState& app, cairo_t* cr);
 void draw_operations_panel(AppState& app, cairo_t* cr);
 int properties_hit_test(AppState& app, int x, int y);
+int settings_hit_test(AppState& app, int x, int y);
 void show_properties(AppState& app, const std::string& path, const std::string& icon_name = "");
 void reload_settings_from_config(AppState& app);
 void reload_colors_from_config(AppState& app);
+
+// ── Properties window (separate xdg-toplevel) ───────────────────
+void create_props_window(AppState& app);
+void destroy_props_window(AppState& app);
+void draw_props_window(AppState& app);
+void handle_props_click(AppState& app, int x, int y, int button);
+
+// ── Settings window (separate xdg-toplevel) ─────────────────────
+void create_settings_window(AppState& app);
+void destroy_settings_window(AppState& app);
+void draw_settings_window(AppState& app);
+void handle_settings_click(AppState& app, int x, int y, int button);
 
 // ── compress feature (features/compress.cpp) ─────────────────────
 

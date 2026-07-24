@@ -105,6 +105,544 @@ static void on_buf_release_hook(void* user) {
   draw(app);
 }
 
+// ── properties window forward declarations ───────────────────────
+static void destroy_props_window_impl(AppState& app);
+static void draw_props_window_impl(AppState& app);
+
+static void on_props_buf_release_hook(void* user) {
+  auto& app = *static_cast<AppState*>(user);
+  if (!app.props_surface) return;
+  if (app.props_pendingRedraw) {
+    app.props_pendingRedraw = false;
+    draw_props_window_impl(app);
+  }
+}
+
+// ── properties window listeners ──────────────────────────────────
+
+static void props_xdg_surface_configure(void* data, xdg_surface* surface,
+                                         uint32_t serial) {
+  auto& app = *static_cast<AppState*>(data);
+  xdg_surface_ack_configure(surface, serial);
+
+  if (app.props_width <= 0 || app.props_height <= 0) return;
+
+  bool needs_resize = (app.props_width != app.props_buf[0].width() ||
+                       app.props_height != app.props_buf[0].height());
+
+  if (needs_resize && app.shm) {
+    app.props_buf[0].ensure(app.shm, "eh-props-a", app.props_width, app.props_height);
+    app.props_buf[1].ensure(app.shm, "eh-props-b", app.props_width, app.props_height);
+  }
+
+  draw_props_window_impl(app);
+}
+
+static void props_toplevel_configure(void* data, xdg_toplevel*,
+                                      int32_t w, int32_t h, wl_array*) {
+  auto& app = *static_cast<AppState*>(data);
+  if (w > 0) app.props_width = w;
+  if (h > 0) app.props_height = h;
+}
+
+static void props_toplevel_close(void* data, xdg_toplevel*) {
+  auto& app = *static_cast<AppState*>(data);
+  destroy_props_window_impl(app);
+}
+
+static constexpr xdg_surface_listener kPropsXdgSurfaceListener{
+  .configure = props_xdg_surface_configure,
+};
+
+static constexpr xdg_toplevel_listener kPropsToplevelListener{
+  .configure = props_toplevel_configure,
+  .close = props_toplevel_close,
+  .configure_bounds = [](void*, xdg_toplevel*, int32_t, int32_t) {},
+  .wm_capabilities = [](void*, xdg_toplevel*, wl_array*) {},
+};
+
+// ── properties window create / destroy / draw ────────────────────
+
+static void destroy_props_window_impl(AppState& app) {
+  if (!app.props_surface) return;
+  for (auto& b : app.props_buf) b.destroy();
+  if (app.props_toplevel) { xdg_toplevel_destroy(app.props_toplevel); app.props_toplevel = nullptr; }
+  if (app.props_xdgSurface) { xdg_surface_destroy(app.props_xdgSurface); app.props_xdgSurface = nullptr; }
+  wl_surface_destroy(app.props_surface);
+  app.props_surface = nullptr;
+  app.properties.open = false;
+  app.props_pendingRedraw = false;
+}
+
+void destroy_props_window(AppState& app) {
+  destroy_props_window_impl(app);
+}
+
+static void draw_props_window_impl(AppState& app) {
+  if (!app.props_surface || !app.properties.open) return;
+
+  int paint_bi = -1;
+  for (int i = 0; i < 2; ++i) {
+    if (!app.props_buf[i].busy()) { paint_bi = i; break; }
+  }
+  if (paint_bi < 0) {
+    app.props_pendingRedraw = true;
+    return;
+  }
+
+  int pw = app.props_width;
+  int ph = app.props_height;
+
+  cairo_t* cr = app.props_buf[paint_bi].cairo();
+  cairo_save(cr);
+  cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+  cairo_paint(cr);
+  cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+  int saved_w = app.width;
+  int saved_h = app.height;
+  double saved_px = app.pointerX;
+  double saved_py = app.pointerY;
+  app.width = pw;
+  app.height = ph;
+  app.pointerX = static_cast<double>(app.props_pointerX);
+  app.pointerY = static_cast<double>(app.props_pointerY);
+
+  draw_properties_dialog(app, cr);
+
+  app.width = saved_w;
+  app.height = saved_h;
+  app.pointerX = saved_px;
+  app.pointerY = saved_py;
+
+  cairo_restore(cr);
+
+  cairo_surface_flush(app.props_buf[paint_bi].cairo_surface());
+
+  wl_surface_attach(app.props_surface, app.props_buf[paint_bi].wl(), 0, 0);
+  wl_surface_damage_buffer(app.props_surface, 0, 0, pw, ph);
+  app.props_buf[paint_bi].mark_busy();
+  wl_surface_commit(app.props_surface);
+  if (app.wl.display()) wl_display_flush(app.wl.display());
+}
+
+void draw_props_window(AppState& app) {
+  draw_props_window_impl(app);
+}
+
+void create_props_window(AppState& app) {
+  if (app.props_surface) {
+    draw_props_window(app);
+    return;
+  }
+
+  auto* display = app.wl.display();
+  auto* comp = app.wl.compositor();
+  auto* xdg = app.wl.xdg_base();
+  if (!display || !comp || !xdg || !app.shm) return;
+
+  app.props_surface = wl_compositor_create_surface(comp);
+  if (!app.props_surface) return;
+
+  app.props_xdgSurface = xdg_wm_base_get_xdg_surface(xdg, app.props_surface);
+  if (!app.props_xdgSurface) {
+    wl_surface_destroy(app.props_surface);
+    app.props_surface = nullptr;
+    return;
+  }
+  xdg_surface_add_listener(app.props_xdgSurface, &kPropsXdgSurfaceListener, &app);
+
+  app.props_toplevel = xdg_surface_get_toplevel(app.props_xdgSurface);
+  if (!app.props_toplevel) {
+    xdg_surface_destroy(app.props_xdgSurface);
+    app.props_xdgSurface = nullptr;
+    wl_surface_destroy(app.props_surface);
+    app.props_surface = nullptr;
+    return;
+  }
+  xdg_toplevel_add_listener(app.props_toplevel, &kPropsToplevelListener, &app);
+  xdg_toplevel_set_title(app.props_toplevel, "Properties");
+  xdg_toplevel_set_app_id(app.props_toplevel, "horizon-files-properties");
+  xdg_toplevel_set_min_size(app.props_toplevel, app.props_width, app.props_height);
+  xdg_toplevel_set_max_size(app.props_toplevel, app.props_width, app.props_height);
+
+  app.props_buf[0].ensure(app.shm, "eh-props-a", app.props_width, app.props_height);
+  app.props_buf[1].ensure(app.shm, "eh-props-b", app.props_width, app.props_height);
+  app.props_buf[0].set_release_hook(on_props_buf_release_hook, &app);
+  app.props_buf[1].set_release_hook(on_props_buf_release_hook, &app);
+
+  wl_surface_commit(app.props_surface);
+  app.props_pendingRedraw = true;
+}
+
+void handle_props_click(AppState& app, int x, int y, int button) {
+  if (button != 0x110) return; // left click only
+
+  int hit = properties_hit_test(app, x, y);
+
+  if (hit == -1 || hit == -2) {
+    destroy_props_window_impl(app);
+    return;
+  }
+
+  // Tab switch
+  if (hit <= -10 && hit >= -13) {
+    int new_tab = -(hit + 10);
+    int num_tabs = 2;
+    if (app.properties.image_w > 0 && app.properties.image_h > 0) ++num_tabs;
+    if (app.properties.is_media) ++num_tabs;
+    if (new_tab >= 0 && new_tab < num_tabs) {
+      app.properties.tab = new_tab;
+      app.properties.combo_open = -1;
+      app.properties.scroll_px = 0;
+    }
+    app.props_pendingRedraw = true;
+    return;
+  }
+
+  // Combo dropdown toggle
+  if (hit >= 10 && hit <= 12) {
+    int pi = hit - 10;
+    if (app.properties.combo_open == pi)
+      app.properties.combo_open = -1;
+    else
+      app.properties.combo_open = pi;
+    app.props_pendingRedraw = true;
+    return;
+  }
+
+  // Combo item selection
+  if (hit >= 200 && hit < 212) {
+    int idx = hit - 200;
+    int pi = idx / 4;
+    int ci = idx % 4;
+    int* targets[3] = {&app.properties.perm_owner, &app.properties.perm_group, &app.properties.perm_other};
+    *targets[pi] = ci;
+    app.properties.combo_open = -1;
+
+    mode_t mode = 0;
+    mode |= (app.properties.perm_owner >= 1 ? S_IRUSR : 0);
+    mode |= (app.properties.perm_owner >= 2 ? S_IWUSR : 0);
+    mode |= (app.properties.perm_owner >= 3 ? S_IXUSR : 0);
+    mode |= (app.properties.perm_group >= 1 ? S_IRGRP : 0);
+    mode |= (app.properties.perm_group >= 2 ? S_IWGRP : 0);
+    mode |= (app.properties.perm_group >= 3 ? S_IXGRP : 0);
+    mode |= (app.properties.perm_other >= 1 ? S_IROTH : 0);
+    mode |= (app.properties.perm_other >= 2 ? S_IWOTH : 0);
+    mode |= (app.properties.perm_other >= 3 ? S_IXOTH : 0);
+    mode |= (app.properties.current_mode & ~(S_IRWXU | S_IRWXG | S_IRWXO));
+
+    chmod(app.properties.path.c_str(), mode);
+    app.properties.current_mode = mode;
+    app.props_pendingRedraw = true;
+    return;
+  }
+
+  // Executable toggle
+  if (hit == 15) {
+    app.properties.executable = !app.properties.executable;
+    mode_t mode = app.properties.current_mode;
+    if (app.properties.executable) {
+      mode |= S_IXUSR | S_IXGRP | S_IXOTH;
+    } else {
+      mode &= ~(S_IXUSR | S_IXGRP | S_IXOTH);
+    }
+    chmod(app.properties.path.c_str(), mode);
+    app.properties.current_mode = mode;
+    app.props_pendingRedraw = true;
+    return;
+  }
+
+  // Clicked elsewhere inside dialog — close any open combo
+  if (app.properties.combo_open >= 0) {
+    app.properties.combo_open = -1;
+    app.props_pendingRedraw = true;
+    return;
+  }
+}
+
+// ── settings window forward declarations ─────────────────────────
+static void destroy_settings_window_impl(AppState& app);
+static void draw_settings_window_impl(AppState& app);
+
+static void on_settings_buf_release_hook(void* user) {
+  auto& app = *static_cast<AppState*>(user);
+  if (!app.settings_surface) return;
+  if (app.settings_pendingRedraw) {
+    app.settings_pendingRedraw = false;
+    draw_settings_window_impl(app);
+  }
+}
+
+static void settings_xdg_surface_configure(void* data, xdg_surface* surface,
+                                            uint32_t serial) {
+  auto& app = *static_cast<AppState*>(data);
+  xdg_surface_ack_configure(surface, serial);
+  if (app.settings_win_width <= 0 || app.settings_win_height <= 0) return;
+  bool needs_resize = (app.settings_win_width != app.settings_buf[0].width() ||
+                       app.settings_win_height != app.settings_buf[0].height());
+  if (needs_resize && app.shm) {
+    app.settings_buf[0].ensure(app.shm, "eh-settings-a", app.settings_win_width, app.settings_win_height);
+    app.settings_buf[1].ensure(app.shm, "eh-settings-b", app.settings_win_width, app.settings_win_height);
+  }
+  draw_settings_window_impl(app);
+}
+
+static void settings_toplevel_configure(void* data, xdg_toplevel*,
+                                         int32_t w, int32_t h, wl_array*) {
+  auto& app = *static_cast<AppState*>(data);
+  if (w > 0) app.settings_win_width = w;
+  if (h > 0) app.settings_win_height = h;
+}
+
+static void settings_toplevel_close(void* data, xdg_toplevel*) {
+  auto& app = *static_cast<AppState*>(data);
+  destroy_settings_window_impl(app);
+}
+
+static constexpr xdg_surface_listener kSettingsXdgSurfaceListener{
+  .configure = settings_xdg_surface_configure,
+};
+
+static constexpr xdg_toplevel_listener kSettingsToplevelListener{
+  .configure = settings_toplevel_configure,
+  .close = settings_toplevel_close,
+  .configure_bounds = [](void*, xdg_toplevel*, int32_t, int32_t) {},
+  .wm_capabilities = [](void*, xdg_toplevel*, wl_array*) {},
+};
+
+// ── settings window create / destroy / draw ──────────────────────
+
+static void destroy_settings_window_impl(AppState& app) {
+  if (!app.settings_surface) return;
+  for (auto& b : app.settings_buf) b.destroy();
+  if (app.settings_toplevel) { xdg_toplevel_destroy(app.settings_toplevel); app.settings_toplevel = nullptr; }
+  if (app.settings_xdgSurface) { xdg_surface_destroy(app.settings_xdgSurface); app.settings_xdgSurface = nullptr; }
+  wl_surface_destroy(app.settings_surface);
+  app.settings_surface = nullptr;
+  app.settings_open = false;
+  app.settings_pendingRedraw = false;
+  app.settings_slider_dragging = 0;
+}
+
+void destroy_settings_window(AppState& app) {
+  destroy_settings_window_impl(app);
+}
+
+static void draw_settings_window_impl(AppState& app) {
+  if (!app.settings_surface || !app.settings_open) return;
+
+  int paint_bi = -1;
+  for (int i = 0; i < 2; ++i) {
+    if (!app.settings_buf[i].busy()) { paint_bi = i; break; }
+  }
+  if (paint_bi < 0) {
+    app.settings_pendingRedraw = true;
+    return;
+  }
+
+  int pw = app.settings_win_width;
+  int ph = app.settings_win_height;
+
+  cairo_t* cr = app.settings_buf[paint_bi].cairo();
+  cairo_save(cr);
+  cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+  cairo_paint(cr);
+  cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+
+  int saved_w = app.width;
+  int saved_h = app.height;
+  double saved_px = app.pointerX;
+  double saved_py = app.pointerY;
+  app.width = pw;
+  app.height = ph;
+  app.pointerX = static_cast<double>(app.settings_pointerX);
+  app.pointerY = static_cast<double>(app.settings_pointerY);
+
+  draw_settings_dialog(app, cr);
+
+  app.width = saved_w;
+  app.height = saved_h;
+  app.pointerX = saved_px;
+  app.pointerY = saved_py;
+
+  cairo_restore(cr);
+
+  cairo_surface_flush(app.settings_buf[paint_bi].cairo_surface());
+
+  wl_surface_attach(app.settings_surface, app.settings_buf[paint_bi].wl(), 0, 0);
+  wl_surface_damage_buffer(app.settings_surface, 0, 0, pw, ph);
+  app.settings_buf[paint_bi].mark_busy();
+  wl_surface_commit(app.settings_surface);
+  if (app.wl.display()) wl_display_flush(app.wl.display());
+}
+
+void draw_settings_window(AppState& app) {
+  draw_settings_window_impl(app);
+}
+
+void create_settings_window(AppState& app) {
+  if (app.settings_surface) {
+    draw_settings_window(app);
+    return;
+  }
+
+  auto* display = app.wl.display();
+  auto* comp = app.wl.compositor();
+  auto* xdg = app.wl.xdg_base();
+  if (!display || !comp || !xdg || !app.shm) return;
+
+  app.settings_surface = wl_compositor_create_surface(comp);
+  if (!app.settings_surface) return;
+
+  app.settings_xdgSurface = xdg_wm_base_get_xdg_surface(xdg, app.settings_surface);
+  if (!app.settings_xdgSurface) {
+    wl_surface_destroy(app.settings_surface);
+    app.settings_surface = nullptr;
+    return;
+  }
+  xdg_surface_add_listener(app.settings_xdgSurface, &kSettingsXdgSurfaceListener, &app);
+
+  app.settings_toplevel = xdg_surface_get_toplevel(app.settings_xdgSurface);
+  if (!app.settings_toplevel) {
+    xdg_surface_destroy(app.settings_xdgSurface);
+    app.settings_xdgSurface = nullptr;
+    wl_surface_destroy(app.settings_surface);
+    app.settings_surface = nullptr;
+    return;
+  }
+  xdg_toplevel_add_listener(app.settings_toplevel, &kSettingsToplevelListener, &app);
+  xdg_toplevel_set_title(app.settings_toplevel, "Settings");
+  xdg_toplevel_set_app_id(app.settings_toplevel, "horizon-files-settings");
+  xdg_toplevel_set_min_size(app.settings_toplevel, app.settings_win_width, app.settings_win_height);
+  xdg_toplevel_set_max_size(app.settings_toplevel, app.settings_win_width, app.settings_win_height);
+
+  app.settings_buf[0].ensure(app.shm, "eh-settings-a", app.settings_win_width, app.settings_win_height);
+  app.settings_buf[1].ensure(app.shm, "eh-settings-b", app.settings_win_width, app.settings_win_height);
+  app.settings_buf[0].set_release_hook(on_settings_buf_release_hook, &app);
+  app.settings_buf[1].set_release_hook(on_settings_buf_release_hook, &app);
+
+  wl_surface_commit(app.settings_surface);
+  app.settings_pendingRedraw = true;
+}
+
+static void settings_apply_slider(AppState& app, int hit, int x) {
+  const int slider_x = 20 + 8;
+  const int slider_w = 420 - 2 * 20 - 16;
+  double pct = static_cast<double>(x - slider_x) / slider_w * 100.0;
+  int val = std::clamp(static_cast<int>(pct), 0, 100);
+  if (hit == -11) {
+    app.settings_opacity_pct = val;
+    app.surface_opacity_pct = val;
+  } else if (hit == -13) {
+    app.settings_sidebar_opacity_pct = val;
+    app.sidebar_opacity_pct = val;
+  } else if (hit == -14) {
+    app.settings_topbar_opacity_pct = val;
+    app.topbar_opacity_pct = val;
+  } else if (hit == -15) {
+    app.settings_statusbar_opacity_pct = val;
+    app.statusbar_opacity_pct = val;
+  } else if (hit == -17) {
+    app.settings_preview_opacity_pct = val;
+    app.preview_opacity_pct = val;
+  } else if (hit == -19) {
+    app.settings_dialog_opacity_pct = val;
+    app.dialog_opacity_pct = val;
+  } else if (hit == -20) {
+    app.settings_properties_opacity_pct = val;
+    app.properties_opacity_pct = val;
+  }
+}
+
+void handle_settings_click(AppState& app, int x, int y, int button) {
+  if (button != 0x110) return;
+
+  int saved_w = app.width;
+  int saved_h = app.height;
+  app.width = app.settings_win_width;
+  app.height = app.settings_win_height;
+  int hit = settings_hit_test(app, x, y);
+  app.width = saved_w;
+  app.height = saved_h;
+
+  if (hit != -16) app.settings_zoom_editing = false;
+
+  if (hit == -1) return;
+  if (hit == -2 || hit == -7) {
+    destroy_settings_window_impl(app);
+    return;
+  }
+  if (hit == -3) {
+    app.settings_tab = 0;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -4) {
+    app.settings_tab = 1;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -8) {
+    app.settings_zoom_pct = std::clamp(app.settings_zoom_pct - 10.0, 50.0, 200.0);
+    app.zoom_pct = app.settings_zoom_pct;
+    app.entry_height = std::max(20, static_cast<int>(36.0 * app.zoom_pct / 100.0));
+    int icon_sz = static_cast<int>(48.0 * app.zoom_pct / 100.0);
+    app.grid_cell_size = std::max(40, icon_sz + static_cast<int>(8.0 * app.zoom_pct / 100.0));
+    app.sidebar_width = std::max(120, static_cast<int>(app.sidebar_width_base * app.zoom_pct / 100.0));
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -9) {
+    app.settings_zoom_pct = std::clamp(app.settings_zoom_pct + 10.0, 50.0, 200.0);
+    app.zoom_pct = app.settings_zoom_pct;
+    app.entry_height = std::max(20, static_cast<int>(36.0 * app.zoom_pct / 100.0));
+    int icon_sz = static_cast<int>(48.0 * app.zoom_pct / 100.0);
+    app.grid_cell_size = std::max(40, icon_sz + static_cast<int>(8.0 * app.zoom_pct / 100.0));
+    app.sidebar_width = std::max(120, static_cast<int>(app.sidebar_width_base * app.zoom_pct / 100.0));
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -10) {
+    app.settings_folders_before_files = !app.settings_folders_before_files;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -11 || hit == -13 || hit == -14 || hit == -15 || hit == -17 || hit == -19 || hit == -20) {
+    settings_apply_slider(app, hit, x);
+    app.settings_slider_dragging = hit;
+    app.settings_pendingRedraw = true;
+    app.pendingRedraw = true;
+    return;
+  }
+  if (hit == -12) {
+    app.settings_dropdown_open = !app.settings_dropdown_open;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -18) {
+    app.settings_matugen_theming = !app.settings_matugen_theming;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit >= 0) {
+    app.settings_default_term_idx = hit + app.settings_dropdown_scroll;
+    app.settings_dropdown_open = false;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -5) {
+    settings_apply(app);
+    destroy_settings_window_impl(app);
+    return;
+  }
+  if (hit == -6) {
+    settings_apply(app);
+    app.settings_pendingRedraw = true;
+    return;
+  }
+}
+
 // ── connect globals ──────────────────────────────────────────────
 
 static bool connect_globals(AppState& app) {
@@ -324,13 +862,49 @@ static bool create_window(AppState& app) {
   // Wire up input event callbacks
   if (app.seat.pointer()) {
     app.seat.set_pointer_motion_cb(
-        [&app](wl_surface*, double x, double y) {
-          app.pointerX = x;
-          app.pointerY = y;
-          handle_pointer_move(app, static_cast<int>(x), static_cast<int>(y));
+        [&app](wl_surface* surface, double x, double y) {
+          app.focused_surface = surface;
+          if (surface == app.settings_surface) {
+            app.settings_pointerX = static_cast<int>(x);
+            app.settings_pointerY = static_cast<int>(y);
+            if (app.settings_slider_dragging != 0) {
+              settings_apply_slider(app, app.settings_slider_dragging,
+                                    static_cast<int>(x));
+              app.settings_pendingRedraw = true;
+              app.pendingRedraw = true;
+            } else {
+              app.settings_pendingRedraw = true;
+            }
+          } else if (surface == app.props_surface) {
+            app.props_pointerX = static_cast<int>(x);
+            app.props_pointerY = static_cast<int>(y);
+            app.props_pendingRedraw = true;
+          } else {
+            app.pointerX = x;
+            app.pointerY = y;
+            handle_pointer_move(app, static_cast<int>(x), static_cast<int>(y));
+          }
         });
     app.seat.set_pointer_button_cb(
         [&app](uint32_t button, uint32_t state) {
+          if (app.focused_surface == app.settings_surface) {
+            if (state == 1) {
+              handle_settings_click(app, app.settings_pointerX,
+                                    app.settings_pointerY,
+                                    static_cast<int>(button));
+            } else {
+              app.settings_slider_dragging = 0;
+            }
+            return;
+          }
+          if (app.focused_surface == app.props_surface) {
+            if (state == 1) {
+              handle_props_click(app, app.props_pointerX,
+                                 app.props_pointerY,
+                                 static_cast<int>(button));
+            }
+            return;
+          }
           if (state == 1) {
             handle_click(app, static_cast<int>(app.pointerX),
                          static_cast<int>(app.pointerY),
@@ -343,6 +917,15 @@ static bool create_window(AppState& app) {
         });
     app.seat.set_pointer_axis_vertical_cb(
         [&app](double delta_px) {
+          if (app.focused_surface == app.settings_surface) {
+            return;
+          }
+          if (app.focused_surface == app.props_surface) {
+            app.properties.scroll_px += static_cast<int>(-delta_px);
+            if (app.properties.scroll_px < 0) app.properties.scroll_px = 0;
+            app.props_pendingRedraw = true;
+            return;
+          }
           handle_scroll(app, static_cast<int>(app.pointerX),
                         static_cast<int>(app.pointerY), 0.0, delta_px);
         });
@@ -664,9 +1247,21 @@ static bool create_window(AppState& app) {
       app.pendingRedraw = false;
       if (app.surface) draw(app);
     }
+
+    if (app.props_pendingRedraw) {
+      app.props_pendingRedraw = false;
+      if (app.props_surface) draw_props_window(app);
+    }
+
+    if (app.settings_pendingRedraw) {
+      app.settings_pendingRedraw = false;
+      if (app.settings_surface) draw_settings_window(app);
+    }
   }
 
-  // Cleanup (destroy shm-buffers BEFORE disconnecting the display)
+  // Cleanup (destroy dialog windows first, then shm-buffers BEFORE disconnecting the display)
+  destroy_settings_window(app);
+  destroy_props_window(app);
   for (auto& b : app.buf) b.destroy();
   app.previewPopupBuf.destroy();
   if (app.toplevel) xdg_toplevel_destroy(app.toplevel);
@@ -749,13 +1344,49 @@ static bool create_window(AppState& app) {
   // Wire up input event callbacks
   if (app.seat.pointer()) {
     app.seat.set_pointer_motion_cb(
-        [&app](wl_surface*, double x, double y) {
-          app.pointerX = x;
-          app.pointerY = y;
-          handle_pointer_move(app, static_cast<int>(x), static_cast<int>(y));
+        [&app](wl_surface* surface, double x, double y) {
+          app.focused_surface = surface;
+          if (surface == app.settings_surface) {
+            app.settings_pointerX = static_cast<int>(x);
+            app.settings_pointerY = static_cast<int>(y);
+            if (app.settings_slider_dragging != 0) {
+              settings_apply_slider(app, app.settings_slider_dragging,
+                                    static_cast<int>(x));
+              app.settings_pendingRedraw = true;
+              app.pendingRedraw = true;
+            } else {
+              app.settings_pendingRedraw = true;
+            }
+          } else if (surface == app.props_surface) {
+            app.props_pointerX = static_cast<int>(x);
+            app.props_pointerY = static_cast<int>(y);
+            app.props_pendingRedraw = true;
+          } else {
+            app.pointerX = x;
+            app.pointerY = y;
+            handle_pointer_move(app, static_cast<int>(x), static_cast<int>(y));
+          }
         });
     app.seat.set_pointer_button_cb(
         [&app](uint32_t button, uint32_t state) {
+          if (app.focused_surface == app.settings_surface) {
+            if (state == 1) {
+              handle_settings_click(app, app.settings_pointerX,
+                                    app.settings_pointerY,
+                                    static_cast<int>(button));
+            } else {
+              app.settings_slider_dragging = 0;
+            }
+            return;
+          }
+          if (app.focused_surface == app.props_surface) {
+            if (state == 1) {
+              handle_props_click(app, app.props_pointerX,
+                                 app.props_pointerY,
+                                 static_cast<int>(button));
+            }
+            return;
+          }
           if (state == 1) {
             handle_click(app, static_cast<int>(app.pointerX),
                          static_cast<int>(app.pointerY),
@@ -768,6 +1399,15 @@ static bool create_window(AppState& app) {
         });
     app.seat.set_pointer_axis_vertical_cb(
         [&app](double delta_px) {
+          if (app.focused_surface == app.settings_surface) {
+            return;
+          }
+          if (app.focused_surface == app.props_surface) {
+            app.properties.scroll_px += static_cast<int>(-delta_px);
+            if (app.properties.scroll_px < 0) app.properties.scroll_px = 0;
+            app.props_pendingRedraw = true;
+            return;
+          }
           handle_scroll(app, static_cast<int>(app.pointerX),
                         static_cast<int>(app.pointerY), 0.0, delta_px);
         });
@@ -824,6 +1464,11 @@ static bool create_window(AppState& app) {
       app.pendingRedraw = false;
       if (app.surface) draw(app);
     }
+
+    if (app.props_pendingRedraw) {
+      app.props_pendingRedraw = false;
+      if (app.props_surface) draw_props_window(app);
+    }
   }
 
   // Collect result
@@ -831,7 +1476,8 @@ static bool create_window(AppState& app) {
     out_path = std::move(app.select_dir_result);
   }
 
-  // Cleanup (destroy shm-buffers BEFORE disconnecting the display)
+  // Cleanup (destroy props window first, then shm-buffers BEFORE disconnecting the display)
+  destroy_props_window(app);
   for (auto& b : app.buf) b.destroy();
   app.previewPopupBuf.destroy();
   if (app.toplevel) xdg_toplevel_destroy(app.toplevel);
@@ -912,13 +1558,49 @@ static bool create_window(AppState& app) {
   // Wire up input event callbacks
   if (app.seat.pointer()) {
     app.seat.set_pointer_motion_cb(
-        [&app](wl_surface*, double x, double y) {
-          app.pointerX = x;
-          app.pointerY = y;
-          handle_pointer_move(app, static_cast<int>(x), static_cast<int>(y));
+        [&app](wl_surface* surface, double x, double y) {
+          app.focused_surface = surface;
+          if (surface == app.settings_surface) {
+            app.settings_pointerX = static_cast<int>(x);
+            app.settings_pointerY = static_cast<int>(y);
+            if (app.settings_slider_dragging != 0) {
+              settings_apply_slider(app, app.settings_slider_dragging,
+                                    static_cast<int>(x));
+              app.settings_pendingRedraw = true;
+              app.pendingRedraw = true;
+            } else {
+              app.settings_pendingRedraw = true;
+            }
+          } else if (surface == app.props_surface) {
+            app.props_pointerX = static_cast<int>(x);
+            app.props_pointerY = static_cast<int>(y);
+            app.props_pendingRedraw = true;
+          } else {
+            app.pointerX = x;
+            app.pointerY = y;
+            handle_pointer_move(app, static_cast<int>(x), static_cast<int>(y));
+          }
         });
     app.seat.set_pointer_button_cb(
         [&app](uint32_t button, uint32_t state) {
+          if (app.focused_surface == app.settings_surface) {
+            if (state == 1) {
+              handle_settings_click(app, app.settings_pointerX,
+                                    app.settings_pointerY,
+                                    static_cast<int>(button));
+            } else {
+              app.settings_slider_dragging = 0;
+            }
+            return;
+          }
+          if (app.focused_surface == app.props_surface) {
+            if (state == 1) {
+              handle_props_click(app, app.props_pointerX,
+                                 app.props_pointerY,
+                                 static_cast<int>(button));
+            }
+            return;
+          }
           if (state == 1) {
             handle_click(app, static_cast<int>(app.pointerX),
                          static_cast<int>(app.pointerY),
@@ -931,6 +1613,15 @@ static bool create_window(AppState& app) {
         });
     app.seat.set_pointer_axis_vertical_cb(
         [&app](double delta_px) {
+          if (app.focused_surface == app.settings_surface) {
+            return;
+          }
+          if (app.focused_surface == app.props_surface) {
+            app.properties.scroll_px += static_cast<int>(-delta_px);
+            if (app.properties.scroll_px < 0) app.properties.scroll_px = 0;
+            app.props_pendingRedraw = true;
+            return;
+          }
           handle_scroll(app, static_cast<int>(app.pointerX),
                         static_cast<int>(app.pointerY), 0.0, delta_px);
         });
@@ -987,6 +1678,11 @@ static bool create_window(AppState& app) {
       app.pendingRedraw = false;
       if (app.surface) draw(app);
     }
+
+    if (app.props_pendingRedraw) {
+      app.props_pendingRedraw = false;
+      if (app.props_surface) draw_props_window(app);
+    }
   }
 
   // Collect result
@@ -994,7 +1690,8 @@ static bool create_window(AppState& app) {
     out_path = std::move(app.select_dir_result);
   }
 
-  // Cleanup (destroy shm-buffers BEFORE disconnecting the display)
+  // Cleanup (destroy props window first, then shm-buffers BEFORE disconnecting the display)
+  destroy_props_window(app);
   for (auto& b : app.buf) b.destroy();
   app.previewPopupBuf.destroy();
   if (app.toplevel) xdg_toplevel_destroy(app.toplevel);

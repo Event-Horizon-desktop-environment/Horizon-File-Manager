@@ -279,6 +279,8 @@ struct FileBrowserSettings {
   int topbar_opacity_pct = 100; // 0–100
   int statusbar_opacity_pct = 100; // 0–100
   int preview_opacity_pct = 100; // 0–100; frame only, not content
+  int dialog_opacity_pct = 100; // 0–100; settings dialog background
+  int properties_opacity_pct = 100; // 0–100; properties dialog background
   std::string default_terminal;  // empty = use system default
   int view_mode = 0;             // 0=List, 1=Grid
   int sort_field = 0;            // 0=Name, 1=Size, 2=Modified, 3=Type

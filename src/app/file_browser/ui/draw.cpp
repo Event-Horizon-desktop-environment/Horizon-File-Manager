@@ -2797,6 +2797,25 @@ void draw_create_dialog(AppState& app, cairo_t* cr) {
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                           CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 14);
+
+  // Draw selection highlight
+  if (app.create_sel_start >= 0 && app.create_sel_start != app.create_sel_end) {
+    int sel_a = std::min(app.create_sel_start, app.create_sel_end);
+    int sel_b = std::max(app.create_sel_start, app.create_sel_end);
+    std::string before_sel = app.create_buf.substr(0, static_cast<std::size_t>(sel_a));
+    std::string sel_text = app.create_buf.substr(static_cast<std::size_t>(sel_a), static_cast<std::size_t>(sel_b - sel_a));
+    cairo_text_extents_t te_before, te_sel;
+    cairo_text_extents(cr, before_sel.c_str(), &te_before);
+    cairo_text_extents(cr, sel_text.c_str(), &te_sel);
+    double sel_x = input_x + 10 + te_before.width;
+    double sel_y = input_y + 4;
+    double sel_w = te_sel.width;
+    double sel_h = static_cast<double>(input_h) - 8;
+    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.35);
+    cairo_rectangle(cr, sel_x, sel_y, sel_w, sel_h);
+    cairo_fill(cr);
+  }
+
   cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
   cairo_move_to(cr, input_x + 10, input_y + input_h / 2 + 4);
   cairo_show_text(cr, app.create_buf.c_str());
@@ -3119,6 +3138,26 @@ void draw_password_dialog(AppState& app, cairo_t* cr) {
 
   if (!app.password_buf.empty()) {
     std::string masked(app.password_buf.size(), '*');
+
+    // Draw selection highlight
+    if (app.password_sel_start >= 0 && app.password_sel_start != app.password_sel_end) {
+      int sel_a = std::min(app.password_sel_start, app.password_sel_end);
+      int sel_b = std::max(app.password_sel_start, app.password_sel_end);
+      std::string before_sel(app.password_buf.begin(), app.password_buf.begin() + std::min(sel_a, static_cast<int>(app.password_buf.size())));
+      std::string sel_masked(before_sel.size(), '*');
+      std::string sel_part(sel_b - sel_a, '*');
+      cairo_text_extents_t te_before, te_sel;
+      cairo_text_extents(cr, sel_masked.c_str(), &te_before);
+      cairo_text_extents(cr, sel_part.c_str(), &te_sel);
+      double sel_x = input_x + 14 + te_before.width;
+      double sel_y = static_cast<double>(input_y) + 4;
+      double sel_w = te_sel.width;
+      double sel_h = static_cast<double>(input_h) - 8;
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.35);
+      cairo_rectangle(cr, sel_x, sel_y, sel_w, sel_h);
+      cairo_fill(cr);
+    }
+
     cairo_text_extents_t te;
     cairo_text_extents(cr, masked.c_str(), &te);
     double tx = input_x + 14;
@@ -4070,6 +4109,12 @@ int hit_test_context_menu(AppState& app, int x, int y) {
     cm_h += (item.action == AppState::ContextMenuAction::Separator && item.sub_items.empty()) ? 9 : 34;
   }
 
+  // Clamp to screen (must match draw_context_menu)
+  if (cm_x + cm_w > app.width - 8) cm_x = app.width - cm_w - 8;
+  if (cm_y + cm_h > app.height - 8) cm_y = app.height - cm_h - 8;
+  if (cm_x < 8) cm_x = 8;
+  if (cm_y < 8) cm_y = 8;
+
   // Check submenu first if hovered item has one
   if (app.context_menu_hover >= 0 &&
       static_cast<size_t>(app.context_menu_hover) < app.context_menu_items.size() &&
@@ -4453,7 +4498,7 @@ void draw_open_with(AppState& app, cairo_t* cr) {
 
 void draw_settings_dialog(AppState& app, cairo_t* cr) {
   int card_w = 420;
-  int card_h = 440;
+  int card_h = 560;
   int cx = (app.width - card_w) / 2;
   int cy = (app.height - card_h) / 2;
   int pad = 20;
@@ -4470,8 +4515,9 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
   draw_rounded_rect(cr, cx + 2, cy + 4, card_w, card_h, 12);
   cairo_fill(cr);
 
-  // Card background (always fully opaque — no transparency on modals)
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, 1.0);
+  // Card background
+  double dlg_bg_alpha = app.dialog_opacity_pct / 100.0;
+  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, dlg_bg_alpha);
   draw_rounded_rect(cr, cx, cy, card_w, card_h, 12);
   cairo_fill(cr);
 
@@ -4916,6 +4962,76 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     cairo_arc(cr, pv_knob_x, pv_slider_y + slider_h / 2, 8, 0, 2 * M_PI);
     cairo_fill(cr);
 
+    // Settings dialog opacity
+    ly += 52;
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_set_font_size(cr, 13);
+    cairo_move_to(cr, left_x, ly + 14);
+    cairo_show_text(cr, "Settings dialog opacity");
+
+    char dlg_op_str[16];
+    snprintf(dlg_op_str, sizeof(dlg_op_str), "%d%%", app.settings_dialog_opacity_pct);
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
+    cairo_move_to(cr, left_x + 200, ly + 14);
+    cairo_show_text(cr, dlg_op_str);
+
+    int dlg_slider_y = ly + 24;
+    app.settings_hit_dialog_opacity_slider[0] = slider_x;
+    app.settings_hit_dialog_opacity_slider[1] = dlg_slider_y - 10;
+    app.settings_hit_dialog_opacity_slider[2] = slider_w;
+    app.settings_hit_dialog_opacity_slider[3] = slider_h + 20;
+
+    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.4);
+    draw_rounded_rect(cr, slider_x, dlg_slider_y, slider_w, slider_h, 3);
+    cairo_fill(cr);
+
+    double dlg_fill_w = slider_w * (app.settings_dialog_opacity_pct / 100.0);
+    if (dlg_fill_w > 0) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.7);
+      draw_rounded_rect(cr, slider_x, dlg_slider_y, dlg_fill_w, slider_h, 3);
+      cairo_fill(cr);
+    }
+
+    double dlg_knob_x = slider_x + dlg_fill_w;
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
+    cairo_arc(cr, dlg_knob_x, dlg_slider_y + slider_h / 2, 8, 0, 2 * M_PI);
+    cairo_fill(cr);
+
+    // Properties dialog opacity
+    ly += 52;
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_set_font_size(cr, 13);
+    cairo_move_to(cr, left_x, ly + 14);
+    cairo_show_text(cr, "Properties dialog opacity");
+
+    char prp_op_str[16];
+    snprintf(prp_op_str, sizeof(prp_op_str), "%d%%", app.settings_properties_opacity_pct);
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
+    cairo_move_to(cr, left_x + 200, ly + 14);
+    cairo_show_text(cr, prp_op_str);
+
+    int prp_slider_y = ly + 24;
+    app.settings_hit_properties_opacity_slider[0] = slider_x;
+    app.settings_hit_properties_opacity_slider[1] = prp_slider_y - 10;
+    app.settings_hit_properties_opacity_slider[2] = slider_w;
+    app.settings_hit_properties_opacity_slider[3] = slider_h + 20;
+
+    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.4);
+    draw_rounded_rect(cr, slider_x, prp_slider_y, slider_w, slider_h, 3);
+    cairo_fill(cr);
+
+    double prp_fill_w = slider_w * (app.settings_properties_opacity_pct / 100.0);
+    if (prp_fill_w > 0) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.7);
+      draw_rounded_rect(cr, slider_x, prp_slider_y, prp_fill_w, slider_h, 3);
+      cairo_fill(cr);
+    }
+
+    double prp_knob_x = slider_x + prp_fill_w;
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
+    cairo_arc(cr, prp_knob_x, prp_slider_y + slider_h / 2, 8, 0, 2 * M_PI);
+    cairo_fill(cr);
+
     // Matugen wallpaper theming toggle
     ly += 52;
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
@@ -5037,37 +5153,36 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
   auto& p = app.properties;
   if (!p.open) return;
 
-  int card_w = 480;
-  int card_h = 500;
-  int cx = (app.width - card_w) / 2;
-  int cy = (app.height - card_h) / 2;
-  int pad = 24;
-  int icon_size = 36;
+  const int card_w = 520;
+  const int card_h = 560;
+  const int cx = (app.width - card_w) / 2;
+  const int cy = (app.height - card_h) / 2;
+  const int pad = 24;
+  const int icon_size = 48;
 
-  p.x = cx;
-  p.y = cy;
-  p.w = card_w;
-  p.h = card_h;
+  p.x = cx; p.y = cy; p.w = card_w; p.h = card_h;
 
-  // Shadow
-  cairo_set_source_rgba(cr, 0, 0, 0, 0.4);
-  draw_rounded_rect(cr, cx + 2, cy + 4, card_w, card_h, 14);
+  // ── Shadow (soft multi-layer) ──
+  for (int s = 3; s >= 0; --s) {
+    cairo_set_source_rgba(cr, 0, 0, 0, 0.05 * (4 - s));
+    draw_rounded_rect(cr, cx + s * 1.5, cy + s * 2.5, card_w, card_h, 16);
+    cairo_fill(cr);
+  }
+
+  // ── Card background ──
+  double prp_bg_alpha = app.properties_opacity_pct / 100.0;
+  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, prp_bg_alpha);
+  draw_rounded_rect(cr, cx, cy, card_w, card_h, 16);
   cairo_fill(cr);
 
-  // Background
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, 1.0);
-  draw_rounded_rect(cr, cx, cy, card_w, card_h, 14);
-  cairo_fill(cr);
-
-  // Header: icon + name + close
+  // ── Header: centered icon + centered name + centered type ──
   auto icon = app.icons.tray_icon(p.icon_name.empty() ? (p.is_dir ? "folder" : "text-x-generic") : p.icon_name);
   if (icon && icon->surface) {
-    double iw = static_cast<double>(icon->width);
-    double ih = static_cast<double>(icon->height);
+    double iw = icon->width, ih = icon->height;
     if (iw > 0 && ih > 0) {
       double scale = icon_size / std::max(1.0, std::max(iw, ih));
       cairo_save(cr);
-      cairo_translate(cr, cx + pad, cy + 16);
+      cairo_translate(cr, cx + (card_w - icon_size) / 2, cy + pad);
       cairo_scale(cr, scale, scale);
       cairo_set_source_surface(cr, icon->surface,
                                (icon_size / scale - iw) / 2,
@@ -5077,40 +5192,50 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
     }
   }
 
+  // Filename (centered, bold)
+  int name_y = cy + pad + icon_size + 14;
   cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-  cairo_set_font_size(cr, 14);
+  cairo_set_font_size(cr, 15);
   std::string disp_name = p.name;
   cairo_text_extents_t te;
   cairo_text_extents(cr, disp_name.c_str(), &te);
-  int name_max_w = card_w - pad * 3 - icon_size - 28;
+  int name_max_w = card_w - 2 * pad;
   if (te.x_advance > name_max_w) {
     while (!disp_name.empty() && te.x_advance > name_max_w) {
       disp_name.pop_back();
       cairo_text_extents(cr, (disp_name + "\u2026").c_str(), &te);
     }
-    if (disp_name.empty()) disp_name = "\u2026";
-    else disp_name += "\u2026";
+    disp_name = disp_name.empty() ? "\u2026" : disp_name + "\u2026";
   }
-  cairo_move_to(cr, cx + pad + icon_size + 10, cy + 38);
+  cairo_move_to(cr, cx + (card_w - te.x_advance) / 2, name_y);
   cairo_show_text(cr, disp_name.c_str());
 
-  // Close X
+  // MIME type (centered, secondary)
+  int type_y = name_y + 20;
+  if (!p.mime_type.empty()) {
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 0.55);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 12);
+    cairo_text_extents(cr, p.mime_type.c_str(), &te);
+    cairo_move_to(cr, cx + (card_w - te.x_advance) / 2, type_y);
+    cairo_show_text(cr, p.mime_type.c_str());
+  }
+
+  // Close X (top right)
   double close_x = cx + card_w - pad - 26;
-  double close_y = cy + 10;
+  double close_y = cy + pad - 2;
   bool close_hov = (app.pointerX >= close_x && app.pointerX < close_x + 24 &&
                     app.pointerY >= close_y && app.pointerY < close_y + 24);
-  p.hit_close[0] = close_x;
-  p.hit_close[1] = close_y;
-  p.hit_close[2] = 24;
-  p.hit_close[3] = 24;
+  p.hit_close[0] = close_x; p.hit_close[1] = close_y;
+  p.hit_close[2] = 24; p.hit_close[3] = 24;
   if (close_hov) {
-    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.15);
-    cairo_arc(cr, close_x + 12, close_y + 12, 12, 0, 2 * M_PI);
+    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.12);
+    draw_rounded_rect(cr, close_x, close_y, 24, 24, 12);
     cairo_fill(cr);
   }
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.45);
-  cairo_set_line_width(cr, 2);
+  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.4);
+  cairo_set_line_width(cr, 1.5);
   cairo_move_to(cr, close_x + 7, close_y + 7);
   cairo_line_to(cr, close_x + 17, close_y + 17);
   cairo_stroke(cr);
@@ -5118,91 +5243,117 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
   cairo_line_to(cr, close_x + 7, close_y + 17);
   cairo_stroke(cr);
 
+  // Header separator
+  int header_sep_y = type_y + (p.mime_type.empty() ? 12 : 16);
+  draw_separator(cr, cx + pad, header_sep_y, card_w - 2 * pad);
+
   // ── Tabs ──
-  int tab_y = cy + 62;
-  int tab_h = 30;
-  // Build visual→content mapping: 0=Basic, 1=Perms, 2=Image, 3=Media
+  int tab_y = header_sep_y + 10;
+  int tab_h = 32;
   int content_of_tab[4];
   int num_tabs = 0;
-  content_of_tab[num_tabs++] = 0; // Basic
-  content_of_tab[num_tabs++] = 1; // Permissions
+  content_of_tab[num_tabs++] = 0;
+  content_of_tab[num_tabs++] = 1;
   bool has_image = (p.image_w > 0 && p.image_h > 0);
   bool has_media = p.is_media;
   if (has_image) content_of_tab[num_tabs++] = 2;
   if (has_media)  content_of_tab[num_tabs++] = 3;
   const char* tab_labels[4] = {"Basic", "Permissions", "Image", "Media"};
-  int tab_w = (card_w - 2 * pad - 4 * (num_tabs - 1)) / num_tabs;
+  int tab_gap = 4;
+  int tab_w = (card_w - 2 * pad - tab_gap * (num_tabs - 1)) / num_tabs;
 
   for (int t = 0; t < num_tabs; ++t) {
     int ct = content_of_tab[t];
-    int tx = cx + pad + t * (tab_w + 4);
+    int tx = cx + pad + t * (tab_w + tab_gap);
     bool active = (t == p.tab);
     bool tab_hov = (app.pointerX >= tx && app.pointerX < tx + tab_w &&
                     app.pointerY >= tab_y && app.pointerY < tab_y + tab_h);
-    p.hit_tabs[t][0] = tx;
-    p.hit_tabs[t][1] = tab_y;
-    p.hit_tabs[t][2] = tab_w;
-    p.hit_tabs[t][3] = tab_h;
+    p.hit_tabs[t][0] = tx; p.hit_tabs[t][1] = tab_y;
+    p.hit_tabs[t][2] = tab_w; p.hit_tabs[t][3] = tab_h;
 
-    if (active) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.12);
-      draw_rounded_rect(cr, tx, tab_y, tab_w, tab_h, 6);
-      cairo_fill(cr);
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.8);
-      cairo_rectangle(cr, tx + 8, tab_y + tab_h - 2, tab_w - 16, 2);
-      cairo_fill(cr);
-    } else if (tab_hov) {
+    if (tab_hov && !active) {
       cairo_set_source_rgba(cr, 0.5, 0.5, 0.5, 0.06);
-      draw_rounded_rect(cr, tx, tab_y, tab_w, tab_h, 6);
+      draw_rounded_rect(cr, tx + 2, tab_y, tab_w - 4, tab_h, 6);
       cairo_fill(cr);
     }
 
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, active ? 1.0 : 0.55);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, active ? 0.95 : 0.45);
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 12);
+    cairo_set_font_size(cr, 13);
     cairo_text_extents_t te;
     cairo_text_extents(cr, tab_labels[ct], &te);
     cairo_move_to(cr, tx + (tab_w - te.x_advance) / 2, tab_y + tab_h / 2 + te.height * 0.35);
     cairo_show_text(cr, tab_labels[ct]);
+
+    if (active) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.9);
+      draw_rounded_rect(cr, tx + 12, tab_y + tab_h - 3, tab_w - 24, 2, 1);
+      cairo_fill(cr);
+    }
   }
 
   int content_tab = (p.tab >= 0 && p.tab < num_tabs) ? content_of_tab[p.tab] : 0;
 
   // ── Content area ──
   int content_y0 = tab_y + tab_h + 8;
-  int content_h_max = card_h - (content_y0 - cy) - 56;
+  int content_h_max = card_h - (content_y0 - cy) - 52;
   cairo_save(cr);
-  cairo_rectangle(cr, cx + pad, content_y0, card_w - 2 * pad, content_h_max);
+  cairo_rectangle(cr, cx + pad - 14, content_y0, card_w - 2 * pad + 28, content_h_max);
   cairo_clip(cr);
 
   int row_w = card_w - 2 * pad;
-  int col1_x = cx + pad + 4;
-  int col2_x = cx + pad + 108;
+  int col1_x = cx + pad;
+  int col2_x = cx + card_w - pad;
   int ly = content_y0 + 4 - p.scroll_px;
 
-  auto draw_row = [&](const char* label, const std::string& value) {
-    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 0.65);
+  // Helper: info row with right-aligned value
+  auto draw_info_row = [&](const char* label, const std::string& value) {
+    // Pill background — lighter than card, matugen-aware
+    double pill_r = (app.surface_r + app.bg_r) * 0.5 + 0.12;
+    double pill_g = (app.surface_g + app.bg_g) * 0.5 + 0.12;
+    double pill_b = (app.surface_b + app.bg_b) * 0.5 + 0.12;
+    cairo_set_source_rgba(cr, pill_r, pill_g, pill_b, 0.75);
+    draw_rounded_rect(cr, col1_x - 14, ly + 2, row_w + 28, 28, 14);
+    cairo_fill(cr);
+
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, 12);
-    cairo_move_to(cr, col1_x, ly + 17);
+    cairo_move_to(cr, col1_x + 2, ly + 18);
     cairo_show_text(cr, label);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.92);
-    cairo_move_to(cr, col2_x, ly + 17);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_text_extents_t ve;
+    cairo_text_extents(cr, value.c_str(), &ve);
+    double vx = col2_x - ve.x_advance + 2;
+    if (vx < col1_x + 122) vx = col1_x + 122;
+    cairo_move_to(cr, vx, ly + 18);
     cairo_show_text(cr, value.c_str());
-    ly += 26;
+    ly += 32;
+  };
+
+  // Helper: section header with separator
+  auto draw_section = [&](const char* title) {
+    ly += 4;
+    draw_separator(cr, col1_x, ly, row_w);
+    ly += 14;
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, 12);
+    cairo_move_to(cr, col1_x, ly + 14);
+    cairo_show_text(cr, title);
+    ly += 22;
   };
 
   // ── Basic tab ──
   if (content_tab == 0) {
-    draw_row("Name", p.name);
-    if (!p.mime_type.empty()) draw_row("Type", p.mime_type);
-
+    draw_info_row("Name", p.name);
+    if (!p.mime_type.empty()) draw_info_row("Type", p.mime_type);
     if (p.is_dir) {
       uint64_t item_count = 0;
       std::error_code ec;
       for ([[maybe_unused]] auto& de : fs::directory_iterator(p.path, ec))
         if (!ec) ++item_count;
-      draw_row("Contents", std::to_string(item_count) + " items");
+      draw_info_row("Contents", std::to_string(item_count) + " items");
     } else {
       char sz[64];
       double sz_val = static_cast<double>(p.size);
@@ -5213,94 +5364,146 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
         snprintf(sz, sizeof(sz), "%llu B", (unsigned long long)p.size);
       else
         snprintf(sz, sizeof(sz), "%.1f %s (%llu bytes)", sz_val, units[ui], (unsigned long long)p.size);
-      draw_row("Size", sz);
+      draw_info_row("Size", sz);
     }
-
+    // Always show Size (for directories too)
+    if (p.is_dir) {
+      char sz[64];
+      double sz_val = static_cast<double>(p.size);
+      const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+      int ui = 0;
+      while (sz_val >= 1024.0 && ui < 4) { sz_val /= 1024.0; ++ui; }
+      if (ui == 0)
+        snprintf(sz, sizeof(sz), "%llu B", (unsigned long long)p.size);
+      else
+        snprintf(sz, sizeof(sz), "%.1f %s (%llu bytes)", sz_val, units[ui], (unsigned long long)p.size);
+      draw_info_row("Size", sz);
+    }
     char timebuf[64];
     if (p.modified_sec != 0) {
       struct tm* tm_local = localtime(&p.modified_sec);
       strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M", tm_local);
-      draw_row("Modified", timebuf);
+      draw_info_row("Modified", timebuf);
     }
     if (p.accessed_sec != 0) {
       struct tm* tm_local = localtime(&p.accessed_sec);
       strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M", tm_local);
-      draw_row("Accessed", timebuf);
+      draw_info_row("Accessed", timebuf);
     }
     if (p.created_sec != 0) {
       struct tm* tm_local = localtime(&p.created_sec);
       strftime(timebuf, sizeof(timebuf), "%Y-%m-%d %H:%M", tm_local);
-      draw_row("Created", timebuf);
+      draw_info_row("Created", timebuf);
     }
-    if (!p.location.empty()) draw_row("Location", p.location);
+    if (!p.location.empty()) draw_info_row("Location", p.location);
 
-    ly += 8;
-    draw_separator(cr, col1_x + 4, ly, row_w - 8);
-    ly += 16;
+    draw_section("Ownership");
+    draw_info_row("Owner", p.owner_name);
+    draw_info_row("Group", p.group_name);
 
-    draw_row("Owner", p.owner_name);
-    draw_row("Group", p.group_name);
+    if (p.can_be_executable) {
+      ly += 4;
+      draw_separator(cr, col1_x, ly, row_w);
+      ly += 14;
+      // Pill background for exec toggle row
+      double exec_pill_r = (app.surface_r + app.bg_r) * 0.5 + 0.12;
+      double exec_pill_g = (app.surface_g + app.bg_g) * 0.5 + 0.12;
+      double exec_pill_b = (app.surface_b + app.bg_b) * 0.5 + 0.12;
+      cairo_set_source_rgba(cr, exec_pill_r, exec_pill_g, exec_pill_b, 0.75);
+      draw_rounded_rect(cr, col1_x - 14, ly + 2, row_w + 28, 28, 14);
+      cairo_fill(cr);
+
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
+      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+      cairo_set_font_size(cr, 12);
+      cairo_move_to(cr, col1_x + 2, ly + 16);
+      cairo_show_text(cr, "Allow executing file as program");
+      int toggle_w = 38, toggle_h = 20;
+      int toggle_x = col2_x - toggle_w;
+      int toggle_y = ly + 4;
+      p.hit_exec_toggle[0] = toggle_x; p.hit_exec_toggle[1] = toggle_y;
+      p.hit_exec_toggle[2] = toggle_w; p.hit_exec_toggle[3] = toggle_h;
+      cairo_set_source_rgba(cr, p.executable ? app.accent_r : app.outline_r,
+                            p.executable ? app.accent_g : app.outline_g,
+                            p.executable ? app.accent_b : app.outline_b, 0.55);
+      draw_rounded_rect(cr, toggle_x, toggle_y, toggle_w, toggle_h, toggle_h / 2);
+      cairo_fill(cr);
+      double knob_x = p.executable ? toggle_x + toggle_w - toggle_h : toggle_x;
+      cairo_set_source_rgba(cr, 1, 1, 1, 0.95);
+      cairo_arc(cr, knob_x + toggle_h / 2.0, toggle_y + toggle_h / 2.0, toggle_h / 2.0 - 2, 0, 2 * M_PI);
+      cairo_fill(cr);
+    }
 
   // ── Permissions tab ──
   } else if (content_tab == 1) {
+    draw_section("Access");
+
     const char* perm_names[] = {"Owner", "Group", "Others"};
     int combo_vals[3] = {p.perm_owner, p.perm_group, p.perm_other};
     const char* combo_items[] = {"None", "Read-only", "Read & Write", "Read, Write & Exec"};
-    int combo_h = 26;
-    int combo_w = 140;
+    int combo_h = 30;
+    int combo_w = 160;
 
     for (int pi = 0; pi < 3; ++pi) {
-      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 0.65);
+      // Pill background for permission row
+      double perm_pill_r = (app.surface_r + app.bg_r) * 0.5 + 0.12;
+      double perm_pill_g = (app.surface_g + app.bg_g) * 0.5 + 0.12;
+      double perm_pill_b = (app.surface_b + app.bg_b) * 0.5 + 0.12;
+      cairo_set_source_rgba(cr, perm_pill_r, perm_pill_g, perm_pill_b, 0.75);
+      draw_rounded_rect(cr, col1_x - 14, ly + 2, row_w + 28, 28, 14);
+      cairo_fill(cr);
+
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
       cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
       cairo_set_font_size(cr, 12);
-      cairo_move_to(cr, col1_x, ly + 16);
+      cairo_move_to(cr, col1_x + 2, ly + 18);
       cairo_show_text(cr, perm_names[pi]);
 
-      int combo_x = col2_x;
-      int combo_y = ly - 4;
-      p.hit_combo[pi][0] = combo_x;
-      p.hit_combo[pi][1] = combo_y;
-      p.hit_combo[pi][2] = combo_w;
-      p.hit_combo[pi][3] = combo_h;
+      int combo_x = col2_x - combo_w;
+      int combo_y = ly;
+      p.hit_combo[pi][0] = combo_x; p.hit_combo[pi][1] = combo_y;
+      p.hit_combo[pi][2] = combo_w; p.hit_combo[pi][3] = combo_h;
 
       bool combo_hov = (app.pointerX >= combo_x && app.pointerX < combo_x + combo_w &&
                         app.pointerY >= combo_y && app.pointerY < combo_y + combo_h);
       bool combo_sel = (pi == p.combo_open);
 
       cairo_set_source_rgba(cr, 0.5, 0.5, 0.5, combo_hov || combo_sel ? 0.1 : 0.04);
-      draw_rounded_rect(cr, combo_x, combo_y, combo_w, combo_h, 5);
+      draw_rounded_rect(cr, combo_x, combo_y, combo_w, combo_h, 6);
       cairo_fill(cr);
-      cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.35);
+      cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b,
+                            combo_hov || combo_sel ? 0.45 : 0.25);
       cairo_set_line_width(cr, 1);
-      draw_rounded_rect(cr, combo_x, combo_y, combo_w, combo_h, 5);
+      draw_rounded_rect(cr, combo_x, combo_y, combo_w, combo_h, 6);
       cairo_stroke(cr);
 
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
       cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
       cairo_set_font_size(cr, 12);
-      cairo_move_to(cr, combo_x + 8, combo_y + 17);
+      cairo_move_to(cr, combo_x + 10, combo_y + 19);
       cairo_show_text(cr, combo_items[combo_vals[pi]]);
 
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.45);
+      // Arrow
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
       cairo_set_line_width(cr, 1.5);
-      cairo_move_to(cr, combo_x + combo_w - 16, combo_y + 9);
-      cairo_line_to(cr, combo_x + combo_w - 10, combo_y + 17);
-      cairo_line_to(cr, combo_x + combo_w - 4, combo_y + 9);
+      int ax = combo_x + combo_w - 16;
+      int ay = combo_y + combo_h / 2;
+      cairo_move_to(cr, ax - 3, ay - 3);
+      cairo_line_to(cr, ax, ay + 1);
+      cairo_line_to(cr, ax + 3, ay - 3);
       cairo_stroke(cr);
 
       if (combo_sel) {
-        int dd_item_h = 24;
-        int dd_y = combo_y + combo_h + 2;
+        int dd_item_h = 26;
+        int dd_y = combo_y + combo_h + 3;
         int dd_h = 4 * dd_item_h;
-
-        cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.96);
-        draw_rounded_rect(cr, combo_x, dd_y, combo_w, dd_h, 5);
+        cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.97);
+        draw_rounded_rect(cr, combo_x, dd_y, combo_w, dd_h, 6);
         cairo_fill(cr);
         cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.3);
         cairo_set_line_width(cr, 1);
-        draw_rounded_rect(cr, combo_x, dd_y, combo_w, dd_h, 5);
+        draw_rounded_rect(cr, combo_x, dd_y, combo_w, dd_h, 6);
         cairo_stroke(cr);
-
         for (int ci = 0; ci < 4; ++ci) {
           int item_y = dd_y + ci * dd_item_h;
           bool item_hov = (app.pointerX >= combo_x && app.pointerX < combo_x + combo_w &&
@@ -5310,47 +5513,47 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
           p.hit_combo_items[pi][ci][1] = item_y;
           p.hit_combo_items[pi][ci][2] = combo_w;
           p.hit_combo_items[pi][ci][3] = dd_item_h;
-
           if (item_hov || item_sel) {
-            cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, item_hov ? 0.2 : 0.1);
-            cairo_rectangle(cr, combo_x, item_y, combo_w, dd_item_h);
+            cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, item_hov ? 0.18 : 0.08);
+            draw_rounded_rect(cr, combo_x + 2, item_y + 1, combo_w - 4, dd_item_h - 2, 4);
             cairo_fill(cr);
           }
-          cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, item_sel ? 1.0 : 0.75);
-          cairo_set_font_size(cr, 11);
-          cairo_move_to(cr, combo_x + 8, item_y + 16);
+          cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+          cairo_set_font_size(cr, 12);
+          cairo_move_to(cr, combo_x + 10, item_y + 17);
           cairo_show_text(cr, combo_items[ci]);
         }
       }
-      ly += 32;
+      ly += combo_h + 8;
     }
 
-    // Executable toggle (for files)
     if (!p.is_dir) {
-      ly += 6;
-      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 0.65);
+      draw_section("Execution");
+      // Pill background for exec toggle row in Permissions tab
+      double exec_pill_r2 = (app.surface_r + app.bg_r) * 0.5 + 0.12;
+      double exec_pill_g2 = (app.surface_g + app.bg_g) * 0.5 + 0.12;
+      double exec_pill_b2 = (app.surface_b + app.bg_b) * 0.5 + 0.12;
+      cairo_set_source_rgba(cr, exec_pill_r2, exec_pill_g2, exec_pill_b2, 0.75);
+      draw_rounded_rect(cr, col1_x - 14, ly + 2, row_w + 28, 28, 14);
+      cairo_fill(cr);
+
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
       cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
       cairo_set_font_size(cr, 12);
-      cairo_move_to(cr, col1_x, ly + 16);
-      cairo_show_text(cr, "Executable");
-
-      int toggle_x = col2_x;
-      int toggle_y = ly - 2;
-      int toggle_w = 36;
-      int toggle_h = 18;
-      p.hit_exec_toggle[0] = toggle_x;
-      p.hit_exec_toggle[1] = toggle_y;
-      p.hit_exec_toggle[2] = toggle_w;
-      p.hit_exec_toggle[3] = toggle_h;
-
+      cairo_move_to(cr, col1_x + 2, ly + 16);
+      cairo_show_text(cr, "Allow executing file as program");
+      int toggle_w = 38, toggle_h = 20;
+      int toggle_x = col2_x - toggle_w;
+      int toggle_y = ly + 4;
+      p.hit_exec_toggle[0] = toggle_x; p.hit_exec_toggle[1] = toggle_y;
+      p.hit_exec_toggle[2] = toggle_w; p.hit_exec_toggle[3] = toggle_h;
       cairo_set_source_rgba(cr, p.executable ? app.accent_r : app.outline_r,
                             p.executable ? app.accent_g : app.outline_g,
                             p.executable ? app.accent_b : app.outline_b, 0.55);
       draw_rounded_rect(cr, toggle_x, toggle_y, toggle_w, toggle_h, toggle_h / 2);
       cairo_fill(cr);
-
       double knob_x = p.executable ? toggle_x + toggle_w - toggle_h : toggle_x;
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
+      cairo_set_source_rgba(cr, 1, 1, 1, 0.95);
       cairo_arc(cr, knob_x + toggle_h / 2.0, toggle_y + toggle_h / 2.0, toggle_h / 2.0 - 2, 0, 2 * M_PI);
       cairo_fill(cr);
     }
@@ -5359,122 +5562,103 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
   } else if (content_tab == 2) {
     char dim[48];
     snprintf(dim, sizeof(dim), "%d \u00d7 %d px", p.image_w, p.image_h);
-    draw_row("Dimensions", dim);
-
+    draw_info_row("Dimensions", dim);
     char area[48];
     snprintf(area, sizeof(area), "%d MP", (int)((p.image_w / 1000000.0) * (p.image_h / 1000000.0) * 100) / 100);
-    draw_row("Megapixels", area);
-
-    if (!p.mime_type.empty()) draw_row("Type", p.mime_type);
-    if (!p.image_colorspace.empty()) draw_row("Color Space", p.image_colorspace);
-    if (!p.image_bit_depth.empty()) draw_row("Bit Depth", p.image_bit_depth + " bit");
-    if (p.image_has_alpha) draw_row("Alpha", "Yes");
-    if (!p.image_compression.empty() && p.image_compression != "Undef" && p.image_compression != "Undefined") draw_row("Compression", p.image_compression);
-    if (!p.image_resolution.empty()) draw_row("Resolution", p.image_resolution + " " + p.image_res_unit);
+    draw_info_row("Megapixels", area);
+    if (!p.mime_type.empty()) draw_info_row("Type", p.mime_type);
+    if (!p.image_colorspace.empty()) draw_info_row("Color Space", p.image_colorspace);
+    if (!p.image_bit_depth.empty()) draw_info_row("Bit Depth", p.image_bit_depth + " bit");
+    if (p.image_has_alpha) draw_info_row("Alpha", "Yes");
+    if (!p.image_compression.empty() && p.image_compression != "Undef" && p.image_compression != "Undefined")
+      draw_info_row("Compression", p.image_compression);
+    if (!p.image_resolution.empty()) draw_info_row("Resolution", p.image_resolution + " " + p.image_res_unit);
 
   // ── Media tab ──
   } else if (content_tab == 3) {
-    // Duration
     if (p.media_duration > 0) {
       int total_sec = static_cast<int>(p.media_duration);
       int hrs = total_sec / 3600;
       int mins = (total_sec % 3600) / 60;
       int secs = total_sec % 60;
       char dur[32];
-      if (hrs > 0)
-        snprintf(dur, sizeof(dur), "%d:%02d:%02d", hrs, mins, secs);
-      else
-        snprintf(dur, sizeof(dur), "%d:%02d", mins, secs);
-      draw_row("Duration", dur);
+      if (hrs > 0) snprintf(dur, sizeof(dur), "%d:%02d:%02d", hrs, mins, secs);
+      else snprintf(dur, sizeof(dur), "%d:%02d", mins, secs);
+      draw_info_row("Duration", dur);
     }
-
-    if (!p.container.empty()) draw_row("Container", p.container);
-
-    // Video info
+    if (!p.container.empty()) draw_info_row("Container", p.container);
     if (p.has_video) {
       if (!p.video_codec.empty()) {
-        // Uppercase first letter
         std::string vc = p.video_codec;
         if (!vc.empty()) vc[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(vc[0])));
-        draw_row("Video Codec", vc);
+        draw_info_row("Video Codec", vc);
       }
       if (p.video_w > 0 && p.video_h > 0) {
         char vdim[48];
         snprintf(vdim, sizeof(vdim), "%d \u00d7 %d px", p.video_w, p.video_h);
-        draw_row("Dimensions", vdim);
+        draw_info_row("Dimensions", vdim);
       }
-      if (!p.video_framerate.empty()) {
-        draw_row("Frame Rate", p.video_framerate + " fps");
-      }
+      if (!p.video_framerate.empty()) draw_info_row("Frame Rate", p.video_framerate + " fps");
       if (p.video_bitrate > 0) {
         char vbr[32];
-        if (p.video_bitrate >= 1000000)
-          snprintf(vbr, sizeof(vbr), "%.0f Mbps", p.video_bitrate / 1000000.0);
-        else
-          snprintf(vbr, sizeof(vbr), "%d kbps", p.video_bitrate / 1000);
-        draw_row("Video Bitrate", vbr);
+        if (p.video_bitrate >= 1000000) snprintf(vbr, sizeof(vbr), "%.0f Mbps", p.video_bitrate / 1000000.0);
+        else snprintf(vbr, sizeof(vbr), "%d kbps", p.video_bitrate / 1000);
+        draw_info_row("Video Bitrate", vbr);
       }
     }
-
-    // Audio info
     if (p.has_audio) {
       if (!p.audio_codec.empty()) {
         std::string ac = p.audio_codec;
         if (!ac.empty()) ac[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(ac[0])));
-        draw_row("Audio Codec", ac);
+        draw_info_row("Audio Codec", ac);
       }
       if (p.audio_sample_rate > 0) {
         char sr[32];
         snprintf(sr, sizeof(sr), "%d Hz", p.audio_sample_rate);
-        draw_row("Sample Rate", sr);
+        draw_info_row("Sample Rate", sr);
       }
       if (p.audio_channels > 0) {
         static const char* ch_names[] = {"Mono", "Stereo", "3.0", "4.0", "5.0", "5.1", "6.1", "7.1"};
         std::string ch_str = (p.audio_channels >= 1 && p.audio_channels <= 8)
           ? ch_names[p.audio_channels - 1]
           : std::to_string(p.audio_channels) + " channels";
-        draw_row("Channels", ch_str);
+        draw_info_row("Channels", ch_str);
       }
       if (p.audio_bitrate > 0) {
         char abr[32];
-        if (p.audio_bitrate >= 1000000)
-          snprintf(abr, sizeof(abr), "%.0f Mbps", p.audio_bitrate / 1000000.0);
-        else
-          snprintf(abr, sizeof(abr), "%d kbps", p.audio_bitrate / 1000);
-        draw_row("Audio Bitrate", abr);
+        if (p.audio_bitrate >= 1000000) snprintf(abr, sizeof(abr), "%.0f Mbps", p.audio_bitrate / 1000000.0);
+        else snprintf(abr, sizeof(abr), "%d kbps", p.audio_bitrate / 1000);
+        draw_info_row("Audio Bitrate", abr);
       }
     }
   }
 
   p.content_h = ly - (content_y0 - p.scroll_px);
-
   cairo_restore(cr);
 
-  // Bottom close button
-  int btn_w = 100;
+  // ── Bottom close button (right-aligned, clean style) ──
+  int btn_w = 90;
   int btn_h = 32;
-  int btn_y = cy + card_h - 52;
-  bool btn_hov = (app.pointerX >= cx + (card_w - btn_w) / 2 &&
-                  app.pointerX < cx + (card_w - btn_w) / 2 + btn_w &&
+  int btn_x = cx + card_w - pad - btn_w;
+  int btn_y = cy + card_h - 48;
+  bool btn_hov = (app.pointerX >= btn_x && app.pointerX < btn_x + btn_w &&
                   app.pointerY >= btn_y && app.pointerY < btn_y + btn_h);
+  p.hit_close_btn[0] = btn_x; p.hit_close_btn[1] = btn_y;
+  p.hit_close_btn[2] = btn_w; p.hit_close_btn[3] = btn_h;
 
-  p.hit_close_btn[0] = cx + (card_w - btn_w) / 2;
-  p.hit_close_btn[1] = btn_y;
-  p.hit_close_btn[2] = btn_w;
-  p.hit_close_btn[3] = btn_h;
-
-  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, btn_hov ? 0.25 : 0.12);
-  draw_rounded_rect(cr, cx + (card_w - btn_w) / 2, btn_y, btn_w, btn_h, btn_h / 2);
-  cairo_fill_preserve(cr);
-  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.8);
+  cairo_set_source_rgba(cr, 0.5, 0.5, 0.5, btn_hov ? 0.1 : 0.04);
+  draw_rounded_rect(cr, btn_x, btn_y, btn_w, btn_h, 8);
+  cairo_fill(cr);
+  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.3);
   cairo_set_line_width(cr, 1);
+  draw_rounded_rect(cr, btn_x, btn_y, btn_w, btn_h, 8);
   cairo_stroke(cr);
 
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.95);
+  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 13);
   cairo_text_extents(cr, "Close", &te);
-  cairo_move_to(cr, cx + (card_w - te.x_advance) / 2, btn_y + btn_h / 2 + te.height * 0.35);
+  cairo_move_to(cr, btn_x + (btn_w - te.x_advance) / 2, btn_y + btn_h / 2 + te.height * 0.35);
   cairo_show_text(cr, "Close");
 }
 

@@ -211,6 +211,30 @@ struct AppState {
   double pointerY = 0;
   bool pointerLeftDown = false;
 
+  // ── Properties window (separate xdg-toplevel) ──
+  wl_surface* props_surface = nullptr;
+  xdg_surface* props_xdgSurface = nullptr;
+  xdg_toplevel* props_toplevel = nullptr;
+  int props_width = 520;
+  int props_height = 560;
+  bool props_pendingRedraw = false;
+  std::array<eh::wayland::ShmBuffer, 2> props_buf{};
+  int props_pointerX = 0;
+  int props_pointerY = 0;
+
+  // ── Settings window (separate xdg-toplevel) ──
+  wl_surface* settings_surface = nullptr;
+  xdg_surface* settings_xdgSurface = nullptr;
+  xdg_toplevel* settings_toplevel = nullptr;
+  int settings_win_width = 420;
+  int settings_win_height = 560;
+  bool settings_pendingRedraw = false;
+  std::array<eh::wayland::ShmBuffer, 2> settings_buf{};
+  int settings_pointerX = 0;
+  int settings_pointerY = 0;
+
+  wl_surface* focused_surface = nullptr; // which surface currently has pointer focus
+
   // ── Double-click tracking ──
   uint64_t last_click_ns = 0;
   int last_click_x = -1;
@@ -429,6 +453,9 @@ struct AppState {
   bool create_is_folder = true;
   std::string create_buf;
   int create_cursor_pos = 0;
+  int create_sel_start = -1;
+  int create_sel_end = -1;
+  bool create_dragging = false;
 
   // ── Rename UI dialog ──
   bool rename_ui_open = false;
@@ -436,6 +463,9 @@ struct AppState {
   std::string rename_ui_buf;
   int rename_ui_cursor_pos = 0;
   std::string rename_ui_entry_path;
+  int rename_ui_sel_start = -1;
+  int rename_ui_sel_end = -1;
+  bool rename_ui_dragging = false;
 
   // ── Key repeat (application-level, for consistent repeat across compositors) ──
   uint32_t key_repeat_sym = 0;   // 0 = none
@@ -511,6 +541,9 @@ struct AppState {
   int password_cursor_pos = 0;
   std::string password_archive_path;
   std::string password_dest_dir;
+  int password_sel_start = -1;
+  int password_sel_end = -1;
+  bool password_dragging = false;
 
   std::string last_icon_theme;
 
@@ -602,6 +635,8 @@ struct AppState {
   int settings_topbar_opacity_pct = 100;
   int settings_statusbar_opacity_pct = 100;
   int settings_preview_opacity_pct = 100;
+  int settings_dialog_opacity_pct = 100;
+  int settings_properties_opacity_pct = 100;
   int settings_default_term_idx = -1;
   std::vector<std::string> settings_term_opts;
   double settings_x = 0, settings_y = 0;
@@ -620,12 +655,15 @@ struct AppState {
   double settings_hit_topbar_opacity_slider[4]{};
   double settings_hit_statusbar_opacity_slider[4]{};
   double settings_hit_preview_opacity_slider[4]{};
+  double settings_hit_dialog_opacity_slider[4]{};
+  double settings_hit_properties_opacity_slider[4]{};
   double settings_hit_term_dropdown[4]{};
   bool settings_dropdown_open = false;
   int settings_dropdown_hover = -1;
   int settings_dropdown_scroll = 0;
   bool settings_matugen_theming = false;
   double settings_hit_matugen_toggle[4]{};
+  int settings_slider_dragging = 0;
 
   // ── Properties dialog ──
   struct PropertiesState {
@@ -671,6 +709,7 @@ struct AppState {
     int perm_group = 0;
     int perm_other = 0;
     bool executable = false; // derived execute bit (any of user/group/other exec)
+    bool can_be_executable = false; // binary, script, appimage, etc.
     // Tabs: 0=Basic, 1=Permissions, 2=Image (only if applicable)
     int tab = 0;
     // Combo dropdown
@@ -829,6 +868,8 @@ struct AppState {
   int topbar_opacity_pct = 100;
   int statusbar_opacity_pct = 100;
   int preview_opacity_pct = 100;
+  int dialog_opacity_pct = 100;
+  int properties_opacity_pct = 100;
 
   // ── Animation ──
   uint64_t scroll_anim_start_ns = 0;

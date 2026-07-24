@@ -99,7 +99,7 @@ int properties_hit_test(AppState& app, int x, int y) {
 
 int settings_hit_test(AppState& app, int x, int y) {
   const int card_w = 420;
-  const int card_h = 440;
+  const int card_h = 560;
   const int cx = (app.width - card_w) / 2;
   const int cy = (app.height - card_h) / 2;
   const int pad = 20;
@@ -248,6 +248,26 @@ int settings_hit_test(AppState& app, int x, int y) {
       return -17;
   }
 
+  // Settings dialog opacity slider (Appearance tab)
+  if (app.settings_tab == 1) {
+    const int dlg_slider_y = content_y + 284;
+    const int dlg_slider_w = card_w - 2 * pad - 16;
+    const int dlg_slider_h = 6;
+    if (x >= cx + pad + 8 && x < cx + pad + 8 + dlg_slider_w &&
+        y >= dlg_slider_y - 10 && y < dlg_slider_y + dlg_slider_h + 20)
+      return -19;
+  }
+
+  // Properties dialog opacity slider (Appearance tab)
+  if (app.settings_tab == 1) {
+    const int prp_slider_y = content_y + 336;
+    const int prp_slider_w = card_w - 2 * pad - 16;
+    const int prp_slider_h = 6;
+    if (x >= cx + pad + 8 && x < cx + pad + 8 + prp_slider_w &&
+        y >= prp_slider_y - 10 && y < prp_slider_y + prp_slider_h + 20)
+      return -20;
+  }
+
   // Matugen theming toggle (Appearance tab)
   if (app.settings_tab == 1) {
     const int toggle_x = static_cast<int>(app.settings_hit_matugen_toggle[0]);
@@ -368,8 +388,7 @@ void handle_click(AppState& app, int x, int y, int button) {
       int hit = properties_hit_test(app, x, y);
 
       if (hit == -1 || hit == -2) {
-        app.properties.open = false;
-        draw(app);
+        destroy_props_window(app);
         return;
       }
 
@@ -466,129 +485,6 @@ void handle_click(AppState& app, int x, int y, int button) {
     }
   }
 
-  // ── Settings dialog clicks ──
-  if (app.settings_open) {
-    if (button == 0x110) {
-      int hit = settings_hit_test(app, x, y);
-
-      if (hit != -16) app.settings_zoom_editing = false;
-
-      if (hit == -1 || hit == -2 || hit == -7) {
-        app.settings_open = false;
-        draw(app);
-        return;
-      }
-      if (hit == -3) {
-        app.settings_tab = 0;
-        draw(app);
-        return;
-      }
-      if (hit == -4) {
-        app.settings_tab = 1;
-        draw(app);
-        return;
-      }
-      if (hit == -8) {
-        app.settings_zoom_pct = std::clamp(app.settings_zoom_pct - 10.0, 50.0, 200.0);
-        app.zoom_pct = app.settings_zoom_pct;
-        app.entry_height = std::max(20, static_cast<int>(36.0 * app.zoom_pct / 100.0));
-        int icon_sz = static_cast<int>(48.0 * app.zoom_pct / 100.0);
-        app.grid_cell_size = std::max(40, icon_sz + static_cast<int>(8.0 * app.zoom_pct / 100.0));
-        app.sidebar_width = std::max(120, static_cast<int>(app.sidebar_width_base * app.zoom_pct / 100.0));
-        draw(app);
-        return;
-      }
-      if (hit == -9) {
-        app.settings_zoom_pct = std::clamp(app.settings_zoom_pct + 10.0, 50.0, 200.0);
-        app.zoom_pct = app.settings_zoom_pct;
-        app.entry_height = std::max(20, static_cast<int>(36.0 * app.zoom_pct / 100.0));
-        int icon_sz = static_cast<int>(48.0 * app.zoom_pct / 100.0);
-        app.grid_cell_size = std::max(40, icon_sz + static_cast<int>(8.0 * app.zoom_pct / 100.0));
-        app.sidebar_width = std::max(120, static_cast<int>(app.sidebar_width_base * app.zoom_pct / 100.0));
-        draw(app);
-        return;
-      }
-      if (hit == -10) {
-        app.settings_folders_before_files = !app.settings_folders_before_files;
-        draw(app);
-        return;
-      }
-      if (hit == -11) {
-        const int slider_x = (app.width - 420) / 2 + 28;
-        const int slider_w = 364;
-        double pct = static_cast<double>(x - slider_x) / slider_w * 100.0;
-        app.settings_opacity_pct = std::clamp(static_cast<int>(pct), 0, 100);
-        app.surface_opacity_pct = app.settings_opacity_pct;
-        draw(app);
-        return;
-      }
-      if (hit == -12) {
-        app.settings_dropdown_open = !app.settings_dropdown_open;
-        draw(app);
-        return;
-      }
-      if (hit == -13) {
-        const int slider_x = (app.width - 420) / 2 + 28;
-        const int slider_w = 364;
-        double pct = static_cast<double>(x - slider_x) / slider_w * 100.0;
-        app.settings_sidebar_opacity_pct = std::clamp(static_cast<int>(pct), 0, 100);
-        app.sidebar_opacity_pct = app.settings_sidebar_opacity_pct;
-        draw(app);
-        return;
-      }
-      if (hit == -14) {
-        const int slider_x = (app.width - 420) / 2 + 28;
-        const int slider_w = 364;
-        double pct = static_cast<double>(x - slider_x) / slider_w * 100.0;
-        app.settings_topbar_opacity_pct = std::clamp(static_cast<int>(pct), 0, 100);
-        app.topbar_opacity_pct = app.settings_topbar_opacity_pct;
-        draw(app);
-        return;
-      }
-      if (hit == -15) {
-        const int slider_x = (app.width - 420) / 2 + 28;
-        const int slider_w = 364;
-        double pct = static_cast<double>(x - slider_x) / slider_w * 100.0;
-        app.settings_statusbar_opacity_pct = std::clamp(static_cast<int>(pct), 0, 100);
-        app.statusbar_opacity_pct = app.settings_statusbar_opacity_pct;
-        draw(app);
-        return;
-      }
-      if (hit == -17) {
-        const int slider_x = (app.width - 420) / 2 + 28;
-        const int slider_w = 364;
-        double pct = static_cast<double>(x - slider_x) / slider_w * 100.0;
-        app.settings_preview_opacity_pct = std::clamp(static_cast<int>(pct), 0, 100);
-        app.preview_opacity_pct = app.settings_preview_opacity_pct;
-        draw(app);
-        return;
-      }
-      if (hit == -18) {
-        app.settings_matugen_theming = !app.settings_matugen_theming;
-        draw(app);
-        return;
-      }
-      if (hit >= 0) {
-        app.settings_default_term_idx = hit + app.settings_dropdown_scroll;
-        app.settings_dropdown_open = false;
-        draw(app);
-        return;
-      }
-      if (hit == -5) {
-        settings_apply(app);
-        app.settings_open = false;
-        draw(app);
-        return;
-      }
-      if (hit == -6) {
-        settings_apply(app);
-        draw(app);
-        return;
-      }
-    }
-    return;
-  }
-
   // ── Confirm dialog clicks ──
   if (app.confirm_open) {
     int dlg_w = 380;
@@ -638,6 +534,60 @@ void handle_click(AppState& app, int x, int y, int button) {
     int btn_y = cy + card_h - pad - btn_h;
 
     int extract_x = btns_x + btn_w + btn_gap;
+
+    // Input field geometry (must match draw_password_dialog)
+    int input_x = cx + pad;
+    int input_y = cy + pad + 62;
+    int input_w = card_w - pad * 2;
+    int input_h = 36;
+
+    // Right-click on input field → text context menu
+    if (button == 0x111 && x >= input_x && x < input_x + input_w &&
+        y >= input_y && y < input_y + input_h) {
+      app.context_menu_open = true;
+      app.context_menu_x = x;
+      app.context_menu_y = y;
+      app.context_menu_hover = -1; app.context_menu_hover_prev = -1; app.context_menu_sub_hover = -1;
+      app.context_menu_file_idx = -8;
+      app.context_menu_sidebar_idx = -1;
+      bool has_sel = (app.password_sel_start >= 0 && app.password_sel_start != app.password_sel_end);
+      bool has_text = !app.password_buf.empty();
+      app.context_menu_items = {};
+      if (has_sel)
+        app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Cut, "Cut"));
+      if (has_sel)
+        app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Copy, "Copy"));
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Paste, "Paste"));
+      app.context_menu_items.push_back(AppState::menu_separator());
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::SelectAll, "Select All"));
+      draw(app);
+      return;
+    }
+
+    // Left-click on input field → position cursor + start drag
+    if (button == 0x110 && x >= input_x && x < input_x + input_w &&
+        y >= input_y && y < input_y + input_h) {
+      std::string masked(app.password_buf.size(), '*');
+      cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+      cairo_t* cr_tmp = cairo_create(tmp);
+      cairo_select_font_face(cr_tmp, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+      cairo_set_font_size(cr_tmp, 14);
+      int click_x = x - input_x - 14;
+      int best_pos = static_cast<int>(app.password_buf.size());
+      for (int ci = 0; ci <= static_cast<int>(masked.size()); ++ci) {
+        cairo_text_extents_t te;
+        cairo_text_extents(cr_tmp, masked.substr(0, static_cast<std::size_t>(ci)).c_str(), &te);
+        if (te.width >= click_x) { best_pos = ci; break; }
+      }
+      cairo_destroy(cr_tmp);
+      cairo_surface_destroy(tmp);
+      app.password_cursor_pos = best_pos;
+      app.password_sel_start = -1;
+      app.password_sel_end = -1;
+      app.password_dragging = true;
+      draw(app);
+      return;
+    }
 
     if (button == 0x110 && x >= extract_x && x < extract_x + btn_w &&
         y >= btn_y && y < btn_y + btn_h) {
@@ -756,6 +706,35 @@ void handle_click(AppState& app, int x, int y, int button) {
     int btn_h = 32;
     int btn_w = 90;
 
+    // Input field geometry (must match draw_create_dialog)
+    int input_x = dlg_x + 20;
+    int input_y = dlg_y + 50;
+    int input_w = dlg_w - 40;
+    int input_h = 34;
+
+    // Right-click on input field → text context menu
+    if (button == 0x111 && x >= input_x && x < input_x + input_w &&
+        y >= input_y && y < input_y + input_h) {
+      app.context_menu_open = true;
+      app.context_menu_x = x;
+      app.context_menu_y = y;
+      app.context_menu_hover = -1; app.context_menu_hover_prev = -1; app.context_menu_sub_hover = -1;
+      app.context_menu_file_idx = -6;
+      app.context_menu_sidebar_idx = -1;
+      bool has_sel = (app.create_sel_start >= 0 && app.create_sel_start != app.create_sel_end);
+      bool has_text = !app.create_buf.empty();
+      app.context_menu_items = {};
+      if (has_sel)
+        app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Cut, "Cut"));
+      if (has_sel)
+        app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Copy, "Copy"));
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Paste, "Paste"));
+      app.context_menu_items.push_back(AppState::menu_separator());
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::SelectAll, "Select All"));
+      draw(app);
+      return;
+    }
+
     if (button == 0x110 && x >= create_x && x < create_x + btn_w &&
         y >= btn_y && y < btn_y + btn_h) {
       if (!app.create_buf.empty()) {
@@ -781,6 +760,30 @@ void handle_click(AppState& app, int x, int y, int button) {
       return;
     }
 
+    // Left-click on input field → position cursor + start drag
+    if (button == 0x110 && x >= input_x && x < input_x + input_w &&
+        y >= input_y && y < input_y + input_h) {
+      cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+      cairo_t* cr_tmp = cairo_create(tmp);
+      cairo_select_font_face(cr_tmp, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+      cairo_set_font_size(cr_tmp, 14);
+      int click_x = x - input_x - 10;
+      int best_pos = static_cast<int>(app.create_buf.size());
+      for (int ci = 0; ci <= static_cast<int>(app.create_buf.size()); ++ci) {
+        cairo_text_extents_t te;
+        cairo_text_extents(cr_tmp, app.create_buf.substr(0, static_cast<std::size_t>(ci)).c_str(), &te);
+        if (te.width >= click_x) { best_pos = ci; break; }
+      }
+      cairo_destroy(cr_tmp);
+      cairo_surface_destroy(tmp);
+      app.create_cursor_pos = best_pos;
+      app.create_sel_start = -1;
+      app.create_sel_end = -1;
+      app.create_dragging = true;
+      draw(app);
+      return;
+    }
+
     if (button == 0x110 && (x < dlg_x || x > dlg_x + dlg_w ||
         y < dlg_y || y > dlg_y + dlg_h)) {
       app.create_dialog_open = false;
@@ -802,6 +805,58 @@ void handle_click(AppState& app, int x, int y, int button) {
     int btn_y = dlg_y + dlg_h - 52;
     int btn_h = 34;
     int btn_w = 90;
+
+    // Input field geometry (must match draw_rename_ui)
+    int input_x = dlg_x + 24;
+    int input_y = dlg_y + 64;
+    int input_w = dlg_w - 48;
+    int input_h = 36;
+
+    // Right-click on input field → text context menu
+    if (button == 0x111 && x >= input_x && x < input_x + input_w &&
+        y >= input_y && y < input_y + input_h) {
+      app.context_menu_open = true;
+      app.context_menu_x = x;
+      app.context_menu_y = y;
+      app.context_menu_hover = -1; app.context_menu_hover_prev = -1; app.context_menu_sub_hover = -1;
+      app.context_menu_file_idx = -7;
+      app.context_menu_sidebar_idx = -1;
+      bool has_sel = (app.rename_ui_sel_start >= 0 && app.rename_ui_sel_start != app.rename_ui_sel_end);
+      app.context_menu_items = {};
+      if (has_sel)
+        app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Cut, "Cut"));
+      if (has_sel)
+        app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Copy, "Copy"));
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Paste, "Paste"));
+      app.context_menu_items.push_back(AppState::menu_separator());
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::SelectAll, "Select All"));
+      draw(app);
+      return;
+    }
+
+    // Left-click on input field → position cursor + start drag
+    if (button == 0x110 && x >= input_x && x < input_x + input_w &&
+        y >= input_y && y < input_y + input_h) {
+      cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+      cairo_t* cr_tmp = cairo_create(tmp);
+      cairo_select_font_face(cr_tmp, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+      cairo_set_font_size(cr_tmp, 14);
+      int click_x = x - input_x - 12;
+      int best_pos = static_cast<int>(app.rename_ui_buf.size());
+      for (int ci = 0; ci <= static_cast<int>(app.rename_ui_buf.size()); ++ci) {
+        cairo_text_extents_t te;
+        cairo_text_extents(cr_tmp, app.rename_ui_buf.substr(0, static_cast<std::size_t>(ci)).c_str(), &te);
+        if (te.width >= click_x) { best_pos = ci; break; }
+      }
+      cairo_destroy(cr_tmp);
+      cairo_surface_destroy(tmp);
+      app.rename_ui_cursor_pos = best_pos;
+      app.rename_ui_sel_start = -1;
+      app.rename_ui_sel_end = -1;
+      app.rename_ui_dragging = true;
+      draw(app);
+      return;
+    }
 
     if (button == 0x110 && x >= rename_x && x < rename_x + btn_w &&
         y >= btn_y && y < btn_y + btn_h) {
@@ -2582,17 +2637,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     return;
   }
 
-  // ── Settings dialog hover ──
-  if (app.settings_open) {
-    int hit = settings_hit_test(app, x, y);
-    if (hit >= 0)
-      app.settings_dropdown_hover = hit;
-    else
-      app.settings_dropdown_hover = -1;
-    draw(app);
-    return;
-  }
-
   if (app.open_with_open) {
     double dx = static_cast<double>(x), dy = static_cast<double>(y);
     int new_hover = -1;
@@ -2927,6 +2971,72 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
   }
 
+  // ── Dialog input field drag selection ──
+  {
+    auto helper_drag = [&](const std::string& buf, int& cursor, int& sel_start, int& sel_end,
+                           int input_x, int input_y, int input_w, int input_h, double font_size) {
+      if (x < input_x || x >= input_x + input_w || y < input_y || y >= input_y + input_h)
+        return;
+      cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+      cairo_t* cr_tmp = cairo_create(tmp);
+      cairo_select_font_face(cr_tmp, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+      cairo_set_font_size(cr_tmp, font_size);
+      int click_x = x - input_x - static_cast<int>(font_size);
+      int best_pos = static_cast<int>(buf.size());
+      for (int ci = 0; ci <= static_cast<int>(buf.size()); ++ci) {
+        cairo_text_extents_t te;
+        cairo_text_extents(cr_tmp, buf.substr(0, static_cast<std::size_t>(ci)).c_str(), &te);
+        if (te.width >= click_x) { best_pos = ci; break; }
+      }
+      cairo_destroy(cr_tmp);
+      cairo_surface_destroy(tmp);
+      if (best_pos != cursor || sel_start < 0) {
+        if (sel_start < 0) {
+          sel_start = cursor;
+          if (best_pos == cursor && cursor < static_cast<int>(buf.size()))
+            cursor = cursor + 1;
+          else
+            cursor = best_pos;
+        } else {
+          cursor = best_pos;
+        }
+        sel_end = cursor;
+      }
+    };
+
+    if (app.create_dialog_open && app.create_dragging) {
+      int dlg_w = 340, dlg_h = 160;
+      int dlg_x = (app.width - dlg_w) / 2, dlg_y = (app.height - dlg_h) / 2;
+      int input_x = dlg_x + 20, input_y = dlg_y + 50, input_w = dlg_w - 40, input_h = 34;
+      helper_drag(app.create_buf, app.create_cursor_pos,
+                  app.create_sel_start, app.create_sel_end,
+                  input_x, input_y, input_w, input_h, 14.0);
+      draw(app);
+      return;
+    }
+    if (app.rename_ui_open && app.rename_ui_dragging) {
+      int dlg_w = 400, dlg_h = 190;
+      int dlg_x = (app.width - dlg_w) / 2, dlg_y = (app.height - dlg_h) / 2;
+      int input_x = dlg_x + 24, input_y = dlg_y + 64, input_w = dlg_w - 48, input_h = 36;
+      helper_drag(app.rename_ui_buf, app.rename_ui_cursor_pos,
+                  app.rename_ui_sel_start, app.rename_ui_sel_end,
+                  input_x, input_y, input_w, input_h, 14.0);
+      draw(app);
+      return;
+    }
+    if (app.password_dialog_open && app.password_dragging) {
+      int card_w = 400, card_h = 210, pad = 24;
+      int cx = (app.width - card_w) / 2, cy = (app.height - card_h) / 2;
+      int input_x = cx + pad, input_y = cy + pad + 62, input_w = card_w - pad * 2, input_h = 36;
+      std::string masked(app.password_buf.size(), '*');
+      helper_drag(masked, app.password_cursor_pos,
+                  app.password_sel_start, app.password_sel_end,
+                  input_x, input_y, input_w, input_h, 14.0);
+      draw(app);
+      return;
+    }
+  }
+
   // ── Breadcrumb hover tracking ──
   {
     int pm_bc_bar_y = y;
@@ -3184,17 +3294,6 @@ void handle_scroll(AppState& app, int x, int, double, double dy) {
     return;
   }
 
-  // ── Settings dropdown scroll ──
-  if (app.settings_open && app.settings_dropdown_open) {
-    int total = static_cast<int>(app.settings_term_opts.size());
-    int visible = std::min(total, 6);
-    int max_scroll = total - visible;
-    int delta = (dy > 0) ? -1 : (dy < 0) ? 1 : 0;
-    app.settings_dropdown_scroll = std::clamp(app.settings_dropdown_scroll + delta, 0, max_scroll);
-    draw(app);
-    return;
-  }
-
   if (x < (app.sidebar_expanded ? app.sidebar_width : 0)) {
     int panel_h = (app.op_progress && app.op_progress->active) ? 100 : 0;
     int available = app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height - panel_h;
@@ -3291,11 +3390,11 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   }
 
   // ── Settings dialog keys ──
-  if (app.settings_open) {
+  if (app.settings_open && app.focused_surface == app.settings_surface) {
     if (app.settings_zoom_editing) {
       if (sym == XKB_KEY_Escape) {
         app.settings_zoom_editing = false;
-        draw(app);
+        app.settings_pendingRedraw = true;
         return true;
       }
       if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
@@ -3309,26 +3408,25 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
           app.sidebar_width = std::max(120, static_cast<int>(app.sidebar_width_base * app.zoom_pct / 100.0));
         }
         app.settings_zoom_editing = false;
-        draw(app);
+        app.settings_pendingRedraw = true;
         return true;
       }
       if (sym == XKB_KEY_BackSpace) {
         if (!app.settings_zoom_buf.empty())
           app.settings_zoom_buf.pop_back();
-        draw(app);
+        app.settings_pendingRedraw = true;
         return true;
       }
       if (utf8_len == 1 && utf8[0] >= '0' && utf8[0] <= '9') {
         if (app.settings_zoom_buf.size() < 3)
           app.settings_zoom_buf += utf8[0];
-        draw(app);
+        app.settings_pendingRedraw = true;
         return true;
       }
       return true;
     }
     if (sym == XKB_KEY_Escape) {
-      app.settings_open = false;
-      draw(app);
+      destroy_settings_window(app);
       return true;
     }
     if ((sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) && app.settings_dropdown_open) {
@@ -3336,7 +3434,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
         app.settings_default_term_idx = app.settings_dropdown_hover + app.settings_dropdown_scroll;
         app.settings_dropdown_open = false;
       }
-      draw(app);
+      app.settings_pendingRedraw = true;
       return true;
     }
   }
@@ -3401,16 +3499,157 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       draw(app);
       return true;
     }
-    if (sym == XKB_KEY_BackSpace && !app.create_buf.empty()) {
-      app.create_buf.pop_back();
-      app.create_cursor_pos = static_cast<int>(app.create_buf.size());
+    // Ctrl+A select all
+    if (ctrl && (sym == XKB_KEY_A || sym == XKB_KEY_a)) {
+      app.create_sel_start = 0;
+      app.create_sel_end = static_cast<int>(app.create_buf.size());
+      app.create_cursor_pos = app.create_sel_end;
+      draw(app);
+      return true;
+    }
+    // Ctrl+C copy
+    if (ctrl && (sym == XKB_KEY_C || sym == XKB_KEY_c)) {
+      if (app.create_sel_start >= 0 && app.create_sel_start != app.create_sel_end) {
+        int a = std::min(app.create_sel_start, app.create_sel_end);
+        int b = std::max(app.create_sel_start, app.create_sel_end);
+        std::string sel = app.create_buf.substr(a, b - a);
+        if (!sel.empty()) app.clipboard.copy_text(sel);
+      }
+      draw(app);
+      return true;
+    }
+    // Ctrl+X cut
+    if (ctrl && (sym == XKB_KEY_X || sym == XKB_KEY_x)) {
+      if (app.create_sel_start >= 0 && app.create_sel_start != app.create_sel_end) {
+        int a = std::min(app.create_sel_start, app.create_sel_end);
+        int b = std::max(app.create_sel_start, app.create_sel_end);
+        std::string sel = app.create_buf.substr(a, b - a);
+        if (!sel.empty()) app.clipboard.copy_text(sel);
+        app.create_buf.erase(a, b - a);
+        app.create_cursor_pos = a;
+        app.create_sel_start = -1;
+        app.create_sel_end = -1;
+        draw(app);
+      }
+      return true;
+    }
+    // Ctrl+V paste
+    if (ctrl && (sym == XKB_KEY_V || sym == XKB_KEY_v)) {
+      std::string clip = app.clipboard.read_selection_text(app.wl.display());
+      if (!clip.empty()) {
+        if (app.create_sel_start >= 0 && app.create_sel_start != app.create_sel_end) {
+          int a = std::min(app.create_sel_start, app.create_sel_end);
+          int b = std::max(app.create_sel_start, app.create_sel_end);
+          app.create_buf.erase(a, b - a);
+          app.create_cursor_pos = a;
+        }
+        app.create_buf.insert(app.create_cursor_pos, clip);
+        app.create_cursor_pos += static_cast<int>(clip.size());
+        app.create_sel_start = -1;
+        app.create_sel_end = -1;
+        draw(app);
+      }
+      return true;
+    }
+    if (sym == XKB_KEY_BackSpace) {
+      if (app.create_sel_start >= 0 && app.create_sel_start != app.create_sel_end) {
+        int a = std::min(app.create_sel_start, app.create_sel_end);
+        int b = std::max(app.create_sel_start, app.create_sel_end);
+        app.create_buf.erase(a, b - a);
+        app.create_cursor_pos = a;
+        app.create_sel_start = -1;
+        app.create_sel_end = -1;
+      } else if (app.create_cursor_pos > 0) {
+        app.create_buf.erase(app.create_cursor_pos - 1, 1);
+        --app.create_cursor_pos;
+      }
       { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
         app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
         app.key_repeat_last_ms = app.key_repeat_start_ms; }
       draw(app);
       return true;
     }
+    if (sym == XKB_KEY_Delete) {
+      if (app.create_sel_start >= 0 && app.create_sel_start != app.create_sel_end) {
+        int a = std::min(app.create_sel_start, app.create_sel_end);
+        int b = std::max(app.create_sel_start, app.create_sel_end);
+        app.create_buf.erase(a, b - a);
+        app.create_cursor_pos = a;
+        app.create_sel_start = -1;
+        app.create_sel_end = -1;
+      } else if (app.create_cursor_pos < static_cast<int>(app.create_buf.size())) {
+        app.create_buf.erase(app.create_cursor_pos, 1);
+      }
+      draw(app);
+      return true;
+    }
+    // Shift+arrow selection
+    if (sym == XKB_KEY_Left) {
+      if (app.create_cursor_pos > 0) {
+        if (shift) {
+          if (app.create_sel_start < 0) app.create_sel_start = app.create_cursor_pos;
+          --app.create_cursor_pos;
+          app.create_sel_end = app.create_cursor_pos;
+        } else {
+          --app.create_cursor_pos;
+          app.create_sel_start = -1;
+          app.create_sel_end = -1;
+        }
+      }
+      draw(app);
+      return true;
+    }
+    if (sym == XKB_KEY_Right) {
+      if (app.create_cursor_pos < static_cast<int>(app.create_buf.size())) {
+        if (shift) {
+          if (app.create_sel_start < 0) app.create_sel_start = app.create_cursor_pos;
+          ++app.create_cursor_pos;
+          app.create_sel_end = app.create_cursor_pos;
+        } else {
+          ++app.create_cursor_pos;
+          app.create_sel_start = -1;
+          app.create_sel_end = -1;
+        }
+      }
+      draw(app);
+      return true;
+    }
+    if (sym == XKB_KEY_Home) {
+      if (shift) {
+        if (app.create_sel_start < 0) app.create_sel_start = app.create_cursor_pos;
+        app.create_cursor_pos = 0;
+        app.create_sel_end = 0;
+      } else {
+        app.create_cursor_pos = 0;
+        app.create_sel_start = -1;
+        app.create_sel_end = -1;
+      }
+      draw(app);
+      return true;
+    }
+    if (sym == XKB_KEY_End) {
+      int end = static_cast<int>(app.create_buf.size());
+      if (shift) {
+        if (app.create_sel_start < 0) app.create_sel_start = app.create_cursor_pos;
+        app.create_cursor_pos = end;
+        app.create_sel_end = end;
+      } else {
+        app.create_cursor_pos = end;
+        app.create_sel_start = -1;
+        app.create_sel_end = -1;
+      }
+      draw(app);
+      return true;
+    }
     if (utf8 && utf8_len > 0 && utf8_len <= 4) {
+      if (app.create_sel_start >= 0 && app.create_sel_start != app.create_sel_end) {
+        int a = std::min(app.create_sel_start, app.create_sel_end);
+        int b = std::max(app.create_sel_start, app.create_sel_end);
+        app.create_buf.erase(a, b - a);
+        app.create_cursor_pos = a;
+        app.create_sel_start = -1;
+        app.create_sel_end = -1;
+      }
       app.create_buf.insert(app.create_cursor_pos, utf8, utf8_len);
       app.create_cursor_pos += utf8_len;
       draw(app);
@@ -3434,55 +3673,156 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       draw(app);
       return true;
     }
+    // Ctrl+A select all
+    if (ctrl && (sym == XKB_KEY_A || sym == XKB_KEY_a)) {
+      app.password_sel_start = 0;
+      app.password_sel_end = static_cast<int>(app.password_buf.size());
+      app.password_cursor_pos = app.password_sel_end;
+      draw(app);
+      return true;
+    }
+    // Ctrl+C copy
+    if (ctrl && (sym == XKB_KEY_C || sym == XKB_KEY_c)) {
+      if (app.password_sel_start >= 0 && app.password_sel_start != app.password_sel_end) {
+        int a = std::min(app.password_sel_start, app.password_sel_end);
+        int b = std::max(app.password_sel_start, app.password_sel_end);
+        std::string sel = app.password_buf.substr(a, b - a);
+        if (!sel.empty()) app.clipboard.copy_text(sel);
+      }
+      draw(app);
+      return true;
+    }
+    // Ctrl+X cut
+    if (ctrl && (sym == XKB_KEY_X || sym == XKB_KEY_x)) {
+      if (app.password_sel_start >= 0 && app.password_sel_start != app.password_sel_end) {
+        int a = std::min(app.password_sel_start, app.password_sel_end);
+        int b = std::max(app.password_sel_start, app.password_sel_end);
+        std::string sel = app.password_buf.substr(a, b - a);
+        if (!sel.empty()) app.clipboard.copy_text(sel);
+        app.password_buf.erase(a, b - a);
+        app.password_cursor_pos = a;
+        app.password_sel_start = -1;
+        app.password_sel_end = -1;
+        draw(app);
+      }
+      return true;
+    }
     if (ctrl && (sym == XKB_KEY_V || sym == XKB_KEY_v)) {
       std::string clip = app.clipboard.read_selection_text(app.wl.display());
       if (!clip.empty()) {
+        if (app.password_sel_start >= 0 && app.password_sel_start != app.password_sel_end) {
+          int a = std::min(app.password_sel_start, app.password_sel_end);
+          int b = std::max(app.password_sel_start, app.password_sel_end);
+          app.password_buf.erase(a, b - a);
+          app.password_cursor_pos = a;
+        }
         app.password_buf.insert(app.password_cursor_pos, clip);
         app.password_cursor_pos += static_cast<int>(clip.size());
+        app.password_sel_start = -1;
+        app.password_sel_end = -1;
         draw(app);
       }
       return true;
     }
     if (sym == XKB_KEY_Left) {
-      if (app.password_cursor_pos > 0) --app.password_cursor_pos;
+      if (app.password_cursor_pos > 0) {
+        if (shift) {
+          if (app.password_sel_start < 0) app.password_sel_start = app.password_cursor_pos;
+          --app.password_cursor_pos;
+          app.password_sel_end = app.password_cursor_pos;
+        } else {
+          --app.password_cursor_pos;
+          app.password_sel_start = -1;
+          app.password_sel_end = -1;
+        }
+      }
       draw(app);
       return true;
     }
     if (sym == XKB_KEY_Right) {
-      if (app.password_cursor_pos < static_cast<int>(app.password_buf.size()))
-        ++app.password_cursor_pos;
+      if (app.password_cursor_pos < static_cast<int>(app.password_buf.size())) {
+        if (shift) {
+          if (app.password_sel_start < 0) app.password_sel_start = app.password_cursor_pos;
+          ++app.password_cursor_pos;
+          app.password_sel_end = app.password_cursor_pos;
+        } else {
+          ++app.password_cursor_pos;
+          app.password_sel_start = -1;
+          app.password_sel_end = -1;
+        }
+      }
       draw(app);
       return true;
     }
-    if (sym == XKB_KEY_Home || (ctrl && (sym == XKB_KEY_A || sym == XKB_KEY_a))) {
-      app.password_cursor_pos = 0;
+    if (sym == XKB_KEY_Home) {
+      if (shift) {
+        if (app.password_sel_start < 0) app.password_sel_start = app.password_cursor_pos;
+        app.password_cursor_pos = 0;
+        app.password_sel_end = 0;
+      } else {
+        app.password_cursor_pos = 0;
+        app.password_sel_start = -1;
+        app.password_sel_end = -1;
+      }
       draw(app);
       return true;
     }
     if (sym == XKB_KEY_End || (ctrl && (sym == XKB_KEY_E || sym == XKB_KEY_e))) {
-      app.password_cursor_pos = static_cast<int>(app.password_buf.size());
+      int end = static_cast<int>(app.password_buf.size());
+      if (shift) {
+        if (app.password_sel_start < 0) app.password_sel_start = app.password_cursor_pos;
+        app.password_cursor_pos = end;
+        app.password_sel_end = end;
+      } else {
+        app.password_cursor_pos = end;
+        app.password_sel_start = -1;
+        app.password_sel_end = -1;
+      }
       draw(app);
       return true;
     }
     if (sym == XKB_KEY_Delete) {
-      if (app.password_cursor_pos < static_cast<int>(app.password_buf.size())) {
+      if (app.password_sel_start >= 0 && app.password_sel_start != app.password_sel_end) {
+        int a = std::min(app.password_sel_start, app.password_sel_end);
+        int b = std::max(app.password_sel_start, app.password_sel_end);
+        app.password_buf.erase(a, b - a);
+        app.password_cursor_pos = a;
+        app.password_sel_start = -1;
+        app.password_sel_end = -1;
+      } else if (app.password_cursor_pos < static_cast<int>(app.password_buf.size())) {
         app.password_buf.erase(app.password_cursor_pos, 1);
         draw(app);
       }
+      draw(app);
       return true;
     }
     if (sym == XKB_KEY_BackSpace) {
-      if (app.password_cursor_pos > 0) {
+      if (app.password_sel_start >= 0 && app.password_sel_start != app.password_sel_end) {
+        int a = std::min(app.password_sel_start, app.password_sel_end);
+        int b = std::max(app.password_sel_start, app.password_sel_end);
+        app.password_buf.erase(a, b - a);
+        app.password_cursor_pos = a;
+        app.password_sel_start = -1;
+        app.password_sel_end = -1;
+      } else if (app.password_cursor_pos > 0) {
         app.password_buf.erase(app.password_cursor_pos - 1, 1);
         --app.password_cursor_pos;
         { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
           app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
           app.key_repeat_last_ms = app.key_repeat_start_ms; }
-        draw(app);
       }
+      draw(app);
       return true;
     }
     if (utf8 && utf8_len > 0 && utf8_len <= 4) {
+      if (app.password_sel_start >= 0 && app.password_sel_start != app.password_sel_end) {
+        int a = std::min(app.password_sel_start, app.password_sel_end);
+        int b = std::max(app.password_sel_start, app.password_sel_end);
+        app.password_buf.erase(a, b - a);
+        app.password_cursor_pos = a;
+        app.password_sel_start = -1;
+        app.password_sel_end = -1;
+      }
       app.password_buf.insert(app.password_cursor_pos, utf8, utf8_len);
       app.password_cursor_pos += utf8_len;
       draw(app);
@@ -3521,8 +3861,67 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       draw(app);
       return true;
     }
+    // Ctrl+A select all
+    if (ctrl && (sym == XKB_KEY_A || sym == XKB_KEY_a)) {
+      app.rename_ui_sel_start = 0;
+      app.rename_ui_sel_end = static_cast<int>(app.rename_ui_buf.size());
+      app.rename_ui_cursor_pos = app.rename_ui_sel_end;
+      draw(app);
+      return true;
+    }
+    // Ctrl+C copy
+    if (ctrl && (sym == XKB_KEY_C || sym == XKB_KEY_c)) {
+      if (app.rename_ui_sel_start >= 0 && app.rename_ui_sel_start != app.rename_ui_sel_end) {
+        int a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
+        int b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
+        std::string sel = app.rename_ui_buf.substr(a, b - a);
+        if (!sel.empty()) app.clipboard.copy_text(sel);
+      }
+      draw(app);
+      return true;
+    }
+    // Ctrl+X cut
+    if (ctrl && (sym == XKB_KEY_X || sym == XKB_KEY_x)) {
+      if (app.rename_ui_sel_start >= 0 && app.rename_ui_sel_start != app.rename_ui_sel_end) {
+        int a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
+        int b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
+        std::string sel = app.rename_ui_buf.substr(a, b - a);
+        if (!sel.empty()) app.clipboard.copy_text(sel);
+        app.rename_ui_buf.erase(a, b - a);
+        app.rename_ui_cursor_pos = a;
+        app.rename_ui_sel_start = -1;
+        app.rename_ui_sel_end = -1;
+        draw(app);
+      }
+      return true;
+    }
+    // Ctrl+V paste
+    if (ctrl && (sym == XKB_KEY_V || sym == XKB_KEY_v)) {
+      std::string clip = app.clipboard.read_selection_text(app.wl.display());
+      if (!clip.empty()) {
+        if (app.rename_ui_sel_start >= 0 && app.rename_ui_sel_start != app.rename_ui_sel_end) {
+          int a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
+          int b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
+          app.rename_ui_buf.erase(a, b - a);
+          app.rename_ui_cursor_pos = a;
+        }
+        app.rename_ui_buf.insert(app.rename_ui_cursor_pos, clip);
+        app.rename_ui_cursor_pos += static_cast<int>(clip.size());
+        app.rename_ui_sel_start = -1;
+        app.rename_ui_sel_end = -1;
+        draw(app);
+      }
+      return true;
+    }
     if (sym == XKB_KEY_BackSpace && !app.rename_ui_buf.empty()) {
-      if (app.rename_ui_cursor_pos > 0) {
+      if (app.rename_ui_sel_start >= 0 && app.rename_ui_sel_start != app.rename_ui_sel_end) {
+        int a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
+        int b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
+        app.rename_ui_buf.erase(a, b - a);
+        app.rename_ui_cursor_pos = a;
+        app.rename_ui_sel_start = -1;
+        app.rename_ui_sel_end = -1;
+      } else if (app.rename_ui_cursor_pos > 0) {
         app.rename_ui_buf.erase(app.rename_ui_cursor_pos - 1, 1);
         --app.rename_ui_cursor_pos;
       }
@@ -3536,7 +3935,14 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       return true;
     }
     if (sym == XKB_KEY_Delete && !app.rename_ui_buf.empty()) {
-      if (app.rename_ui_cursor_pos < static_cast<int>(app.rename_ui_buf.size()))
+      if (app.rename_ui_sel_start >= 0 && app.rename_ui_sel_start != app.rename_ui_sel_end) {
+        int a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
+        int b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
+        app.rename_ui_buf.erase(a, b - a);
+        app.rename_ui_cursor_pos = a;
+        app.rename_ui_sel_start = -1;
+        app.rename_ui_sel_end = -1;
+      } else if (app.rename_ui_cursor_pos < static_cast<int>(app.rename_ui_buf.size()))
         app.rename_ui_buf.erase(app.rename_ui_cursor_pos, 1);
       else
         app.rename_ui_buf.pop_back();
@@ -3549,7 +3955,15 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       return true;
     }
     if (sym == XKB_KEY_Left && app.rename_ui_cursor_pos > 0) {
-      --app.rename_ui_cursor_pos;
+      if (shift) {
+        if (app.rename_ui_sel_start < 0) app.rename_ui_sel_start = app.rename_ui_cursor_pos;
+        --app.rename_ui_cursor_pos;
+        app.rename_ui_sel_end = app.rename_ui_cursor_pos;
+      } else {
+        --app.rename_ui_cursor_pos;
+        app.rename_ui_sel_start = -1;
+        app.rename_ui_sel_end = -1;
+      }
       { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
         app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
         app.key_repeat_last_ms = app.key_repeat_start_ms; }
@@ -3557,7 +3971,15 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       return true;
     }
     if (sym == XKB_KEY_Right && app.rename_ui_cursor_pos < static_cast<int>(app.rename_ui_buf.size())) {
-      ++app.rename_ui_cursor_pos;
+      if (shift) {
+        if (app.rename_ui_sel_start < 0) app.rename_ui_sel_start = app.rename_ui_cursor_pos;
+        ++app.rename_ui_cursor_pos;
+        app.rename_ui_sel_end = app.rename_ui_cursor_pos;
+      } else {
+        ++app.rename_ui_cursor_pos;
+        app.rename_ui_sel_start = -1;
+        app.rename_ui_sel_end = -1;
+      }
       { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
         app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
         app.key_repeat_last_ms = app.key_repeat_start_ms; }
@@ -3565,16 +3987,41 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       return true;
     }
     if (sym == XKB_KEY_Home) {
-      app.rename_ui_cursor_pos = 0;
+      if (shift) {
+        if (app.rename_ui_sel_start < 0) app.rename_ui_sel_start = app.rename_ui_cursor_pos;
+        app.rename_ui_cursor_pos = 0;
+        app.rename_ui_sel_end = 0;
+      } else {
+        app.rename_ui_cursor_pos = 0;
+        app.rename_ui_sel_start = -1;
+        app.rename_ui_sel_end = -1;
+      }
       draw(app);
       return true;
     }
     if (sym == XKB_KEY_End) {
-      app.rename_ui_cursor_pos = static_cast<int>(app.rename_ui_buf.size());
+      int end = static_cast<int>(app.rename_ui_buf.size());
+      if (shift) {
+        if (app.rename_ui_sel_start < 0) app.rename_ui_sel_start = app.rename_ui_cursor_pos;
+        app.rename_ui_cursor_pos = end;
+        app.rename_ui_sel_end = end;
+      } else {
+        app.rename_ui_cursor_pos = end;
+        app.rename_ui_sel_start = -1;
+        app.rename_ui_sel_end = -1;
+      }
       draw(app);
       return true;
     }
     if (utf8 && utf8_len > 0 && utf8_len <= 4) {
+      if (app.rename_ui_sel_start >= 0 && app.rename_ui_sel_start != app.rename_ui_sel_end) {
+        int a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
+        int b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
+        app.rename_ui_buf.erase(a, b - a);
+        app.rename_ui_cursor_pos = a;
+        app.rename_ui_sel_start = -1;
+        app.rename_ui_sel_end = -1;
+      }
       app.rename_ui_buf.insert(app.rename_ui_cursor_pos, utf8, utf8_len);
       app.rename_ui_cursor_pos += utf8_len;
       draw(app);
@@ -4757,22 +5204,46 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   }
 
   if (app.create_dialog_open && utf8 && utf8_len > 0 && utf8_len <= 4) {
-    app.create_buf.append(utf8, utf8_len);
-    app.create_cursor_pos = static_cast<int>(app.create_buf.size());
+    if (app.create_sel_start >= 0 && app.create_sel_start != app.create_sel_end) {
+      int a = std::min(app.create_sel_start, app.create_sel_end);
+      int b = std::max(app.create_sel_start, app.create_sel_end);
+      app.create_buf.erase(a, b - a);
+      app.create_cursor_pos = a;
+      app.create_sel_start = -1;
+      app.create_sel_end = -1;
+    }
+    app.create_buf.insert(app.create_cursor_pos, utf8, utf8_len);
+    app.create_cursor_pos += utf8_len;
     draw(app);
     return true;
   }
 
   if (app.password_dialog_open && utf8 && utf8_len > 0 && utf8_len <= 4) {
-    app.password_buf.append(utf8, utf8_len);
-    app.password_cursor_pos = static_cast<int>(app.password_buf.size());
+    if (app.password_sel_start >= 0 && app.password_sel_start != app.password_sel_end) {
+      int a = std::min(app.password_sel_start, app.password_sel_end);
+      int b = std::max(app.password_sel_start, app.password_sel_end);
+      app.password_buf.erase(a, b - a);
+      app.password_cursor_pos = a;
+      app.password_sel_start = -1;
+      app.password_sel_end = -1;
+    }
+    app.password_buf.insert(app.password_cursor_pos, utf8, utf8_len);
+    app.password_cursor_pos += utf8_len;
     draw(app);
     return true;
   }
 
   if (app.rename_ui_open && utf8 && utf8_len > 0 && utf8_len <= 4) {
-    app.rename_ui_buf.append(utf8, utf8_len);
-    app.rename_ui_cursor_pos = static_cast<int>(app.rename_ui_buf.size());
+    if (app.rename_ui_sel_start >= 0 && app.rename_ui_sel_start != app.rename_ui_sel_end) {
+      int a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
+      int b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
+      app.rename_ui_buf.erase(a, b - a);
+      app.rename_ui_cursor_pos = a;
+      app.rename_ui_sel_start = -1;
+      app.rename_ui_sel_end = -1;
+    }
+    app.rename_ui_buf.insert(app.rename_ui_cursor_pos, utf8, utf8_len);
+    app.rename_ui_cursor_pos += utf8_len;
     draw(app);
     return true;
   }
@@ -4862,6 +5333,34 @@ void handle_pointer_release(AppState& app, int x, int y, int button) {
       int sel_a = std::min(rel_sel_start, rel_sel_end);
       int sel_b = std::max(rel_sel_start, rel_sel_end);
       std::string sel = rel_buf.substr(sel_a, sel_b - sel_a);
+      if (!sel.empty()) app.clipboard.copy_text(sel);
+    }
+  }
+  // Stop dialog input field drag selection
+  if (app.create_dragging) {
+    app.create_dragging = false;
+    if (app.create_sel_start >= 0 && app.create_sel_start != app.create_sel_end) {
+      int a = std::min(app.create_sel_start, app.create_sel_end);
+      int b = std::max(app.create_sel_start, app.create_sel_end);
+      std::string sel = app.create_buf.substr(a, b - a);
+      if (!sel.empty()) app.clipboard.copy_text(sel);
+    }
+  }
+  if (app.rename_ui_dragging) {
+    app.rename_ui_dragging = false;
+    if (app.rename_ui_sel_start >= 0 && app.rename_ui_sel_start != app.rename_ui_sel_end) {
+      int a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
+      int b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
+      std::string sel = app.rename_ui_buf.substr(a, b - a);
+      if (!sel.empty()) app.clipboard.copy_text(sel);
+    }
+  }
+  if (app.password_dragging) {
+    app.password_dragging = false;
+    if (app.password_sel_start >= 0 && app.password_sel_start != app.password_sel_end) {
+      int a = std::min(app.password_sel_start, app.password_sel_end);
+      int b = std::max(app.password_sel_start, app.password_sel_end);
+      std::string sel = app.password_buf.substr(a, b - a);
       if (!sel.empty()) app.clipboard.copy_text(sel);
     }
   }

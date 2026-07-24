@@ -389,9 +389,7 @@ void paint(AppState& app, cairo_t* cr) {
   if (app.password_dialog_open) draw_password_dialog(app, cr);
   if (app.compress_dialog_open) draw_compress_dialog(app, cr);
   if (app.term_chooser_open) draw_terminal_chooser(app, cr);
-  if (app.properties.open) draw_properties_dialog(app, cr);
   if (app.open_with_open) draw_open_with(app, cr);
-  if (app.settings_open) draw_settings_dialog(app, cr);
 
   // Sort menu
   if (app.r_sort_menu_open || app.sort_menu_open) {

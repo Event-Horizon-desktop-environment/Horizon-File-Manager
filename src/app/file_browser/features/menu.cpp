@@ -179,12 +179,6 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
     else
       cm_h += 32;
   }
-  if (app.context_menu_x + cm_w > app.width)
-    app.context_menu_x = app.width - cm_w - 4;
-  if (app.context_menu_y + cm_h > app.height)
-    app.context_menu_y = app.height - cm_h - 4;
-  if (app.context_menu_x < 4) app.context_menu_x = 4;
-  if (app.context_menu_y < 4) app.context_menu_y = 4;
 }
 
 // ── context menu action execution ────────────────────────────────
@@ -214,6 +208,83 @@ void execute_context_menu_action(AppState& app, int item_idx) {
       } else {
         app.clipboard.copy_text(m_buf);
       }
+      draw(app);
+      return;
+    }
+  }
+
+  // ── Dialog text editing context menu actions ──
+  if (app.context_menu_file_idx == -6 || app.context_menu_file_idx == -7 ||
+      app.context_menu_file_idx == -8) {
+    // Determine which buffer/selection/cursor to use
+    std::string* buf = nullptr;
+    int* cursor = nullptr;
+    int* sel_start = nullptr;
+    int* sel_end = nullptr;
+    if (app.context_menu_file_idx == -6) {
+      buf = &app.create_buf;
+      cursor = &app.create_cursor_pos;
+      sel_start = &app.create_sel_start;
+      sel_end = &app.create_sel_end;
+    } else if (app.context_menu_file_idx == -7) {
+      buf = &app.rename_ui_buf;
+      cursor = &app.rename_ui_cursor_pos;
+      sel_start = &app.rename_ui_sel_start;
+      sel_end = &app.rename_ui_sel_end;
+    } else {
+      buf = &app.password_buf;
+      cursor = &app.password_cursor_pos;
+      sel_start = &app.password_sel_start;
+      sel_end = &app.password_sel_end;
+    }
+
+    if (action == AppState::ContextMenuAction::Cut) {
+      if (*sel_start >= 0 && *sel_start != *sel_end) {
+        int a = std::min(*sel_start, *sel_end);
+        int b = std::max(*sel_start, *sel_end);
+        std::string sel = buf->substr(a, b - a);
+        if (!sel.empty()) app.clipboard.copy_text(sel);
+        buf->erase(a, b - a);
+        *cursor = a;
+        *sel_start = -1;
+        *sel_end = -1;
+      }
+      draw(app);
+      return;
+    }
+    if (action == AppState::ContextMenuAction::Copy) {
+      if (*sel_start >= 0 && *sel_start != *sel_end) {
+        int a = std::min(*sel_start, *sel_end);
+        int b = std::max(*sel_start, *sel_end);
+        std::string sel = buf->substr(a, b - a);
+        if (!sel.empty()) app.clipboard.copy_text(sel);
+      } else {
+        app.clipboard.copy_text(*buf);
+      }
+      draw(app);
+      return;
+    }
+    if (action == AppState::ContextMenuAction::Paste) {
+      std::string clip = app.clipboard.read_selection_text(app.wl.display());
+      if (!clip.empty()) {
+        if (*sel_start >= 0 && *sel_start != *sel_end) {
+          int a = std::min(*sel_start, *sel_end);
+          int b = std::max(*sel_start, *sel_end);
+          buf->erase(a, b - a);
+          *cursor = a;
+        }
+        buf->insert(*cursor, clip);
+        *cursor += static_cast<int>(clip.size());
+        *sel_start = -1;
+        *sel_end = -1;
+      }
+      draw(app);
+      return;
+    }
+    if (action == AppState::ContextMenuAction::SelectAll) {
+      *sel_start = 0;
+      *sel_end = static_cast<int>(buf->size());
+      *cursor = *sel_end;
       draw(app);
       return;
     }
@@ -1334,6 +1405,8 @@ void open_settings(AppState& app) {
   app.settings_topbar_opacity_pct = app.topbar_opacity_pct;
   app.settings_statusbar_opacity_pct = app.statusbar_opacity_pct;
   app.settings_preview_opacity_pct = app.preview_opacity_pct;
+  app.settings_dialog_opacity_pct = app.dialog_opacity_pct;
+  app.settings_properties_opacity_pct = app.properties_opacity_pct;
 
   {
     const auto& sc = eh::config::shell_config_snapshot();
@@ -1369,6 +1442,8 @@ void open_settings(AppState& app) {
   app.settings_dropdown_open = false;
   app.settings_dropdown_hover = -1;
   app.settings_dropdown_scroll = 0;
+
+  create_settings_window(app);
 }
 
 void save_current_folder_settings(AppState& app) {
@@ -1392,6 +1467,8 @@ void save_file_browser_settings(AppState& app) {
   fbs.topbar_opacity_pct = app.topbar_opacity_pct;
   fbs.statusbar_opacity_pct = app.statusbar_opacity_pct;
   fbs.preview_opacity_pct = app.preview_opacity_pct;
+  fbs.dialog_opacity_pct = app.dialog_opacity_pct;
+  fbs.properties_opacity_pct = app.properties_opacity_pct;
   fbs.view_mode = static_cast<int>(app.cur_tab().view_mode);
   fbs.sort_field = static_cast<int>(app.cur_tab().sort_field);
   fbs.sort_descending = app.cur_tab().sort_descending;
@@ -1424,6 +1501,8 @@ void settings_apply(AppState& app) {
     fbs.topbar_opacity_pct = app.settings_topbar_opacity_pct;
     fbs.statusbar_opacity_pct = app.settings_statusbar_opacity_pct;
     fbs.preview_opacity_pct = app.settings_preview_opacity_pct;
+    fbs.dialog_opacity_pct = app.settings_dialog_opacity_pct;
+    fbs.properties_opacity_pct = app.settings_properties_opacity_pct;
     fbs.view_mode = static_cast<int>(app.cur_tab().view_mode);
     fbs.sort_field = static_cast<int>(app.cur_tab().sort_field);
     fbs.sort_descending = app.cur_tab().sort_descending;
@@ -1526,6 +1605,8 @@ void reload_settings_from_config(AppState& app) {
   app.topbar_opacity_pct = fbs.topbar_opacity_pct;
   app.statusbar_opacity_pct = fbs.statusbar_opacity_pct;
   app.preview_opacity_pct = fbs.preview_opacity_pct;
+  app.dialog_opacity_pct = fbs.dialog_opacity_pct;
+  app.properties_opacity_pct = fbs.properties_opacity_pct;
   app.cur_tab().view_mode = static_cast<ViewMode>(fbs.view_mode);
   app.cur_tab().sort_field = static_cast<SortField>(std::clamp(fbs.sort_field, 0, 5));
   app.cur_tab().sort_descending = fbs.sort_descending;
@@ -1563,7 +1644,21 @@ void show_properties(AppState& app, const std::string& path, const std::string& 
   if (stat(path.c_str(), &st) != 0) return;
 
   p.is_dir = S_ISDIR(st.st_mode);
-  p.size = static_cast<uint64_t>(st.st_size);
+  if (p.is_dir) {
+    uint64_t total = 0;
+    std::error_code ec;
+    for (auto& entry : fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied, ec)) {
+      if (ec) break;
+      if (entry.is_regular_file(ec)) {
+        struct stat fst;
+        if (stat(entry.path().c_str(), &fst) == 0)
+          total += static_cast<uint64_t>(fst.st_size);
+      }
+    }
+    p.size = total;
+  } else {
+    p.size = static_cast<uint64_t>(st.st_size);
+  }
   p.modified_sec = st.st_mtime;
   p.accessed_sec = st.st_atime;
   p.created_sec = st.st_ctime;
@@ -1580,6 +1675,23 @@ void show_properties(AppState& app, const std::string& path, const std::string& 
   p.perm_group = perm_level(st.st_mode & S_IRGRP, st.st_mode & S_IWGRP, st.st_mode & S_IXGRP);
   p.perm_other = perm_level(st.st_mode & S_IROTH, st.st_mode & S_IWOTH, st.st_mode & S_IXOTH);
   p.executable = (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
+  // Detect files that can be made executable (extension-based)
+  if (!p.is_dir) {
+    static const std::vector<std::string> exec_exts = {
+      ".sh", ".bash", ".zsh", ".fish", ".csh", ".ksh",
+      ".bin", ".elf", ".exe", ".msi", ".out", ".app", ".run",
+      ".com", ".bat", ".cmd", ".ps1",
+      ".appimage", ".desktop", ".deb", ".rpm", ".appdir", ".flatpak", ".snap",
+      ".py", ".pl", ".rb", ".lua", ".js", ".ts", ".php",
+    };
+    std::string fname = fs::path(path).filename().string();
+    auto dotpos = fname.rfind('.');
+    if (dotpos != std::string::npos) {
+      std::string ext = fname.substr(dotpos);
+      for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+      p.can_be_executable = std::find(exec_exts.begin(), exec_exts.end(), ext) != exec_exts.end();
+    }
+  }
 
   // Owner/group names
   struct passwd* pw = getpwuid(st.st_uid);
@@ -1606,6 +1718,24 @@ void show_properties(AppState& app, const std::string& path, const std::string& 
     }
   } else {
     p.mime_type = "inode/directory";
+  }
+
+  // MIME-based executable fallback (after MIME query)
+  if (!p.can_be_executable && !p.is_dir) {
+    static const std::vector<std::string> exec_mimes = {
+      "application/x-executable", "application/x-elf",
+      "application/x-sharedlib", "application/x-pie-executable",
+      "application/vnd.microsoft.portable-executable",
+      "application/x-ms-dos-executable", "application/x-msdownload",
+      "application/x-appimage",
+    };
+    for (const auto& m : exec_mimes) {
+      if (p.mime_type == m) { p.can_be_executable = true; break; }
+    }
+    if (!p.can_be_executable && (p.mime_type.find("x-rpm") != std::string::npos ||
+        p.mime_type.find("x-flatpak") != std::string::npos ||
+        p.mime_type.find("x-snap") != std::string::npos))
+      p.can_be_executable = true;
   }
 
   // Helper: shell-escape a path for single-quote quoting
@@ -1868,7 +1998,7 @@ void show_properties(AppState& app, const std::string& path, const std::string& 
   p.scroll_px = 0;
   p.combo_open = -1;
   p.combo_hover_item = -1;
-  draw(app);
+  create_props_window(app);
 }
 
 } // namespace eh::file_browser

@@ -579,7 +579,7 @@ void data_device_data_offer(void* data, wl_data_device*, wl_data_offer* offer) {
 }
 
 void data_device_enter(void* data, wl_data_device*, uint32_t serial, wl_surface*,
-                       wl_fixed_t, wl_fixed_t, wl_data_offer* offer) {
+                       wl_fixed_t x, wl_fixed_t y, wl_data_offer* offer) {
   auto& app = *static_cast<AppState*>(data);
   app.drop_enter_serial = serial;
   app.drop_chosen_action = WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
@@ -590,6 +590,80 @@ void data_device_enter(void* data, wl_data_device*, uint32_t serial, wl_surface*
         WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
         WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE,
         WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
+  }
+
+  // Perform initial hit test so the drop target is set from the very start,
+  // rather than waiting for the first motion event.
+  int sx = wl_fixed_to_int(x);
+  int sy = wl_fixed_to_int(y);
+  app.drop_x = sx;
+  app.drop_y = sy;
+
+  // Check tab bar
+  int tab_bar_top = app.top_bar_height;
+  int tab_bar_bot = app.top_bar_height + app.tab_bar_height;
+  if (app.tab_bar_height > 0 && sy >= tab_bar_top && sy < tab_bar_bot &&
+      app.tabs.size() > 1) {
+    for (size_t i = 0; i < app.tab_hits.size(); ++i) {
+      auto& th = app.tab_hits[i];
+      if (sx >= th.x && sx < th.x + th.w && static_cast<int>(i) != app.active_tab) {
+        app.drop_target_tab_idx = static_cast<int>(i);
+        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        app.drop_tab_switch_start_ms = static_cast<uint64_t>(now_ms);
+        app.pendingRedraw = true;
+        return;
+      }
+    }
+    return;
+  }
+
+  // Check content area first (folders in the content area get priority)
+  int idx = -1;
+  if (app.cur_tab().view_mode == ViewMode::List) {
+    idx = hit_test_list(app, sx, sy);
+  } else {
+    idx = hit_test_grid(app, sx, sy);
+  }
+  if (idx >= 0 && idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+    int real_idx = app.cur_tab().visible_entries[idx];
+    if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
+        app.cur_tab().entries[real_idx].is_dir) {
+      app.drop_target_path = app.cur_tab().entries[real_idx].path;
+      app.drop_target_idx = idx;
+      app.drop_target_is_sidebar = false;
+      app.drop_target_sidebar_idx = -1;
+      app.drop_target_is_valid = true;
+      app.pendingRedraw = true;
+      return;
+    }
+  }
+
+  // Check favorites section
+  if (hit_test_fav_section(app, sx, sy)) {
+    app.drop_target_fav_section = true;
+    app.drop_target_is_sidebar = false;
+    app.drop_target_sidebar_idx = -1;
+    app.drop_target_path.clear();
+    app.drop_target_is_valid = true;
+    app.pendingRedraw = true;
+    return;
+  }
+
+  // Check sidebar (lowest priority — only when cursor is actually in sidebar area)
+  int sb_idx = hit_test_sidebar(app, sx, sy);
+  if (sb_idx >= 0 && sb_idx < static_cast<int>(app.sidebar_locations.size())) {
+    const auto& loc = app.sidebar_locations[sb_idx];
+    std::error_code ec;
+    if (std::filesystem::is_directory(loc.path, ec)) {
+      app.drop_target_path = loc.path;
+      app.drop_target_idx = -1;
+      app.drop_target_is_sidebar = true;
+      app.drop_target_sidebar_idx = sb_idx;
+      app.drop_target_is_valid = true;
+      app.pendingRedraw = true;
+      return;
+    }
   }
 }
 
@@ -668,27 +742,34 @@ void data_device_motion(void* data, wl_data_device*, uint32_t, wl_fixed_t x, wl_
     app.pendingRedraw = true;
   }
 
-  // Check sidebar first (higher priority)
-  int sb_idx = hit_test_sidebar(app, sx, sy);
-  if (sb_idx >= 0 && sb_idx < static_cast<int>(app.sidebar_locations.size())) {
-    // If over a sidebar item, clear the favorites section indicator
-    if (app.drop_target_fav_section) {
-      app.drop_target_fav_section = false;
-      app.pendingRedraw = true;
-    }
-    const auto& loc = app.sidebar_locations[sb_idx];
-    std::error_code ec;
-    if (std::filesystem::is_directory(loc.path, ec)) {
-      if (!app.drop_target_is_sidebar || app.drop_target_sidebar_idx != sb_idx) {
+  // Check visible entries first (content-area folders get highest priority)
+  int idx = -1;
+  if (app.cur_tab().view_mode == ViewMode::List) {
+    idx = hit_test_list(app, sx, sy);
+  } else {
+    idx = hit_test_grid(app, sx, sy);
+  }
+
+  if (idx >= 0 && idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+    int real_idx = app.cur_tab().visible_entries[idx];
+    if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
+        app.cur_tab().entries[real_idx].is_dir) {
+      const auto& folder_path = app.cur_tab().entries[real_idx].path;
+      if (app.drop_target_idx != idx || app.drop_target_is_sidebar) {
+        app.drop_target_path = folder_path;
+        app.drop_target_idx = idx;
+        app.drop_target_is_sidebar = false;
+        app.drop_target_sidebar_idx = -1;
         app.drop_target_fav_section = false;
-        app.drop_target_path = loc.path;
-        app.drop_target_idx = -1;
-        app.drop_target_is_sidebar = true;
-        app.drop_target_sidebar_idx = sb_idx;
         app.drop_target_is_valid = true;
-        app.drop_hover_open_start_ms = 0;
-        app.drop_hover_open_path.clear();
         app.pendingRedraw = true;
+      }
+      // Start / reset hover-to-open timer for this folder
+      if (app.drop_hover_open_path != folder_path) {
+        app.drop_hover_open_path = folder_path;
+        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        app.drop_hover_open_start_ms = static_cast<uint64_t>(now_ms);
       }
       return;
     }
@@ -709,33 +790,27 @@ void data_device_motion(void* data, wl_data_device*, uint32_t, wl_fixed_t x, wl_
     return;
   }
 
-  // Check visible entries (only folders are valid targets)
-  int idx = -1;
-  if (app.cur_tab().view_mode == ViewMode::List) {
-    idx = hit_test_list(app, sx, sy);
-  } else {
-    idx = hit_test_grid(app, sx, sy);
-  }
-
-  if (idx >= 0 && idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
-    int real_idx = app.cur_tab().visible_entries[idx];
-    if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
-        app.cur_tab().entries[real_idx].is_dir) {
-      const auto& folder_path = app.cur_tab().entries[real_idx].path;
-      if (app.drop_target_idx != idx || app.drop_target_is_sidebar) {
-        app.drop_target_path = folder_path;
-        app.drop_target_idx = idx;
-        app.drop_target_is_sidebar = false;
-        app.drop_target_sidebar_idx = -1;
+  // Check sidebar (lowest priority — only when cursor is actually in sidebar area)
+  int sb_idx = hit_test_sidebar(app, sx, sy);
+  if (sb_idx >= 0 && sb_idx < static_cast<int>(app.sidebar_locations.size())) {
+    // If over a sidebar item, clear the favorites section indicator
+    if (app.drop_target_fav_section) {
+      app.drop_target_fav_section = false;
+      app.pendingRedraw = true;
+    }
+    const auto& loc = app.sidebar_locations[sb_idx];
+    std::error_code ec;
+    if (std::filesystem::is_directory(loc.path, ec)) {
+      if (!app.drop_target_is_sidebar || app.drop_target_sidebar_idx != sb_idx) {
+        app.drop_target_fav_section = false;
+        app.drop_target_path = loc.path;
+        app.drop_target_idx = -1;
+        app.drop_target_is_sidebar = true;
+        app.drop_target_sidebar_idx = sb_idx;
         app.drop_target_is_valid = true;
+        app.drop_hover_open_start_ms = 0;
+        app.drop_hover_open_path.clear();
         app.pendingRedraw = true;
-      }
-      // Start / reset hover-to-open timer for this folder
-      if (app.drop_hover_open_path != folder_path) {
-        app.drop_hover_open_path = folder_path;
-        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            std::chrono::steady_clock::now().time_since_epoch()).count();
-        app.drop_hover_open_start_ms = static_cast<uint64_t>(now_ms);
       }
       return;
     }

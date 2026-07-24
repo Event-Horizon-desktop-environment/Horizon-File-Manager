@@ -57,6 +57,26 @@ void draw_rename_ui(AppState& app, cairo_t* cr) {
 
   cairo_set_font_size(cr, 14);
   cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+
+  // Draw selection highlight
+  if (app.rename_ui_sel_start >= 0 && app.rename_ui_sel_start != app.rename_ui_sel_end) {
+    int sel_a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
+    int sel_b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
+    std::string before_sel = app.rename_ui_buf.substr(0, static_cast<std::size_t>(sel_a));
+    std::string sel_text = app.rename_ui_buf.substr(static_cast<std::size_t>(sel_a), static_cast<std::size_t>(sel_b - sel_a));
+    cairo_text_extents_t te_before, te_sel;
+    cairo_text_extents(cr, before_sel.c_str(), &te_before);
+    cairo_text_extents(cr, sel_text.c_str(), &te_sel);
+    double sel_x = input_x + 12 + te_before.width;
+    double sel_y = static_cast<double>(input_y) + 4;
+    double sel_w = te_sel.width;
+    double sel_h = static_cast<double>(input_h) - 8;
+    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.35);
+    cairo_rectangle(cr, sel_x, sel_y, sel_w, sel_h);
+    cairo_fill(cr);
+  }
+
+  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
   cairo_move_to(cr, input_x + 12, input_y + input_h / 2 + 5);
   cairo_show_text(cr, app.rename_ui_buf.c_str());
 
