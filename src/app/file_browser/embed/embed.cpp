@@ -959,9 +959,10 @@ static bool create_window(AppState& app) {
   const int dpy_fd = wl_display_get_fd(app.wl.display());
   constexpr int kPollMs = 200;
 
-  // Track settings file mtimes so we only re-read theme when they change
+  // Track settings file mtimes so we only re-read when they change
   int64_t toml_mtime = 0;
   int64_t ini_mtime = 0;
+  int64_t fb_toml_mtime = 0;
   int64_t dev_disk_mtime = 0;
 
   while (app.running && g_signal == 0) {
@@ -971,29 +972,27 @@ static bool create_window(AppState& app) {
         !app.term_chooser_open && !app.context_menu_open) {
       bool need_redraw = false;
 
-      // Icon theme sync — stat the settings files and re-read when
-      // either changes (the file browser is a separate process so
-      // shell_config_snapshot_skip_matugen never sees external updates).
+      // Settings sync — stat the config files and reload when they change
       {
-        bool theme_changed = false;
+        bool settings_changed = false;
         struct stat st{};
 
         if (stat(eh::config::state_settings_toml_path().c_str(), &st) == 0) {
           int64_t mt = static_cast<int64_t>(st.st_mtime);
-          if (mt != toml_mtime) { toml_mtime = mt; theme_changed = true; }
+          if (mt != toml_mtime) { toml_mtime = mt; settings_changed = true; }
         }
         if (stat(eh::config::legacy_ini_path().c_str(), &st) == 0) {
           int64_t mt = static_cast<int64_t>(st.st_mtime);
-          if (mt != ini_mtime) { ini_mtime = mt; theme_changed = true; }
+          if (mt != ini_mtime) { ini_mtime = mt; settings_changed = true; }
+        }
+        if (stat(eh::config::state_file_browser_toml_path().c_str(), &st) == 0) {
+          int64_t mt = static_cast<int64_t>(st.st_mtime);
+          if (mt != fb_toml_mtime) { fb_toml_mtime = mt; settings_changed = true; }
         }
 
-        if (theme_changed) {
-          std::string current_theme = eh::config::read_dock_icon_theme_from_disk();
-          if (!current_theme.empty() && current_theme != app.last_icon_theme) {
-            app.icons.set_icon_theme(current_theme);
-            app.last_icon_theme = current_theme;
-            need_redraw = true;
-          }
+        if (settings_changed) {
+          reload_settings_from_config(app);
+          need_redraw = true;
         }
       }
 

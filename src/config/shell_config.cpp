@@ -33,6 +33,10 @@ static std::string file_browser_toml_path() {
   return config_dir() + "/file-browser.toml";
 }
 
+std::string state_file_browser_toml_path() {
+  return file_browser_toml_path();
+}
+
 std::string state_settings_toml_path() {
   return config_dir() + "/state-settings.toml";
 }
@@ -67,10 +71,34 @@ void shell_config_reload_from_disk_now() {
       auto& a = g_snapshot.appearance;
       if (auto* v = ap->get("matugenThemingEnabled")) a.matugenThemingEnabled = v->value_or(false);
       if (auto* v = ap->get("matugenPaletteOk")) a.matugenPaletteOk = v->value_or(false);
-      if (auto* v = ap->get("colorBrightness")) a.colorBrightness = v->value_or(1.0);
-      if (auto* v = ap->get("colorContrast")) a.colorContrast = v->value_or(1.0);
-      if (auto* v = ap->get("colorVibrance")) a.colorVibrance = v->value_or(1.0);
-      if (auto* v = ap->get("colorGamma")) a.colorGamma = v->value_or(1.0);
+      if (auto* v = ap->get("colorBrightness")) a.colorBrightness = v->value_or(1.0f);
+      if (auto* v = ap->get("colorContrast")) a.colorContrast = v->value_or(1.0f);
+      if (auto* v = ap->get("colorVibrance")) a.colorVibrance = v->value_or(1.0f);
+      if (auto* v = ap->get("colorGamma")) a.colorGamma = v->value_or(1.0f);
+      if (auto* v = ap->get("matugenAccentR")) a.matugenAccentR = v->value_or(0.90f);
+      if (auto* v = ap->get("matugenAccentG")) a.matugenAccentG = v->value_or(0.90f);
+      if (auto* v = ap->get("matugenAccentB")) a.matugenAccentB = v->value_or(0.90f);
+      if (auto* v = ap->get("matugenTextR")) a.matugenTextR = v->value_or(0.92f);
+      if (auto* v = ap->get("matugenTextG")) a.matugenTextG = v->value_or(0.92f);
+      if (auto* v = ap->get("matugenTextB")) a.matugenTextB = v->value_or(0.95f);
+      if (auto* v = ap->get("matugenPanelFillR")) a.matugenPanelFillR = v->value_or(0.08f);
+      if (auto* v = ap->get("matugenPanelFillG")) a.matugenPanelFillG = v->value_or(0.10f);
+      if (auto* v = ap->get("matugenPanelFillB")) a.matugenPanelFillB = v->value_or(0.13f);
+      if (auto* v = ap->get("matugenOutlineR")) a.matugenOutlineR = v->value_or(0.55f);
+      if (auto* v = ap->get("matugenOutlineG")) a.matugenOutlineG = v->value_or(0.60f);
+      if (auto* v = ap->get("matugenOutlineB")) a.matugenOutlineB = v->value_or(0.62f);
+      if (auto* v = ap->get("matugenDockFillR")) a.matugenDockFillR = v->value_or(0.12f);
+      if (auto* v = ap->get("matugenDockFillG")) a.matugenDockFillG = v->value_or(0.12f);
+      if (auto* v = ap->get("matugenDockFillB")) a.matugenDockFillB = v->value_or(0.14f);
+      if (auto* v = ap->get("matugenDrawerDimR")) a.matugenDrawerDimR = v->value_or(0.11f);
+      if (auto* v = ap->get("matugenDrawerDimG")) a.matugenDrawerDimG = v->value_or(0.11f);
+      if (auto* v = ap->get("matugenDrawerDimB")) a.matugenDrawerDimB = v->value_or(0.13f);
+      if (auto* v = ap->get("matugenNotifCriticalBgR")) a.matugenNotifCriticalBgR = v->value_or(0.18f);
+      if (auto* v = ap->get("matugenNotifCriticalBgG")) a.matugenNotifCriticalBgG = v->value_or(0.06f);
+      if (auto* v = ap->get("matugenNotifCriticalBgB")) a.matugenNotifCriticalBgB = v->value_or(0.06f);
+      if (auto* v = ap->get("matugenNotifCriticalOutlineR")) a.matugenNotifCriticalOutlineR = v->value_or(0.70f);
+      if (auto* v = ap->get("matugenNotifCriticalOutlineG")) a.matugenNotifCriticalOutlineG = v->value_or(0.10f);
+      if (auto* v = ap->get("matugenNotifCriticalOutlineB")) a.matugenNotifCriticalOutlineB = v->value_or(0.10f);
     }
 
     // dock

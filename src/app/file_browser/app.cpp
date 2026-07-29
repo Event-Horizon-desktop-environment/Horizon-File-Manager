@@ -24,20 +24,34 @@ namespace eh::file_browser {
 // ── paint (extracted draw logic, no buffer/surface dependency) ────
 
 void paint(AppState& app, cairo_t* cr) {
-  // Check if settings TOML changed and re-apply colors if so
+  // Check if settings TOMLs changed and re-apply settings if so
   {
-    static timespec s_last_mtime{};
-    static bool s_initialized = false;
+    static timespec s_last_settings_mtime{};
+    static bool s_initialized_settings = false;
     const std::string toml_path = eh::config::state_settings_toml_path();
     struct stat st{};
     if (::stat(toml_path.c_str(), &st) == 0) {
-      if (!s_initialized) {
-        s_last_mtime = st.st_mtim;
-        s_initialized = true;
-      } else if (st.st_mtim.tv_sec != s_last_mtime.tv_sec ||
-                 st.st_mtim.tv_nsec != s_last_mtime.tv_nsec) {
-        s_last_mtime = st.st_mtim;
-        reload_colors_from_config(app);
+      if (!s_initialized_settings) {
+        s_last_settings_mtime = st.st_mtim;
+        s_initialized_settings = true;
+      } else if (st.st_mtim.tv_sec != s_last_settings_mtime.tv_sec ||
+                 st.st_mtim.tv_nsec != s_last_settings_mtime.tv_nsec) {
+        s_last_settings_mtime = st.st_mtim;
+        reload_settings_from_config(app);
+      }
+    }
+    static timespec s_last_fb_mtime{};
+    static bool s_initialized_fb = false;
+    const std::string fb_path = eh::config::state_file_browser_toml_path();
+    struct stat fb_st{};
+    if (::stat(fb_path.c_str(), &fb_st) == 0) {
+      if (!s_initialized_fb) {
+        s_last_fb_mtime = fb_st.st_mtim;
+        s_initialized_fb = true;
+      } else if (fb_st.st_mtim.tv_sec != s_last_fb_mtime.tv_sec ||
+                 fb_st.st_mtim.tv_nsec != s_last_fb_mtime.tv_nsec) {
+        s_last_fb_mtime = fb_st.st_mtim;
+        reload_settings_from_config(app);
       }
     }
   }

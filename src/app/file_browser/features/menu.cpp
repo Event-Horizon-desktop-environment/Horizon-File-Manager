@@ -1541,7 +1541,11 @@ void reload_colors_from_config(AppState& app) {
   eh::config::shell_config_reload_from_disk_now();
   const auto& sc = eh::config::shell_config_snapshot_skip_matugen();
   eh::config::ShellAppearance ap = sc.appearance;
-  eh::matugen::refresh_wallpaper_derived_palette(ap, sc.wallpaperImage);
+  if (ap.matugenPaletteOk) {
+    // Palette already populated from disk (written by color engine / matugen post-hook)
+  } else {
+    eh::matugen::refresh_wallpaper_derived_palette(ap, sc.wallpaperImage);
+  }
   const auto mc = eh::config::derived_chrome_colors(ap);
   if (ap.matugenThemingEnabled && ap.matugenPaletteOk) {
     // Use matugen colors for all UI with vibrance boost
@@ -1629,6 +1633,12 @@ void reload_settings_from_config(AppState& app) {
       pf.sort_descending,
       pf.group_by_type
     };
+  }
+
+  // Sync icon theme from shell config
+  if (!sc.dock.iconTheme.empty() && sc.dock.iconTheme != app.last_icon_theme) {
+    app.icons.set_icon_theme(sc.dock.iconTheme);
+    app.last_icon_theme = sc.dock.iconTheme;
   }
 }
 

@@ -53,6 +53,8 @@ struct MatugenExternalTemplateToggles {
   bool emacs = true;
   bool zed = true;
   bool ptyxis = true;
+  bool horizonFiles = true;
+  bool horizonPhoto = true;
 };
 
 struct ShellAppearance {
