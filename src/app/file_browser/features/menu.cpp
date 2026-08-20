@@ -171,14 +171,6 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
     };
   }
 
-  int cm_w = 200;
-  int cm_h = 0;
-  for (const auto& item : app.context_menu_items) {
-    if (item.action == AppState::ContextMenuAction::Separator && item.sub_items.empty())
-      cm_h += 8;
-    else
-      cm_h += 32;
-  }
 }
 
 // ── context menu action execution ────────────────────────────────
