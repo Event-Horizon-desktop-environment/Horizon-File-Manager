@@ -81,6 +81,15 @@ struct FileEntry {
   bool is_dir = false;
   bool is_hidden = false;
   bool is_symlink = false;
+  // Extended metadata for sorting/emblems
+  bool in_hidden_file = false;   // listed in the directory's .hidden file
+  bool readable = true;
+  bool writable = true;
+  std::string owner;
+  std::string group;
+  uint32_t mode = 0;             // st_mode
+  std::string extension;         // lowercase, without dot ("" if none)
+  std::string link_target;       // symlink target (readlink)
 };
 
 struct SidebarLocation {
