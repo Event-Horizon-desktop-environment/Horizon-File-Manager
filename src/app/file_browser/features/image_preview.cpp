@@ -28,7 +28,9 @@ bool is_image_extension(const std::string& path) {
   }
   return ext == ".jpg" || ext == ".jpeg" || ext == ".png" ||
          ext == ".gif" || ext == ".bmp" || ext == ".webp" ||
-         ext == ".tiff" || ext == ".tif";
+         ext == ".tiff" || ext == ".tif" ||
+         // Freedesktop avatar files — plain image data despite the name
+         ext == ".face" || ext == ".icon";
 }
 
 // ── helpers ────────────────────────────────────────────────────────────

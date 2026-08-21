@@ -1,4 +1,5 @@
 #include "../app.hpp"
+#include "../features/view_zoom.hpp"
 
 #include <cairo/cairo.h>
 #include <pango/pangocairo.h>
@@ -21,6 +22,7 @@
 #include <pwd.h>
 #include <sys/stat.h>
 #include <sys/statvfs.h>
+#include <unistd.h>
 
 // ── icon debug logger ──────────────────────────────────────────────
 static std::mutex g_icon_log_mtx;
@@ -259,7 +261,8 @@ static const char* icon_name_for_file_type(FileType ft, const std::string* file_
 }
 
 // Small status badge drawn over a file icon's lower-left corner.
-// kind: 0 = symlink (accent arrow), 1 = read-only (padlock), 2 = no access
+// kind: 0 = symlink (accent arrow), 1 = read-only (padlock), 2 = no access,
+//       3 = locked by root (amber padlock with keyhole)
 static void draw_emblem_badge(AppState& app, cairo_t* cr, double cx, double cy,
                               double r, int kind) {
   // Backing disc
@@ -268,6 +271,8 @@ static void draw_emblem_badge(AppState& app, cairo_t* cr, double cx, double cy,
   } else if (kind == 1) {
     cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                           app.text_secondary_b, 1.0);
+  } else if (kind == 3) {
+    cairo_set_source_rgba(cr, 0.95, 0.62, 0.10, 1.0);
   } else {
     cairo_set_source_rgba(cr, 0.85, 0.25, 0.25, 1.0);
   }
@@ -289,14 +294,19 @@ static void draw_emblem_badge(AppState& app, cairo_t* cr, double cx, double cy,
     cairo_move_to(cr, cx + a * 0.8, cy - a * 0.8);
     cairo_line_to(cr, cx + a * 0.8, cy - a * 0.8 + a * 0.55);
     cairo_stroke(cr);
-  } else if (kind == 1) {
-    // Padlock: shackle arc + body
+  } else if (kind == 1 || kind == 3) {
+    // Padlock: shackle arc + body (+ keyhole for root lock)
     double bw = r * 0.9, bh = r * 0.7;
     cairo_rectangle(cr, cx - bw / 2, cy - bh * 0.1, bw, bh);
     cairo_fill(cr);
     cairo_set_line_width(cr, std::max(1.0, r * 0.18));
     cairo_arc(cr, cx, cy - bh * 0.1, bw * 0.32, M_PI, 2 * M_PI);
     cairo_stroke(cr);
+    if (kind == 3) {
+      cairo_set_source_rgba(cr, 0, 0, 0, 0.55);
+      cairo_arc(cr, cx, cy + bh * 0.25, std::max(0.8, r * 0.13), 0, 2 * M_PI);
+      cairo_fill(cr);
+    }
   } else {
     // "No entry" bar
     double bw = r * 1.1, bh = r * 0.28;
@@ -449,7 +459,7 @@ static void draw_file_icon_body(AppState& app, cairo_t* cr, int x, int y,
   cairo_restore(cr);
 }
 
-// Icon + status emblems (symlink / read-only / no access)
+// Icon + status emblems (symlink / read-only / no access / root lock)
 static void draw_file_icon_cairo(AppState& app, cairo_t* cr, int x, int y,
                                   int size, FileType ft, bool selected,
                                   const std::string& icon_name = {},
@@ -468,11 +478,17 @@ static void draw_file_icon_cairo(AppState& app, cairo_t* cr, int x, int y,
   double cx = x + r + pad;
   int drawn = 0;
 
+  // Root-owned entries the current user cannot modify
+  bool locked_by_root = entry->owned_by_root && geteuid() != 0;
+
   if (entry->is_symlink) {
     draw_emblem_badge(app, cr, cx + drawn * (r * 2 + pad * 1.6), cy, r, 0);
     ++drawn;
   }
-  if (entry->readable && !entry->writable) {
+  if (locked_by_root) {
+    draw_emblem_badge(app, cr, cx + drawn * (r * 2 + pad * 1.6), cy, r, 3);
+    ++drawn;
+  } else if (entry->readable && !entry->writable) {
     draw_emblem_badge(app, cr, cx + drawn * (r * 2 + pad * 1.6), cy, r, 1);
     ++drawn;
   }
@@ -2125,6 +2141,13 @@ static const std::vector<SortMenuRow>& sort_menu_rows() {
     {K::ToggleHiddenLast, "Hidden Last", 0},
     {K::ToggleNatural, "Natural Order", 0},
     {K::ToggleCaseSensitive, "Case Sensitive", 0},
+    {K::Separator, "", 0},
+    {K::GroupCaption, "Group By", 0},
+    {K::GroupField, "No Grouping", 0},
+    {K::GroupField, "Type", 1},
+    {K::GroupField, "Name", 2},
+    {K::GroupField, "Date", 3},
+    {K::GroupField, "Size", 4},
   };
   return rows;
 }
@@ -2214,8 +2237,25 @@ void draw_sort_menu(AppState& app, cairo_t* cr) {
       case SortMenuRow::Kind::ToggleCaseSensitive:
         active = app.sort_case_sensitive;
         break;
+      case SortMenuRow::Kind::GroupField:
+        active = app.cur_tab().group_field == row.field;
+        break;
       default:
         break;
+    }
+
+    if (row.kind == SortMenuRow::Kind::GroupCaption) {
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                             app.text_secondary_b, 0.8);
+      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                              CAIRO_FONT_WEIGHT_BOLD);
+      cairo_set_font_size(cr, 11);
+      cairo_move_to(cr, dm_sort_menu_x + 14, row_y + kItemH / 2 + 4);
+      cairo_show_text(cr, row.label);
+      cairo_set_font_size(cr, 13);
+      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                              CAIRO_FONT_WEIGHT_NORMAL);
+      continue;
     }
 
     if (hovered) {
@@ -2243,7 +2283,97 @@ void draw_sort_menu(AppState& app, cairo_t* cr) {
   }
 }
 
+// ── column chooser popup ─────────────────────────────────────────
+
+void draw_columns_menu(AppState& app, cairo_t* cr) {
+  auto& cm_x = app.active_pane ? app.r_columns_menu_x : app.columns_menu_x;
+  auto& cm_y = app.active_pane ? app.r_columns_menu_y : app.columns_menu_y;
+  auto& cm_w = app.active_pane ? app.r_columns_menu_w : app.columns_menu_w;
+  auto& cm_h = app.active_pane ? app.r_columns_menu_h : app.columns_menu_h;
+  auto& cm_hover = app.active_pane ? app.r_columns_menu_hover : app.columns_menu_hover;
+
+  struct ColRow { const char* label; bool* val; };
+  ColRow rows[] = {
+    {"Owner", &app.col_owner},
+    {"Group", &app.col_group},
+    {"Permissions", &app.col_perms},
+    {"Extension", &app.col_ext},
+    {"Link Target", &app.col_target},
+  };
+  constexpr int kRows = 5;
+  int menu_w = 170;
+  int menu_h = kRows * kSortMenuItemH + kSortMenuPad * 2;
+  cm_w = menu_w;
+  cm_h = menu_h;
+
+  for (int s = 3; s >= 0; --s) {
+    double a = 0.08 * (1.0 - s / 4.0);
+    cairo_set_source_rgba(cr, 0, 0, 0, a);
+    draw_rounded_rect(cr, cm_x + s * 2, cm_y + s * 2, menu_w, menu_h, 6);
+    cairo_fill(cr);
+  }
+  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, 1.0);
+  draw_rounded_rect(cr, cm_x, cm_y, menu_w, menu_h, 6);
+  cairo_fill(cr);
+  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
+  cairo_set_line_width(cr, 1);
+  draw_rounded_rect(cr, cm_x + 0.5, cm_y + 0.5, menu_w - 1, menu_h - 1, 5.5);
+  cairo_stroke(cr);
+
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                          CAIRO_FONT_WEIGHT_NORMAL);
+  cairo_set_font_size(cr, 13);
+
+  for (int i = 0; i < kRows; ++i) {
+    int row_y = cm_y + kSortMenuPad + i * kSortMenuItemH;
+    if (i == cm_hover) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
+      draw_rounded_rect(cr, cm_x + 4, row_y, menu_w - 8, kSortMenuItemH, 4);
+      cairo_fill(cr);
+    }
+    if (*rows[i].val) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 1.0);
+      cairo_move_to(cr, cm_x + 14, row_y + kSortMenuItemH / 2 + 4);
+      cairo_show_text(cr, "✓ ");
+    }
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_move_to(cr, cm_x + 14 + (*rows[i].val ? 14 : 0),
+                  row_y + kSortMenuItemH / 2 + 4);
+    cairo_show_text(cr, rows[i].label);
+  }
+}
+
 // ── list view ────────────────────────────────────────────────────
+
+// Shared Group By header band (list/grid/compact). pinned=true adds a
+// shadow so the sticky header reads as floating above content.
+static void draw_group_header_band(AppState& app, cairo_t* cr, int x, int y,
+                                    int w, int h, const std::string& label,
+                                    bool pinned = false) {
+  double zf = app.zoom_pct / 100.0;
+  if (pinned) {
+    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.18);
+    cairo_rectangle(cr, x, y + h, w, 3);
+    cairo_fill(cr);
+  }
+  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b,
+                        pinned ? 1.0 : 1.0);
+  cairo_rectangle(cr, x, y, w, h);
+  cairo_fill(cr);
+  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.06);
+  cairo_rectangle(cr, x, y, w, h);
+  cairo_fill(cr);
+  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.5);
+  cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL,
+                          CAIRO_FONT_WEIGHT_BOLD);
+  cairo_set_font_size(cr, 11.0 * zf);
+  cairo_move_to(cr, x + static_cast<int>(44.0 * zf), y + h - 6);
+  cairo_show_text(cr, label.c_str());
+  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.12);
+  cairo_move_to(cr, x, y + h - 1);
+  cairo_line_to(cr, x + w, y + h - 1);
+  cairo_stroke(cr);
+}
 
 static void draw_column_header(AppState& app, cairo_t* cr, int x, int y, int w, int h,
                                 const char* label,
@@ -2444,13 +2574,28 @@ void draw_list_view(AppState& app, cairo_t* cr, int content_x,
   int entry_h = app.entry_height;
   int text_x = content_x + static_cast<int>(40.0 * zf);
   int icon_size = static_cast<int>(24.0 * zf);
-  int name_w = static_cast<int>(content_w * app.col_name_frac);
+  auto col_w = [&](bool on, int base) {
+    return on ? static_cast<int>(base * zf) : 0;
+  };
+  int own_w  = col_w(app.col_owner, 90);
+  int grp_w  = col_w(app.col_group, 90);
+  int prm_w  = col_w(app.col_perms, 84);
+  int ext_w  = col_w(app.col_ext, 70);
+  int tgt_w  = col_w(app.col_target, 150);
+  int extra_total = own_w + grp_w + prm_w + ext_w + tgt_w;
+  int name_w = std::max(static_cast<int>(120 * zf),
+                        static_cast<int>(content_w * app.col_name_frac) - extra_total);
   int size_w = static_cast<int>(content_w * app.col_size_frac);
   int date_w = static_cast<int>(content_w * app.col_date_frac);
   int name_x = text_x;
   int size_x = name_x + name_w;
   int date_x = size_x + size_w;
-  int type_x = date_x + date_w;
+  int own_x  = date_x + date_w;
+  int grp_x  = own_x + own_w;
+  int prm_x  = grp_x + grp_w;
+  int ext_x  = prm_x + prm_w;
+  int tgt_x  = ext_x + ext_w;
+  int type_x = tgt_x + tgt_w;
   int type_w = content_w - (type_x - content_x);
 
   // ── Column header row ──
@@ -2467,11 +2612,25 @@ void draw_list_view(AppState& app, cairo_t* cr, int content_x,
     draw_column_header(app, cr, type_x, content_y, type_w, entry_h, "Type",
                         app.col_resizing == 3 || app.col_hover_divider);
   }
+  if (app.col_owner)
+    draw_column_header(app, cr, own_x, content_y, own_w, entry_h, "Owner", false);
+  if (app.col_group)
+    draw_column_header(app, cr, grp_x, content_y, grp_w, entry_h, "Group", false);
+  if (app.col_perms)
+    draw_column_header(app, cr, prm_x, content_y, prm_w, entry_h, "Perms", false);
+  if (app.col_ext)
+    draw_column_header(app, cr, ext_x, content_y, ext_w, entry_h, "Ext", false);
+  if (app.col_target)
+    draw_column_header(app, cr, tgt_x, content_y, tgt_w, entry_h, "Link Target", false);
 
   int y = content_y + entry_h - app.cur_tab().scroll_px;
 
-  int prev_type = -1;
+  std::string prev_group;
   int header_h = static_cast<int>(entry_h * 0.55);
+  std::unordered_map<std::string, int> header_ys;
+  bool sticky_recorded = false;
+  std::string first_vis_label;
+  int first_vis_header_y = INT_MIN;
 
   for (int vi = 0; vi < static_cast<int>(app.cur_tab().visible_entries.size()); ++vi) {
     int real_idx = app.cur_tab().visible_entries[vi];
@@ -2479,43 +2638,21 @@ void draw_list_view(AppState& app, cairo_t* cr, int content_x,
       continue;
     auto& entry = app.cur_tab().entries[real_idx];
 
-    if (app.cur_tab().group_by_type) {
-      int this_type = static_cast<int>(entry.type);
-      if (this_type != prev_type) {
-        prev_type = this_type;
-        if (y + header_h >= content_y) {
-          cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.06);
-          cairo_rectangle(cr, content_x, y, content_w, header_h);
-          cairo_fill(cr);
-          char const* label = "";
-          switch (entry.type) {
-            case FileType::Folder:     label = "Folders"; break;
-            case FileType::Image:      label = "Images"; break;
-            case FileType::Audio:      label = "Audio"; break;
-            case FileType::Video:      label = "Videos"; break;
-            case FileType::Text:       label = "Text"; break;
-            case FileType::Markdown:   label = "Markdown"; break;
-            case FileType::Code:       label = "Code Files"; break;
-            case FileType::Document:   label = "Documents"; break;
-            case FileType::Font:       label = "Fonts"; break;
-            case FileType::Archive:    label = "Archives"; break;
-            case FileType::Executable: label = "Executables"; break;
-            case FileType::Web:        label = "Web"; break;
-            case FileType::File:       label = "Other Files"; break;
-          }
-          cairo_save(cr);
-          cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.5);
-          cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-          cairo_set_font_size(cr, 11.0 * zf);
-          cairo_move_to(cr, text_x + 4, y + header_h - 6);
-          cairo_show_text(cr, label);
-          cairo_restore(cr);
-          cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.12);
-          cairo_move_to(cr, content_x, y + header_h - 1);
-          cairo_line_to(cr, content_x + content_w, y + header_h - 1);
-          cairo_stroke(cr);
-        }
+    std::string row_label;
+    if (app.cur_tab().group_field > 0) {
+      row_label = group_label_for(app, entry);
+      if (row_label != prev_group) {
+        prev_group = row_label;
+        header_ys[row_label] = y;
+        if (y + header_h >= content_y)
+          draw_group_header_band(app, cr, content_x, y, content_w, header_h, row_label);
         y += header_h;
+      }
+      if (!sticky_recorded && y + entry_h >= content_y) {
+        sticky_recorded = true;
+        first_vis_label = row_label;
+        auto it = header_ys.find(row_label);
+        first_vis_header_y = (it != header_ys.end()) ? it->second : INT_MIN;
       }
     }
 
@@ -2631,6 +2768,31 @@ void draw_list_view(AppState& app, cairo_t* cr, int content_x,
       cairo_show_text(cr, date_buf);
     }
 
+    // Optional stat-based columns
+    if (extra_total > 0) {
+      cairo_set_font_size(cr, 12.0 * zf);
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                             app.text_secondary_b, 1.0);
+      auto clip_show = [&](int cx0, int cw0, const std::string& s) {
+        if (cw0 <= 0 || s.empty()) return;
+        cairo_save(cr);
+        cairo_rectangle(cr, cx0, y, cw0 - 6, entry_h);
+        cairo_clip(cr);
+        cairo_move_to(cr, cx0, y + entry_h / 2 + 4);
+        cairo_show_text(cr, s.c_str());
+        cairo_restore(cr);
+      };
+      clip_show(own_x, own_w, entry.owner);
+      clip_show(grp_x, grp_w, entry.group);
+      clip_show(prm_x, prm_w,
+                entry.mode ? format_mode(entry.mode) : std::string());
+      clip_show(ext_x, ext_w, entry.extension);
+      clip_show(tgt_x, tgt_w,
+                entry.link_target.empty() && !entry.is_dir
+                    ? std::string()
+                    : entry.link_target);
+    }
+
     if (hidden) {
       cairo_pop_group_to_source(cr);
       cairo_paint_with_alpha(cr, 0.5);
@@ -2641,6 +2803,12 @@ void draw_list_view(AppState& app, cairo_t* cr, int content_x,
 
     y += entry_h;
   }
+
+  // Sticky group header pinned to the top of the viewport
+  if (app.cur_tab().group_field > 0 && sticky_recorded &&
+      first_vis_header_y != INT_MIN && first_vis_header_y < content_y)
+    draw_group_header_band(app, cr, content_x, content_y, content_w, header_h,
+                            first_vis_label, true);
 
   app.cur_tab().content_h = y - content_y + app.cur_tab().scroll_px - entry_h;
 }
@@ -2686,11 +2854,44 @@ void draw_grid_view(AppState& app, cairo_t* cr, int content_x,
                           CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 13.0 * zf);
 
+  int group_extra = 0;
+  std::string prev_group;
+  int gheader_h = static_cast<int>(22.0 * zf);
+  std::unordered_map<std::string, int> gheader_ys;
+  bool sticky_recorded = false;
+  std::string first_vis_label;
+  int first_vis_header_y = INT_MIN;
+
   for (int vi = 0; vi < static_cast<int>(app.cur_tab().visible_entries.size()); ++vi) {
     int col = vi % cols;
     int row = vi / cols;
+
+    // Group By: new band at each row where the group changes
+    if (app.cur_tab().group_field > 0 && col == 0) {
+      int gri = app.cur_tab().visible_entries[vi];
+      if (gri >= 0 && gri < static_cast<int>(app.cur_tab().entries.size())) {
+        std::string label = group_label_for(app, app.cur_tab().entries[gri]);
+        if (label != prev_group) {
+          prev_group = label;
+          int hy = y + row * row_h + group_extra;
+          gheader_ys[label] = hy;
+          if (hy + gheader_h >= content_y)
+            draw_group_header_band(app, cr, content_x, hy, content_w,
+                                    gheader_h, label);
+          group_extra += gheader_h;
+        }
+        if (!sticky_recorded &&
+            y + row * row_h + group_extra + item_h >= content_y) {
+          sticky_recorded = true;
+          first_vis_label = label;
+          auto it = gheader_ys.find(label);
+          first_vis_header_y = (it != gheader_ys.end()) ? it->second : INT_MIN;
+        }
+      }
+    }
+
     int cx = content_x + grid_offset_x + col * (cell_w + col_gap);
-    int cy = y + row * row_h;
+    int cy = y + row * row_h + group_extra;
 
     if (cy + item_h < content_y) continue;
     if (cy > content_y + view_h) break;
@@ -2821,7 +3022,13 @@ void draw_grid_view(AppState& app, cairo_t* cr, int content_x,
   }
 
   int rows = (static_cast<int>(app.cur_tab().visible_entries.size()) + cols - 1) / cols;
-  app.cur_tab().content_h = y + rows * row_h - content_y + app.cur_tab().scroll_px + row_gap;
+  app.cur_tab().content_h = y + rows * row_h + group_extra - content_y + app.cur_tab().scroll_px + row_gap;
+
+  // Sticky group header pinned to the top of the viewport
+  if (app.cur_tab().group_field > 0 && sticky_recorded &&
+      first_vis_header_y != INT_MIN && first_vis_header_y < content_y)
+    draw_group_header_band(app, cr, content_x, content_y, content_w,
+                            gheader_h, first_vis_label, true);
 }
 
 // ── status bar ───────────────────────────────────────────────────
@@ -2956,6 +3163,52 @@ void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
                             app.text_secondary_b, 1.0);
     cairo_move_to(cr, static_cast<double>(w) - pad - free_w, y + status_h / 2 + 4);
     cairo_show_text(cr, free_str.c_str());
+  }
+
+  // ── Zoom slider (levels 0..16) ──
+  {
+    int track_w = std::min(140, static_cast<int>(140.0 * zf));
+    int btn_sz = 18;
+    int cy = y + status_h / 2;
+    int track_x = w - pad - free_w - static_cast<int>(24.0 * zf) - btn_sz * 2 - 12 - track_w;
+    if (track_x > pad + 200 * zf) {
+      auto dim = [&](bool hov) {
+        cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                              app.text_secondary_b, hov ? 0.9 : 0.55);
+      };
+      // minus glyph
+      dim(false);
+      cairo_set_line_width(cr, 1.6);
+      cairo_move_to(cr, track_x - 14, cy + 0.5);
+      cairo_line_to(cr, track_x - 14 + btn_sz - 4, cy + 0.5);
+      cairo_stroke(cr);
+      // plus glyph
+      int px = track_x + track_w + 10;
+      cairo_move_to(cr, px, cy + 0.5);
+      cairo_line_to(cr, px + btn_sz - 4, cy + 0.5);
+      cairo_stroke(cr);
+      cairo_move_to(cr, px + (btn_sz - 4) / 2.0, cy - (btn_sz - 4) / 2.0 + 0.5);
+      cairo_line_to(cr, px + (btn_sz - 4) / 2.0, cy + (btn_sz - 4) / 2.0 + 0.5);
+      cairo_stroke(cr);
+      // track
+      cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.45);
+      cairo_rectangle(cr, track_x, cy - 2, track_w, 3);
+      cairo_fill(cr);
+      // handle at current level
+      double t = static_cast<double>(zoom_level_for_pct(app.settings_zoom_pct)) /
+                 (kZoomLevelCount - 1);
+      double hx = track_x + t * (track_w - 10);
+      bool hov = app.status_zoom_dragging;
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
+                            hov ? 1.0 : 0.9);
+      cairo_arc(cr, hx + 5, cy, 5, 0, 2 * M_PI);
+      cairo_fill(cr);
+      app.status_zoom_slider_x = track_x;
+      app.status_zoom_slider_w = track_w;
+    } else {
+      app.status_zoom_slider_x = 0;
+      app.status_zoom_slider_w = 0;
+    }
   }
 }
 
@@ -6754,11 +7007,37 @@ void draw_compact_view(AppState& app, cairo_t* cr, int content_x,
 
   int y = content_y - app.cur_tab().scroll_px;
 
+  std::string prev_group;
+  int cheader_h = static_cast<int>(20.0 * zf);
+  std::unordered_map<std::string, int> cheader_ys;
+  bool sticky_recorded = false;
+  std::string first_vis_label;
+  int first_vis_header_y = INT_MIN;
+
   for (int vi = 0; vi < static_cast<int>(app.cur_tab().visible_entries.size()); ++vi) {
     int real_idx = app.cur_tab().visible_entries[vi];
     if (real_idx < 0 || real_idx >= static_cast<int>(app.cur_tab().entries.size()))
       continue;
     auto& entry = app.cur_tab().entries[real_idx];
+
+    std::string row_label;
+    if (app.cur_tab().group_field > 0) {
+      row_label = group_label_for(app, entry);
+      if (row_label != prev_group) {
+        prev_group = row_label;
+        cheader_ys[row_label] = y;
+        if (y + cheader_h >= content_y)
+          draw_group_header_band(app, cr, content_x, y, content_w, cheader_h,
+                                  row_label);
+        y += cheader_h;
+      }
+      if (!sticky_recorded && y + entry_h >= content_y) {
+        sticky_recorded = true;
+        first_vis_label = row_label;
+        auto it = cheader_ys.find(row_label);
+        first_vis_header_y = (it != cheader_ys.end()) ? it->second : INT_MIN;
+      }
+    }
 
     if (y + entry_h < content_y) { y += entry_h; continue; }
     if (y > content_y + view_h) break;
@@ -6808,6 +7087,12 @@ void draw_compact_view(AppState& app, cairo_t* cr, int content_x,
 
     y += entry_h;
   }
+
+  // Sticky group header pinned to the top of the viewport
+  if (app.cur_tab().group_field > 0 && sticky_recorded &&
+      first_vis_header_y != INT_MIN && first_vis_header_y < content_y)
+    draw_group_header_band(app, cr, content_x, content_y, content_w,
+                            cheader_h, first_vis_label, true);
 
   app.cur_tab().content_h = y - content_y + app.cur_tab().scroll_px;
 }

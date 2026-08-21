@@ -421,6 +421,12 @@ void paint(AppState& app, cairo_t* cr) {
     draw_sort_menu(app, cr);
   }
 
+  // Column chooser
+  if (app.r_columns_menu_open || app.columns_menu_open) {
+    app.active_pane = app.r_columns_menu_open ? 1 : 0;
+    draw_columns_menu(app, cr);
+  }
+
   // Filter dropdown
   if (app.r_filter_dropdown_section > 0 || app.filter_dropdown_section > 0) {
     app.active_pane = app.r_filter_dropdown_section > 0 ? 1 : 0;

@@ -85,6 +85,7 @@ struct FileEntry {
   bool in_hidden_file = false;   // listed in the directory's .hidden file
   bool readable = true;
   bool writable = true;
+  bool owned_by_root = false;    // st_uid == 0
   std::string owner;
   std::string group;
   uint32_t mode = 0;             // st_mode
@@ -175,6 +176,8 @@ struct Tab {
   SortField sort_field = SortField::Name;
   bool sort_descending = false;
   bool group_by_type = false;
+  // Group By field: 0=None 1=Type 2=Name 3=Date 4=Size
+  int group_field = 0;
 
   // Scroll
   int scroll_px = 0;
@@ -337,6 +340,15 @@ struct AppState {
   bool search_banner_clear_hover = false;
   bool filter_bar_open_by_default = false; // persisted preference
   bool filter_bar_default_applied = false; // one-shot startup activation
+  // Status-bar zoom slider (levels 0..16)
+  int status_zoom_slider_x = 0, status_zoom_slider_w = 0;
+  bool status_zoom_dragging = false;
+  // Rich tooltip (metadata card, anti-churn timer)
+  std::string tooltip_path;
+  long long tooltip_show_ms = 0;   // steady-clock deadline
+  bool tooltip_active = false;
+  // Media-folder auto-icon cache: dir path -> first image child ("" = none)
+  std::unordered_map<std::string, std::string> media_folder_child;
   int search_bar_x = 0, search_bar_w = 0;
   int r_search_bar_x = 0, r_search_bar_w = 0;
   // Filter-bar control rects (mode segment / case / lock)
@@ -868,6 +880,19 @@ struct AppState {
   bool col_show_size = true;
   bool col_show_date = true;
   bool col_show_type = false;  // hidden by default
+  // Optional stat-based columns (visible roles)
+  bool col_owner = false;
+  bool col_group = false;
+  bool col_perms = false;
+  bool col_ext = false;
+  bool col_target = false;
+  // Column chooser popup (right-click list header)
+  bool columns_menu_open = false, r_columns_menu_open = false;
+  int columns_menu_x = 0, columns_menu_y = 0, columns_menu_w = 0,
+      columns_menu_h = 0;
+  int r_columns_menu_x = 0, r_columns_menu_y = 0, r_columns_menu_w = 0,
+      r_columns_menu_h = 0;
+  int columns_menu_hover = -1, r_columns_menu_hover = -1;
   bool view_mode_btn_hover = false;
   bool r_view_mode_btn_hover = false;
   bool settings_btn_hover = false;

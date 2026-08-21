@@ -6,6 +6,7 @@
 #include "../features/recursive_search_worker.hpp"
 #include "../features/selection.hpp"
 #include "../features/tab_history.hpp"
+#include "../features/view_zoom.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -329,6 +330,52 @@ void handle_click(AppState& app, int x, int y, int button) {
       return;
     }
     app.active_pane = (x >= div_x + div_w) ? 1 : 0;
+  }
+
+  // ── Click outside the nav/path field cancels path editing ──
+  if ((app.active_pane ? app.r_path_editing : app.path_editing) && button == 0x110) {
+    double zf = app.zoom_pct / 100.0;
+    int bar_y = y;
+    if (app.split_view) {
+      int content_y = app.top_bar_height + app.tab_bar_height;
+      if (y >= content_y && y < content_y + app.top_bar_height)
+        bar_y = y - content_y;
+    }
+    int s_w = app.sidebar_expanded ? app.sidebar_width : 0;
+    int arrow_w = static_cast<int>(36.0 * zf);
+    int gap4 = static_cast<int>(4.0 * zf);
+    int mx6 = static_cast<int>(24.0 * zf);
+    int path_pad = static_cast<int>(12.0 * zf);
+    int house_w = static_cast<int>(16.0 * zf);
+    int gap12 = static_cast<int>(12.0 * zf);
+    int nav_origin = s_w + static_cast<int>(20.0 * zf);
+    int path_x = nav_origin + 2 * arrow_w + gap4 + mx6 + path_pad + house_w + gap12;
+    auto& in_search_btn_x = app.active_pane ? app.r_search_btn_x : app.search_btn_x;
+    int path_w = in_search_btn_x - static_cast<int>(4.0 * zf) - path_x;
+    bool in_nav_field =
+        bar_y >= 0 && bar_y < app.top_bar_height && x >= path_x && x < path_x + path_w;
+    if (!in_nav_field) {
+      (app.active_pane ? app.r_path_editing : app.path_editing) = false;
+      (app.active_pane ? app.r_path_edit_dragging : app.path_edit_dragging) = false;
+      (app.active_pane ? app.r_path_edit_sel_start : app.path_edit_sel_start) = -1;
+      (app.active_pane ? app.r_path_edit_sel_end : app.path_edit_sel_end) = -1;
+      draw(app);
+    }
+  }
+
+  // ── Status-bar zoom slider ──
+  if (app.status_zoom_slider_w > 0 &&
+      y >= app.height - app.status_bar_height) {
+    if (button == 0x110 && x >= app.status_zoom_slider_x &&
+        x < app.status_zoom_slider_x + app.status_zoom_slider_w) {
+      double t = static_cast<double>(x - app.status_zoom_slider_x) /
+                 std::max(1, app.status_zoom_slider_w);
+      apply_zoom_pct(app, zoom_pct_for_level(
+                              static_cast<int>(std::lround(t * (kZoomLevelCount - 1)))));
+      app.status_zoom_dragging = true;
+      draw(app);
+    }
+    return;
   }
 
   // ── Picker bar buttons (dir or file) ──
@@ -1377,6 +1424,38 @@ void handle_click(AppState& app, int x, int y, int button) {
                   static_cast<uint64_t>(ts.tv_nsec);
 
     // ── Sort menu item click (handle before top bar, so menu stays on top) ──
+    // ── Column chooser popup clicks ──
+    if ((app.active_pane ? app.r_columns_menu_open : app.columns_menu_open)) {
+      auto& cmo = app.active_pane ? app.r_columns_menu_open : app.columns_menu_open;
+      auto& cmx = app.active_pane ? app.r_columns_menu_x : app.columns_menu_x;
+      auto& cmy = app.active_pane ? app.r_columns_menu_y : app.columns_menu_y;
+      auto& cmw = app.active_pane ? app.r_columns_menu_w : app.columns_menu_w;
+      auto& cmh = app.active_pane ? app.r_columns_menu_h : app.columns_menu_h;
+      if (x >= cmx && x < cmx + cmw && y >= cmy && y < cmy + cmh) {
+        int rel_y = y - cmy - kSortMenuPad;
+        int idx = rel_y / kSortMenuItemH;
+        bool changed = false;
+        switch (idx) {
+          case 0: app.col_owner = !app.col_owner; changed = true; break;
+          case 1: app.col_group = !app.col_group; changed = true; break;
+          case 2: app.col_perms = !app.col_perms; changed = true; break;
+          case 3: app.col_ext = !app.col_ext; changed = true; break;
+          case 4: app.col_target = !app.col_target; changed = true; break;
+          default: break;
+        }
+        if (changed) {
+          cmo = false;
+          save_file_browser_settings(app);
+          draw(app);
+        }
+        return;
+      } else {
+        cmo = false;
+        draw(app);
+        return;
+      }
+    }
+
     if ((app.active_pane ? app.r_sort_menu_open : app.sort_menu_open)) {
       if (x >= (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) && x < (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) + (app.active_pane ? app.r_sort_menu_w : app.sort_menu_w) &&
           y >= (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) && y < (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) + (app.active_pane ? app.r_sort_menu_h : app.sort_menu_h)) {
@@ -1408,6 +1487,11 @@ void handle_click(AppState& app, int x, int y, int button) {
               break;
             case SortMenuRow::Kind::ToggleCaseSensitive:
               app.sort_case_sensitive = !app.sort_case_sensitive;
+              changed = true;
+              break;
+            case SortMenuRow::Kind::GroupField:
+              app.cur_tab().group_field = row.field;
+              app.cur_tab().group_by_type = (row.field == 1);
               changed = true;
               break;
             default:
@@ -2061,6 +2145,20 @@ void handle_click(AppState& app, int x, int y, int button) {
     // ── Column header click (list view) ──
     if (app.cur_tab().view_mode == ViewMode::List && y >= app.top_bar_height + app.tab_bar_height &&
         y < app.top_bar_height + app.tab_bar_height + app.entry_height) {
+      // Right-click → column chooser
+      if (button == 0x111) {
+        auto& cmo = app.active_pane ? app.r_columns_menu_open : app.columns_menu_open;
+        auto& cmx = app.active_pane ? app.r_columns_menu_x : app.columns_menu_x;
+        auto& cmy = app.active_pane ? app.r_columns_menu_y : app.columns_menu_y;
+        app.r_sort_menu_open = false;
+        app.sort_menu_open = false;
+        cmo = true;
+        cmx = x;
+        cmy = y;
+        (app.active_pane ? app.r_columns_menu_hover : app.columns_menu_hover) = -1;
+        draw(app);
+        return;
+      }
       int s_w = app.sidebar_expanded ? app.sidebar_width : 0;
       double zf = app.zoom_pct / 100.0;
       int text_x = s_w + static_cast<int>(28.0 * zf);
@@ -2449,6 +2547,18 @@ void handle_click(AppState& app, int x, int y, int button) {
 void handle_pointer_move(AppState& app, int x, int y) {
   app.pointerX = static_cast<double>(x);
   app.pointerY = static_cast<double>(y);
+
+  // ── Status-bar zoom slider drag ──
+  if (app.status_zoom_dragging && app.status_zoom_slider_w > 0) {
+    double t = std::clamp(
+        static_cast<double>(x - app.status_zoom_slider_x) /
+            std::max(1, app.status_zoom_slider_w),
+        0.0, 1.0);
+    apply_zoom_pct(app, zoom_pct_for_level(
+                            static_cast<int>(std::lround(t * (kZoomLevelCount - 1)))));
+    draw(app);
+    return;
+  }
 
   // ── Split pane divider drag ──
   if (app.split_view) {
@@ -3019,10 +3129,33 @@ void handle_pointer_move(AppState& app, int x, int y) {
         y >= (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) && y < (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) + (app.active_pane ? app.r_sort_menu_h : app.sort_menu_h)) {
       int rel_y = y - (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) - 6;
       int idx = rel_y / 30;
-      if (idx >= 0 && idx <= 3) new_hover = idx;
+      if (idx >= 0 && idx < sort_menu_row_count() &&
+          sort_menu_row(idx).kind != SortMenuRow::Kind::Separator &&
+          sort_menu_row(idx).kind != SortMenuRow::Kind::GroupCaption)
+        new_hover = idx;
     }
     if (new_hover != (app.active_pane ? app.r_sort_menu_hover : app.sort_menu_hover)) {
       (app.active_pane ? app.r_sort_menu_hover : app.sort_menu_hover) = new_hover;
+      draw(app);
+      return;
+    }
+  }
+
+  // ── Column chooser item hover ──
+  if ((app.active_pane ? app.r_columns_menu_open : app.columns_menu_open)) {
+    auto& cmx = app.active_pane ? app.r_columns_menu_x : app.columns_menu_x;
+    auto& cmy = app.active_pane ? app.r_columns_menu_y : app.columns_menu_y;
+    auto& cmw = app.active_pane ? app.r_columns_menu_w : app.columns_menu_w;
+    auto& cmh = app.active_pane ? app.r_columns_menu_h : app.columns_menu_h;
+    auto& cmh_hover = app.active_pane ? app.r_columns_menu_hover : app.columns_menu_hover;
+    int new_hover = -1;
+    if (x >= cmx && x < cmx + cmw && y >= cmy && y < cmy + cmh) {
+      int rel_y = y - cmy - kSortMenuPad;
+      int idx = rel_y / kSortMenuItemH;
+      if (idx >= 0 && idx <= 4) new_hover = idx;
+    }
+    if (new_hover != cmh_hover) {
+      cmh_hover = new_hover;
       draw(app);
       return;
     }
@@ -4358,7 +4491,12 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   }
 
   // ── Search bar keyboard handler (local + recursive) ──
-  if ((app.active_pane ? app.r_search_active : app.search_active) || (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active)) {
+  // Ctrl+H falls through so the global show-hidden toggle keeps working
+  const bool show_hidden_passthrough =
+      ctrl && !shift && !alt && (sym == XKB_KEY_H || sym == XKB_KEY_h);
+  if (!show_hidden_passthrough &&
+      ((app.active_pane ? app.r_search_active : app.search_active) ||
+       (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active))) {
     auto& k_search_active = app.active_pane ? app.r_search_active : app.search_active;
     auto& k_recursive_search_active = app.active_pane ? app.r_recursive_search_active : app.recursive_search_active;
     auto& k_search_query = app.active_pane ? app.r_search_query : app.search_query;
@@ -4559,7 +4697,9 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   }
 
   // ── Path editing keyboard handler ──
-  if (app.active_pane ? app.r_path_editing : app.path_editing) {
+  // Ctrl+H falls through so the global show-hidden toggle keeps working
+  if (!show_hidden_passthrough &&
+      (app.active_pane ? app.r_path_editing : app.path_editing)) {
     auto& pe_editing = app.active_pane ? app.r_path_editing : app.path_editing;
     auto& pe_buf = app.active_pane ? app.r_path_edit_buf : app.path_edit_buf;
     auto& pe_cursor = app.active_pane ? app.r_path_edit_cursor : app.path_edit_cursor;
@@ -4989,36 +5129,29 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   }
 
   if (ctrl && (sym == XKB_KEY_G || sym == XKB_KEY_g)) {
-    app.cur_tab().group_by_type = !app.cur_tab().group_by_type;
+    app.cur_tab().group_field =
+        (app.cur_tab().group_field == 1) ? 0 : 1;
+    app.cur_tab().group_by_type = (app.cur_tab().group_field == 1);
     reload_dir(app);
     save_file_browser_settings(app);
     draw(app);
     return true;
   }
 
-  auto zoom_fn = [&](double pct) {
-    app.settings_zoom_pct = std::clamp(pct, 50.0, 200.0);
-    app.zoom_pct = app.settings_zoom_pct;
-    app.entry_height = std::max(20, static_cast<int>(36.0 * app.zoom_pct / 100.0));
-    int icon_sz = static_cast<int>(48.0 * app.zoom_pct / 100.0);
-    app.grid_cell_size = std::max(40, icon_sz + static_cast<int>(8.0 * app.zoom_pct / 100.0));
-    app.sidebar_width = std::max(120, static_cast<int>(app.sidebar_width_base * app.zoom_pct / 100.0));
-  };
-
   if (ctrl && (sym == XKB_KEY_equal || sym == XKB_KEY_KP_Add)) {
-    zoom_fn(app.settings_zoom_pct + 10.0);
+    step_zoom(app, +1);
     draw(app);
     return true;
   }
 
   if (ctrl && (sym == XKB_KEY_minus || sym == XKB_KEY_KP_Subtract)) {
-    zoom_fn(app.settings_zoom_pct - 10.0);
+    step_zoom(app, -1);
     draw(app);
     return true;
   }
 
   if (ctrl && (sym == XKB_KEY_0 || sym == XKB_KEY_KP_0)) {
-    zoom_fn(100.0);
+    apply_zoom_pct(app, 100.0);
     draw(app);
     return true;
   }
@@ -5482,6 +5615,12 @@ void handle_pointer_release(AppState& app, int x, int y, int button) {
   (void)button;
   if (app.split_divider_dragging) {
     app.split_divider_dragging = false;
+    return;
+  }
+  if (app.status_zoom_dragging) {
+    app.status_zoom_dragging = false;
+    save_file_browser_settings(app);
+    draw(app);
     return;
   }
   if (app.col_resizing >= 0) {

@@ -221,6 +221,12 @@ FileBrowserSettings read_file_browser_toml() {
     fbs.filter_bar_open = tbl["filter_bar_open"].value_or(false);
     fbs.window_controls_left = tbl["window_controls_left"].value_or(false);
     fbs.group_by_type = tbl["group_by_type"].value_or(false);
+    fbs.group_field = static_cast<int>(tbl["group_field"].value_or(-1));
+    fbs.col_owner = tbl["col_owner"].value_or(false);
+    fbs.col_group = tbl["col_group"].value_or(false);
+    fbs.col_perms = tbl["col_perms"].value_or(false);
+    fbs.col_ext = tbl["col_ext"].value_or(false);
+    fbs.col_target = tbl["col_target"].value_or(false);
 
     if (auto* fav = tbl["favorites"].as_array()) {
       for (auto& el : *fav) {
@@ -256,6 +262,12 @@ bool write_file_browser_toml(const FileBrowserSettings& fbs) {
     tbl.emplace("filter_bar_open", fbs.filter_bar_open);
     tbl.emplace("window_controls_left", fbs.window_controls_left);
     tbl.emplace("group_by_type", fbs.group_by_type);
+    tbl.emplace("group_field", fbs.group_field);
+    tbl.emplace("col_owner", fbs.col_owner);
+    tbl.emplace("col_group", fbs.col_group);
+    tbl.emplace("col_perms", fbs.col_perms);
+    tbl.emplace("col_ext", fbs.col_ext);
+    tbl.emplace("col_target", fbs.col_target);
 
     toml::array favs;
     for (const auto& f : fbs.favorites) favs.push_back(f);

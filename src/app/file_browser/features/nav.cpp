@@ -901,6 +901,7 @@ void reload_dir(AppState& app) {
                    geteuid() == 0;
       e.owner = user_name(st.st_uid);
       e.group = group_name(st.st_gid);
+      e.owned_by_root = (st.st_uid == 0);
     }
 
     // Symlink target (for LinkTarget sorting / emblems)
@@ -964,6 +965,36 @@ void reload_dir(AppState& app) {
   }
   closedir(dir);
 
+  // ── Group By: rank + label helpers (field: 0=None 1=Type 2=Name 3=Date 4=Size) ──
+  auto group_rank = [&](const FileEntry& e) -> int {
+    switch (app.cur_tab().group_field) {
+      case 1: return static_cast<int>(e.type);
+      case 2: {
+        if (e.name.empty()) return 0;
+        unsigned char c0 = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(e.name[0])));
+        return (c0 >= 'a' && c0 <= 'z') ? c0 : ('z' + 1);
+      }
+      case 3: {
+        std::time_t now = std::time(nullptr);
+        double age_s = difftime(now, e.modified_sec);
+        if (age_s < 0) age_s = 0;
+        if (age_s < 86400) return 0;                     // Today
+        if (age_s < 172800) return 1;                    // Yesterday
+        if (age_s < 7 * 86400) return 2;                 // This Week
+        if (age_s < 30 * 86400) return 3;                // This Month
+        if (age_s < 365 * 86400) return 4;               // This Year
+        return 5;                                        // Earlier
+      }
+      case 4:
+        if (e.is_dir) return 0;                          // Folders
+        if (e.size < 100ull * 1024) return 1;            // Small
+        if (e.size < 10ull * 1024 * 1024) return 2;      // Medium
+        if (e.size < 1024ull * 1024 * 1024) return 3;    // Large
+        return 4;                                        // Huge
+      default: return 0;
+    }
+  };
+
   std::sort(app.cur_tab().entries.begin(), app.cur_tab().entries.end(),
     [&](const FileEntry& a, const FileEntry& b) {
       if (app.folders_before_files && a.is_dir != b.is_dir) return a.is_dir;
@@ -971,11 +1002,11 @@ void reload_dir(AppState& app) {
       // Hidden entries optionally sort after everything else
       if (app.sort_hidden_last && a.is_hidden != b.is_hidden) return !a.is_hidden;
 
-      // Group by type: primary sort key when enabled
-      if (app.cur_tab().group_by_type) {
-        int ta = static_cast<int>(a.type);
-        int tb = static_cast<int>(b.type);
-        if (ta != tb) return ta < tb;
+      // Group By: primary sort key when enabled
+      if (app.cur_tab().group_field > 0) {
+        int ga = group_rank(a);
+        int gb = group_rank(b);
+        if (ga != gb) return ga < gb;
       }
 
       auto name_cmp = [&](const std::string& x, const std::string& y) -> int {
@@ -1078,6 +1109,68 @@ void reload_dir(AppState& app) {
   // Rebuild tree entries if in tree mode
   if (app.cur_tab().view_mode == ViewMode::Tree)
     build_tree_entries(app);
+}
+
+std::string format_mode(uint32_t mode) {
+  std::string s = "---------";
+  if (mode & 0400) s[0] = 'r';
+  if (mode & 0200) s[1] = 'w';
+  if (mode & 0100) s[2] = 'x';
+  if (mode & 0040) s[3] = 'r';
+  if (mode & 0020) s[4] = 'w';
+  if (mode & 0010) s[5] = 'x';
+  if (mode & 0004) s[6] = 'r';
+  if (mode & 0002) s[7] = 'w';
+  if (mode & 0001) s[8] = 'x';
+  return s;
+}
+
+std::string group_label_for(const AppState& app, const FileEntry& e) {
+  switch (app.cur_tab().group_field) {
+    case 1:
+      switch (e.type) {
+        case FileType::Folder:     return "Folders";
+        case FileType::Image:      return "Images";
+        case FileType::Audio:      return "Audio";
+        case FileType::Video:      return "Videos";
+        case FileType::Text:       return "Text";
+        case FileType::Markdown:   return "Markdown";
+        case FileType::Code:       return "Code Files";
+        case FileType::Document:   return "Documents";
+        case FileType::Font:       return "Fonts";
+        case FileType::Archive:    return "Archives";
+        case FileType::Executable: return "Executables";
+        case FileType::Web:        return "Web";
+        default:                   return "Other Files";
+      }
+    case 2: {
+      if (e.name.empty()) return "#";
+      unsigned char c0 = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(e.name[0])));
+      if (c0 >= 'a' && c0 <= 'z') {
+        std::string s(1, static_cast<char>(std::toupper(c0)));
+        return s;
+      }
+      return "#";
+    }
+    case 3: {
+      std::time_t now = std::time(nullptr);
+      double age_s = difftime(now, e.modified_sec);
+      if (age_s < 0) age_s = 0;
+      if (age_s < 86400) return "Today";
+      if (age_s < 172800) return "Yesterday";
+      if (age_s < 7 * 86400) return "This Week";
+      if (age_s < 30 * 86400) return "This Month";
+      if (age_s < 365 * 86400) return "This Year";
+      return "Earlier";
+    }
+    case 4:
+      if (e.is_dir) return "Folders";
+      if (e.size < 100ull * 1024) return "Small (<100 KB)";
+      if (e.size < 10ull * 1024 * 1024) return "Medium (<10 MB)";
+      if (e.size < 1024ull * 1024 * 1024) return "Large (<1 GB)";
+      return "Huge (≥1 GB)";
+    default: return "";
+  }
 }
 
 void clear_thumb_cache(AppState& app) {

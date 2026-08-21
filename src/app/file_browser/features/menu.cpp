@@ -848,6 +848,7 @@ void execute_context_menu_action(AppState& app, int item_idx) {
         dup.sort_field = src_sort;
         dup.sort_descending = src_desc;
         dup.group_by_type = app.tabs[app.context_menu_tab_idx].group_by_type;
+        dup.group_field = app.tabs[app.context_menu_tab_idx].group_field;
         app.active_tab = idx;
         navigate_to(app, dup.current_path);
       }
@@ -1786,6 +1787,12 @@ void save_file_browser_settings(AppState& app) {
   fbs.sort_field = static_cast<int>(app.cur_tab().sort_field);
   fbs.sort_descending = app.cur_tab().sort_descending;
   fbs.group_by_type = app.cur_tab().group_by_type;
+  fbs.group_field = app.cur_tab().group_field;
+  fbs.col_owner = app.col_owner;
+  fbs.col_group = app.col_group;
+  fbs.col_perms = app.col_perms;
+  fbs.col_ext = app.col_ext;
+  fbs.col_target = app.col_target;
   fbs.show_hidden = app.show_hidden;
   fbs.favorites = app.favorites;
   fbs.window_controls_left = app.window_controls_left;
@@ -1813,6 +1820,12 @@ void settings_apply(AppState& app) {
   fbs.sort_field = static_cast<int>(app.cur_tab().sort_field);
   fbs.sort_descending = app.cur_tab().sort_descending;
   fbs.group_by_type = app.cur_tab().group_by_type;
+  fbs.group_field = app.cur_tab().group_field;
+  fbs.col_owner = app.col_owner;
+  fbs.col_group = app.col_group;
+  fbs.col_perms = app.col_perms;
+  fbs.col_ext = app.col_ext;
+  fbs.col_target = app.col_target;
   fbs.show_hidden = app.show_hidden;
   fbs.favorites = app.favorites;
   (void)eh::config::write_file_browser_toml(fbs);
@@ -1915,6 +1928,15 @@ void reload_settings_from_config(AppState& app) {
       fbs.sort_field, 0, static_cast<int>(SortField::LinkTarget)));
   app.cur_tab().sort_descending = fbs.sort_descending;
   app.cur_tab().group_by_type = fbs.group_by_type;
+  app.cur_tab().group_field =
+      (fbs.group_field >= 0 && fbs.group_field <= 4)
+          ? fbs.group_field
+          : (fbs.group_by_type ? 1 : 0);
+  app.col_owner = fbs.col_owner;
+  app.col_group = fbs.col_group;
+  app.col_perms = fbs.col_perms;
+  app.col_ext = fbs.col_ext;
+  app.col_target = fbs.col_target;
   app.show_hidden = fbs.show_hidden;
   app.sort_natural = fbs.sort_natural;
   app.sort_case_sensitive = fbs.sort_case_sensitive;

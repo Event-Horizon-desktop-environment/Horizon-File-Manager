@@ -293,6 +293,12 @@ struct FileBrowserSettings {
   bool show_hidden = false;
   bool filter_bar_open = false;  // open the filter bar on startup
   bool group_by_type = false;
+  int group_field = -1;          // 0=None 1=Type 2=Name 3=Date 4=Size (-1 = derive from group_by_type)
+  bool col_owner = false;        // list-view optional columns
+  bool col_group = false;
+  bool col_perms = false;
+  bool col_ext = false;
+  bool col_target = false;
 
   // ── Sidebar favorites (bookmarked folders) ──
   std::vector<std::string> favorites;

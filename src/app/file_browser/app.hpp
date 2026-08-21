@@ -49,6 +49,8 @@ void navigate_forward(AppState& app);
 
 /// Reload the current directory listing.
 void reload_dir(AppState& app);
+std::string group_label_for(const AppState& app, const FileEntry& e);
+std::string format_mode(uint32_t mode);
 
 // Names listed in a directory's `.hidden` file (freedesktop convention).
 std::unordered_set<std::string> read_hidden_file(const std::string& dir);
@@ -71,11 +73,13 @@ struct SortMenuRow {
     ToggleHiddenLast,
     ToggleNatural,
     ToggleCaseSensitive,
+    GroupCaption,        // "Group By" section caption
+    GroupField,          // group_by selector (field = 0..4)
     Separator,
   };
   Kind kind = Kind::Separator;
   const char* label = "";
-  int field = 0; // valid when kind == Field
+  int field = 0; // valid when kind == Field or GroupField
 };
 
 int sort_menu_row_count();
@@ -209,6 +213,7 @@ void resolve_conflict_choice(AppState& app, int choice);  // 0=Overwrite/Merge, 
 void settings_apply(AppState& app);
 void draw_settings_dialog(AppState& app, cairo_t* cr);
 void draw_sort_menu(AppState& app, cairo_t* cr);
+void draw_columns_menu(AppState& app, cairo_t* cr);
 void draw_search_banner(AppState& app, cairo_t* cr, int x, int y, int w);
 void draw_filter_dropdown(AppState& app, cairo_t* cr, int section);
 void draw_hover_preview(AppState& app, cairo_t* cr);
