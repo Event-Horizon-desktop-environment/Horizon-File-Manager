@@ -404,6 +404,17 @@ struct AppState {
     CloseAllTabs,
     DuplicateTab,
     RunProgram,
+    InvertSelection,
+    SelectPattern,
+    CompareFiles,
+    PasteInto,
+    CopyToHome,
+    CopyToDesktop,
+    CopyToOtherPane,
+    MoveToHome,
+    MoveToDesktop,
+    MoveToOtherPane,
+    ReopenClosedTab,
     Separator,
   };
   struct ContextMenuItem {
@@ -447,6 +458,19 @@ struct AppState {
   int create_cursor_pos = 0;
   int create_sel_start = -1;
   int create_sel_end = -1;
+
+  // ── Select-by-pattern dialog ──
+  bool select_pattern_open = false;
+  std::string select_pattern_buf;
+  int select_pattern_cursor = 0;
+  int select_pattern_hover_btn = -1; // 1 = cancel, 2 = select
+
+  // ── Recently closed tabs (newest first) ──
+  struct ClosedTab {
+    std::string path;
+    ViewMode view_mode = ViewMode::List;
+  };
+  std::vector<ClosedTab> closed_tabs;
   bool create_dragging = false;
 
   // ── Rename UI dialog ──

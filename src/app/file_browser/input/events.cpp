@@ -3,6 +3,8 @@
 #include "../features/drag.hpp"
 #include "../features/progress.hpp"
 #include "../features/recursive_search_worker.hpp"
+#include "../features/selection.hpp"
+#include "../features/tab_history.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -731,6 +733,14 @@ void handle_click(AppState& app, int x, int y, int button) {
       }
     }
     return;
+  }
+
+  // ── Select-by-pattern dialog clicks ──
+  if (app.select_pattern_open) {
+    if (handle_select_pattern_click(app, button, x, y)) {
+      draw(app);
+      return;
+    }
   }
 
   // ── Create dialog clicks ──
@@ -1551,6 +1561,8 @@ void handle_click(AppState& app, int x, int y, int button) {
           AppState::menu_item(AppState::ContextMenuAction::Separator, ""),
           AppState::menu_item(AppState::ContextMenuAction::Paste, "Paste"),
           AppState::menu_item(AppState::ContextMenuAction::SelectAll, "Select All"),
+          AppState::menu_item(AppState::ContextMenuAction::InvertSelection, "Invert Selection"),
+          AppState::menu_item(AppState::ContextMenuAction::SelectPattern, "Select by Pattern\u2026"),
           AppState::menu_item(AppState::ContextMenuAction::Separator, ""),
           AppState::menu_item(AppState::ContextMenuAction::OpenInTerminal, "Open in Terminal"),
           AppState::menu_item(AppState::ContextMenuAction::Separator, ""),
@@ -2209,14 +2221,22 @@ void handle_click(AppState& app, int x, int y, int button) {
           app.context_menu_hover = -1; app.context_menu_hover_prev = -1; app.context_menu_sub_hover = -1;
           app.context_menu_file_idx = -4;
           app.context_menu_tab_idx = static_cast<int>(i);
-          app.context_menu_items = {
-            AppState::menu_item(AppState::ContextMenuAction::CloseTab, "Close Tab"),
-            AppState::menu_item(AppState::ContextMenuAction::CloseOtherTabs, "Close Other Tabs"),
-            AppState::menu_item(AppState::ContextMenuAction::CloseAllTabs, "Close All Tabs"),
-            AppState::menu_item(AppState::ContextMenuAction::DuplicateTab, "Duplicate Tab"),
-            AppState::menu_item(AppState::ContextMenuAction::Separator, ""),
-            AppState::menu_item(AppState::ContextMenuAction::OpenInNewWindow, "Open in new window"),
-          };
+          app.context_menu_items = {};
+          if (!app.closed_tabs.empty())
+            app.context_menu_items.push_back(
+              AppState::menu_item(AppState::ContextMenuAction::ReopenClosedTab, "Reopen Closed Tab"));
+          app.context_menu_items.push_back(
+            AppState::menu_item(AppState::ContextMenuAction::CloseTab, "Close Tab"));
+          app.context_menu_items.push_back(
+            AppState::menu_item(AppState::ContextMenuAction::CloseOtherTabs, "Close Other Tabs"));
+          app.context_menu_items.push_back(
+            AppState::menu_item(AppState::ContextMenuAction::CloseAllTabs, "Close All Tabs"));
+          app.context_menu_items.push_back(
+            AppState::menu_item(AppState::ContextMenuAction::DuplicateTab, "Duplicate Tab"));
+          app.context_menu_items.push_back(
+            AppState::menu_item(AppState::ContextMenuAction::Separator, ""));
+          app.context_menu_items.push_back(
+            AppState::menu_item(AppState::ContextMenuAction::OpenInNewWindow, "Open in new window"));
           draw(app);
           return;
         }
@@ -3482,6 +3502,14 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     }
   }
 
+  // ── Select-by-pattern dialog keys ──
+  if (app.select_pattern_open) {
+    if (handle_select_pattern_key(app, sym, utf8, utf8_len)) {
+      draw(app);
+      return true;
+    }
+  }
+
   // ── Compress dialog keys ──
   if (app.compress_dialog_open) {
     if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
@@ -4563,6 +4591,18 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     app.create_is_folder = true;
     app.create_buf = "New Folder";
     app.create_cursor_pos = static_cast<int>(app.create_buf.size());
+    draw(app);
+    return true;
+  }
+
+  if (ctrl && shift && (sym == XKB_KEY_T || sym == XKB_KEY_t)) {
+    reopen_last_closed_tab(app);
+    draw(app);
+    return true;
+  }
+
+  if (ctrl && shift && (sym == XKB_KEY_I || sym == XKB_KEY_i)) {
+    invert_selection(app);
     draw(app);
     return true;
   }

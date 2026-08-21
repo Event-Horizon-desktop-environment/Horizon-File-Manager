@@ -167,9 +167,10 @@ void save_file_browser_settings(AppState& app);
 void request_fs_operation(AppState& app, const std::vector<std::string>& srcs,
                           const std::string& dest_dir, bool is_move,
                           const std::string& success_toast, bool clear_cut = false);
-// Paste clipboard contents into the current directory: file URIs if present,
-// otherwise saves clipboard image data (screenshots) as a new image file.
-void paste_clipboard(AppState& app);
+// Paste clipboard contents into dest_dir (or the current directory when
+// empty): file URIs if present, otherwise saves clipboard image data
+// (screenshots) as a new image file.
+void paste_clipboard(AppState& app, const std::string& dest_dir = {});
 void resolve_conflict_choice(AppState& app, int choice);  // 0=Overwrite/Merge, 1=Skip, 2=Cancel
 void settings_apply(AppState& app);
 void draw_settings_dialog(AppState& app, cairo_t* cr);

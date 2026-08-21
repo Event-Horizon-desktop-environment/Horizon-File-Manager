@@ -1,4 +1,5 @@
 #include "app/file_browser/app.hpp"
+#include "app/file_browser/features/selection.hpp"
 
 #include <cairo/cairo.h>
 
@@ -397,6 +398,7 @@ void paint(AppState& app, cairo_t* cr) {
 
   // Dialogs
   if (app.create_dialog_open) draw_create_dialog(app, cr);
+  if (app.select_pattern_open) draw_select_pattern_dialog(app, cr);
   if (app.rename_ui_open) draw_rename_ui(app, cr);
   if (app.batch_rename_open) draw_batch_rename(app, cr);
   if (app.confirm_open) draw_confirm_dialog(app, cr);

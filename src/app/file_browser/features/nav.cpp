@@ -2,6 +2,7 @@
 
 #include "app/file_browser/features/desktop_icon_parser.hpp"
 #include "app/file_browser/features/recursive_search_worker.hpp"
+#include "app/file_browser/features/tab_history.hpp"
 #include "app/file_browser/features/video_worker.hpp"
 #include "app/file_browser/features/svg_preview.hpp"
 #include "app/file_browser/features/pdf_preview.hpp"
@@ -1900,6 +1901,7 @@ void new_tab(AppState& app) {
 void close_tab(AppState& app) {
   if (app.tabs.size() <= 1) return;
   int idx = app.active_tab;
+  remember_closed_tab(app, app.tabs[idx]);
   app.tabs.erase(app.tabs.begin() + idx);
   if (idx >= static_cast<int>(app.tabs.size()))
     app.active_tab = static_cast<int>(app.tabs.size()) - 1;

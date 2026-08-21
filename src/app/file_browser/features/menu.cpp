@@ -1,6 +1,9 @@
 #include "../app.hpp"
+#include "app/file_browser/features/compare.hpp"
 #include "app/file_browser/features/compress.hpp"
 #include "app/file_browser/features/progress.hpp"
+#include "app/file_browser/features/selection.hpp"
+#include "app/file_browser/features/tab_history.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -33,6 +36,19 @@ static std::uint64_t menu_expiry_3s() {
   return std::chrono::duration_cast<std::chrono::milliseconds>(
              (menu_clock::now() + std::chrono::milliseconds(3000)).time_since_epoch())
       .count();
+}
+
+// Paths of the current multi-selection (falls back to the single selection).
+static std::vector<std::string> selected_entry_paths(eh::file_browser::AppState& app) {
+  std::vector<std::string> paths;
+  auto& tab = app.cur_tab();
+  for (int vis_idx : tab.multi_selected) {
+    if (vis_idx < 0 || vis_idx >= static_cast<int>(tab.visible_entries.size())) continue;
+    int r = tab.visible_entries[vis_idx];
+    if (r >= 0 && r < static_cast<int>(tab.entries.size()))
+      paths.push_back(tab.entries[r].path);
+  }
+  return paths;
 }
 
 namespace eh::file_browser {
@@ -175,11 +191,13 @@ void request_fs_operation(AppState& app, const std::vector<std::string>& srcs,
 }
 
 // ── Paste: file URIs if present, otherwise save clipboard image data ──
+// dest_dir overrides the target directory (empty = current directory).
 
-void paste_clipboard(AppState& app) {
+void paste_clipboard(AppState& app, const std::string& dest_dir) {
+  const std::string& dest = dest_dir.empty() ? app.cur_tab().current_path : dest_dir;
   auto cf = app.clipboard.read_files(app.wl.display());
   if (!cf.paths.empty()) {
-    request_fs_operation(app, cf.paths, app.cur_tab().current_path, cf.is_cut,
+    request_fs_operation(app, cf.paths, dest, cf.is_cut,
                          cf.is_cut ? "Moved" : "Pasted", cf.is_cut);
     return;
   }
@@ -205,7 +223,7 @@ void paste_clipboard(AppState& app) {
   localtime_r(&t, &lt);
   std::strftime(ts, sizeof(ts), "%Y-%m-%d %H-%M-%S", &lt);
 
-  const fs::path dir(app.cur_tab().current_path);
+  const fs::path dir(dest);
   fs::path candidate = dir / ("Pasted Image " + std::string(ts) + ext);
   int n = 2;
   std::error_code ec;
@@ -341,9 +359,50 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
     app.context_menu_items.push_back(AppState::menu_separator());
     app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Copy, "Copy"));
     app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Paste, "Paste"));
+    if (is_dir)
+      app.context_menu_items.push_back(
+        AppState::menu_item(AppState::ContextMenuAction::PasteInto, "Paste Into Folder"));
     app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Rename, "Rename"));
     app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::OpenFileLocation, "Open File Location"));
     app.context_menu_items.push_back(AppState::menu_separator());
+
+    // Copy To / Move To submenus (quick targets + browse)
+    {
+      const std::string home = home_dir();
+      const std::string desktop = home + "/Desktop";
+      bool has_other_pane =
+          app.split_view; // other pane always exists while split
+
+      AppState::ContextMenuItem copy_to;
+      copy_to.action = AppState::ContextMenuAction::Separator;
+      copy_to.label = "Copy To";
+      copy_to.sub_items = {
+        AppState::menu_item(AppState::ContextMenuAction::CopyToHome, "Home"),
+        AppState::menu_item(AppState::ContextMenuAction::CopyToDesktop, "Desktop"),
+      };
+      if (has_other_pane)
+        copy_to.sub_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::CopyToOtherPane, "Other Pane"));
+      copy_to.sub_items.push_back(AppState::menu_separator());
+      copy_to.sub_items.push_back(
+        AppState::menu_item(AppState::ContextMenuAction::CopyTo, "Browse..."));
+      app.context_menu_items.push_back(std::move(copy_to));
+
+      AppState::ContextMenuItem move_to;
+      move_to.action = AppState::ContextMenuAction::Separator;
+      move_to.label = "Move To";
+      move_to.sub_items = {
+        AppState::menu_item(AppState::ContextMenuAction::MoveToHome, "Home"),
+        AppState::menu_item(AppState::ContextMenuAction::MoveToDesktop, "Desktop"),
+      };
+      if (has_other_pane)
+        move_to.sub_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::MoveToOtherPane, "Other Pane"));
+      move_to.sub_items.push_back(AppState::menu_separator());
+      move_to.sub_items.push_back(
+        AppState::menu_item(AppState::ContextMenuAction::MoveTo, "Browse..."));
+      app.context_menu_items.push_back(std::move(move_to));
+    }
 
     // Actions submenu
     {
@@ -356,10 +415,11 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
         AppState::menu_item(AppState::ContextMenuAction::CreateSymlink, "Create Symlink"),
         AppState::menu_separator(),
         AppState::menu_item(AppState::ContextMenuAction::Cut, "Cut"),
-        AppState::menu_item(AppState::ContextMenuAction::CopyTo, "Copy to..."),
-        AppState::menu_item(AppState::ContextMenuAction::MoveTo, "Move to..."),
         AppState::menu_item(AppState::ContextMenuAction::PermanentDelete, "Permanent Delete"),
       };
+      if (app.cur_tab().multi_selected.size() == 2 && compare_tool_available())
+        actions_item.sub_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::CompareFiles, "Compare Files"));
       app.context_menu_items.push_back(std::move(actions_item));
     }
 
@@ -410,6 +470,10 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
       AppState::menu_item(AppState::ContextMenuAction::OpenInTerminal, term_label),
       AppState::menu_separator(),
       AppState::menu_item(AppState::ContextMenuAction::Paste, "Paste"),
+      AppState::menu_item(AppState::ContextMenuAction::SelectAll, "Select All"),
+      AppState::menu_item(AppState::ContextMenuAction::InvertSelection, "Invert Selection"),
+      AppState::menu_item(AppState::ContextMenuAction::SelectPattern, "Select by Pattern\u2026"),
+      AppState::menu_separator(),
       AppState::menu_item(AppState::ContextMenuAction::Properties, "Properties"),
     };
   }
@@ -722,6 +786,11 @@ void execute_context_menu_action(AppState& app, int item_idx) {
 
   // ── Tab context menu actions ──
   if (app.context_menu_file_idx == -4) {
+    if (action == AppState::ContextMenuAction::ReopenClosedTab) {
+      reopen_last_closed_tab(app);
+      draw(app);
+      return;
+    }
     if (action == AppState::ContextMenuAction::CloseTab) {
       if (app.context_menu_tab_idx >= 0 &&
           app.context_menu_tab_idx < static_cast<int>(app.tabs.size())) {
@@ -917,6 +986,63 @@ void execute_context_menu_action(AppState& app, int item_idx) {
       app.operation_status = "Copied to clipboard";
       app.operation_status_expires_ms = menu_expiry_3s();
       break;
+    }
+
+    case AppState::ContextMenuAction::PasteInto: {
+      if (app.context_menu_file_idx >= 0 &&
+          app.context_menu_file_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+        int r = app.cur_tab().visible_entries[app.context_menu_file_idx];
+        if (r >= 0 && r < static_cast<int>(app.cur_tab().entries.size()) &&
+            app.cur_tab().entries[r].is_dir)
+          paste_clipboard(app, app.cur_tab().entries[r].path);
+      }
+      return;
+    }
+
+    case AppState::ContextMenuAction::InvertSelection:
+      invert_selection(app);
+      draw(app);
+      return;
+
+    case AppState::ContextMenuAction::SelectPattern:
+      open_select_pattern(app);
+      draw(app);
+      return;
+
+    case AppState::ContextMenuAction::CompareFiles:
+      compare_selected_files(app);
+      return;
+
+    case AppState::ContextMenuAction::CopyToHome:
+    case AppState::ContextMenuAction::CopyToDesktop:
+    case AppState::ContextMenuAction::CopyToOtherPane: {
+      std::string dest;
+      if (action == AppState::ContextMenuAction::CopyToHome)
+        dest = home_dir();
+      else if (action == AppState::ContextMenuAction::CopyToDesktop)
+        dest = home_dir() + "/Desktop";
+      else
+        dest = app.active_pane == 0 ? app.right_pane.current_path
+                                    : app.tabs[app.active_tab].current_path;
+      request_fs_operation(app, selected_entry_paths(app), dest, false,
+                           "Copied to destination", false);
+      return;
+    }
+
+    case AppState::ContextMenuAction::MoveToHome:
+    case AppState::ContextMenuAction::MoveToDesktop:
+    case AppState::ContextMenuAction::MoveToOtherPane: {
+      std::string dest;
+      if (action == AppState::ContextMenuAction::MoveToHome)
+        dest = home_dir();
+      else if (action == AppState::ContextMenuAction::MoveToDesktop)
+        dest = home_dir() + "/Desktop";
+      else
+        dest = app.active_pane == 0 ? app.right_pane.current_path
+                                    : app.tabs[app.active_tab].current_path;
+      request_fs_operation(app, selected_entry_paths(app), dest, true,
+                           "Moved to destination", false);
+      return;
     }
 
     case AppState::ContextMenuAction::CopyTo: {

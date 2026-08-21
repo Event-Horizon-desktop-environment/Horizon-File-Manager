@@ -64,6 +64,7 @@ sources = files(
   # File browser core
   'src/app/file_browser/embed/embed.cpp',
   'src/app/file_browser/features/compress.cpp',
+  'src/app/file_browser/features/compare.cpp',
   'src/app/file_browser/features/desktop_icon_parser.cpp',
   'src/app/file_browser/features/drag.cpp',
   'src/app/file_browser/features/epub_preview.cpp',
@@ -73,7 +74,9 @@ sources = files(
   'src/app/file_browser/features/pdf_preview.cpp',
   'src/app/file_browser/features/progress.cpp',
   'src/app/file_browser/features/recursive_search_worker.cpp',
+  'src/app/file_browser/features/selection.cpp',
   'src/app/file_browser/features/svg_preview.cpp',
+  'src/app/file_browser/features/tab_history.cpp',
   'src/app/file_browser/features/thumbnail_cache.cpp',
   'src/app/file_browser/features/video_preview.cpp',
   'src/app/file_browser/features/video_worker.cpp',
