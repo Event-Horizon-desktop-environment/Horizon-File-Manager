@@ -1,10 +1,13 @@
 #include "app/file_browser/features/recursive_search_worker.hpp"
+#include "app/file_browser/features/query_match.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstring>
 #include <filesystem>
 #include <system_error>
+
+#include <fnmatch.h>
 
 #include <dirent.h>
 #include <sys/stat.h>
@@ -13,27 +16,28 @@
 namespace eh::file_browser {
 namespace {
 
+constexpr size_t kContentMaxBytes = 512 * 1024;  // never grep beyond 512 KB
+constexpr size_t kBinaryProbeBytes = 8192;
+
 bool is_skip_dir(const std::string& name) {
   return name == "." || name == ".." || name == "snap" ||
          name == "lost+found";
 }
 
-bool matches(const std::string& name, const std::string& q_lower) {
-  if (q_lower.empty()) return false;
-  // Case-insensitive substring match on filename
-  for (size_t i = 0; i < name.size(); ++i) {
-    if (std::tolower(static_cast<unsigned char>(name[i])) !=
-        static_cast<unsigned char>(q_lower[0]))
-      continue;
-    // Check the rest
-    size_t j = 0;
-    while (i + j < name.size() && j < q_lower.size() &&
-           std::tolower(static_cast<unsigned char>(name[i + j])) ==
-               static_cast<unsigned char>(q_lower[j]))
-      ++j;
-    if (j == q_lower.size()) return true;
-  }
-  return false;
+bool plain_contains(const std::string& haystack, const std::string& needle,
+                    bool case_sensitive) {
+  if (case_sensitive) return haystack.find(needle) != std::string::npos;
+  auto fold = [](std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(),
+                   [](unsigned char c) { return std::tolower(c); });
+    return s;
+  };
+  return fold(haystack).find(fold(needle)) != std::string::npos;
+}
+
+// True when the head of the file looks textual (no NUL bytes in probe).
+bool looks_textual(const char* buf, size_t n) {
+  return std::memchr(buf, '\0', n) == nullptr;
 }
 
 } // namespace
@@ -49,7 +53,8 @@ RecursiveSearchWorker::~RecursiveSearchWorker() {
 }
 
 void RecursiveSearchWorker::start_search(const std::string& root_dir,
-                                          const std::string& query) {
+                                          const std::string& query,
+                                          const SearchOptions& options) {
   // Clear remaining results from previous search
   {
     std::lock_guard<std::mutex> lock(m_out_mutex);
@@ -60,6 +65,19 @@ void RecursiveSearchWorker::start_search(const std::string& root_dir,
     std::lock_guard<std::mutex> lock(m_ctrl_mutex);
     m_root_dir = root_dir;
     m_query = query;
+    m_options = options;
+    m_regex_ok = false;
+    if (options.mode == static_cast<int>(QueryMode::Regex) &&
+        !query.empty()) {
+      try {
+        auto flags = std::regex::ECMAScript;
+        if (!options.case_sensitive) flags |= std::regex::icase;
+        m_regex.assign(query, flags);
+        m_regex_ok = true;
+      } catch (const std::regex_error&) {
+        m_regex_ok = false;
+      }
+    }
     m_search_pending = true;
     m_cancel_requested = false;
   }
@@ -92,9 +110,58 @@ void RecursiveSearchWorker::cancel() {
   }
 }
 
+bool RecursiveSearchWorker::match_name(const std::string& name) {
+  // Caller holds no locks; m_options/m_query are stable during a run.
+  const int mode = m_options.mode;
+  const bool cs = m_options.case_sensitive;
+
+  switch (mode) {
+    case 1: // Glob
+      return fnmatch(m_query.c_str(), name.c_str(), cs ? 0 : FNM_CASEFOLD) == 0;
+    case 2: // Regex
+      if (!m_regex_ok) return false;
+      try {
+        return std::regex_search(name, m_regex);
+      } catch (const std::regex_error&) {
+        return false;
+      }
+    default: // Plain (and content-mode name fallback)
+      return !m_query.empty() && plain_contains(name, m_query, cs);
+  }
+}
+
+bool RecursiveSearchWorker::match_content(const std::string& path) {
+  struct stat st{};
+  if (::stat(path.c_str(), &st) != 0 || S_ISDIR(st.st_mode)) return false;
+  if (static_cast<uint64_t>(st.st_size) > kContentMaxBytes) return false;
+
+  FILE* f = std::fopen(path.c_str(), "rb");
+  if (!f) return false;
+
+  char buf[kContentMaxBytes];
+  size_t n = std::fread(buf, 1, sizeof(buf), f);
+  std::fclose(f);
+
+  size_t probe = std::min(n, kBinaryProbeBytes);
+  if (!looks_textual(buf, probe)) return false;
+
+  std::string content(buf, n);
+  const int mode = m_options.mode;
+  const bool cs = m_options.case_sensitive;
+
+  if (mode == 2) { // Regex over content
+    if (!m_regex_ok) return false;
+    try {
+      return std::regex_search(content, m_regex);
+    } catch (const std::regex_error&) {
+      return false;
+    }
+  }
+  return !m_query.empty() && plain_contains(content, m_query, cs);
+}
+
 void RecursiveSearchWorker::thread_main() {
   while (m_running.load()) {
-    std::string root_dir, query;
     {
       std::unique_lock<std::mutex> lock(m_ctrl_mutex);
       m_cv.wait(lock, [this] {
@@ -102,16 +169,10 @@ void RecursiveSearchWorker::thread_main() {
       });
       if (!m_running.load()) return;
       if (!m_search_pending) continue;
-      root_dir = m_root_dir;
-      query = m_query;
       m_search_pending = false;
     }
 
-    std::string q_lower = query;
-    std::transform(q_lower.begin(), q_lower.end(), q_lower.begin(),
-                   [](unsigned char c) { return std::tolower(c); });
-
-    walk_directory(root_dir, "", q_lower, 0);
+    walk_directory(m_root_dir, "", 0);
 
     // Signal that search is complete
     {
@@ -123,7 +184,6 @@ void RecursiveSearchWorker::thread_main() {
 
 void RecursiveSearchWorker::walk_directory(const std::string& dir,
                                             const std::string& rel,
-                                            const std::string& q_lower,
                                             int depth) {
   // Check cancel
   {
@@ -153,25 +213,39 @@ void RecursiveSearchWorker::walk_directory(const std::string& dir,
 
     bool is_dir = (dent->d_type == DT_DIR);
 
-    if (is_dir) {
-      if (is_skip_dir(name)) continue;
-    }
+    if (is_dir && is_skip_dir(name)) continue;
 
-    // Check if name matches query
-    if (matches(name, q_lower)) {
-      SearchResult r;
-      r.path = full;
-      r.relative_path = relative;
-      r.is_dir = is_dir;
-      {
-        std::lock_guard<std::mutex> lock(m_out_mutex);
-        m_out.push(std::move(r));
+    bool matched = match_name(name);
+    if (!matched && m_options.mode == 3 && !is_dir)
+      matched = match_content(full); // Content mode
+
+    if (matched) {
+      bool keep = true;
+      if (m_options.predicate) {
+        uint64_t size = 0;
+        int64_t mtime = 0;
+        struct stat st{};
+        if (::stat(full.c_str(), &st) == 0) {
+          size = static_cast<uint64_t>(st.st_size);
+          mtime = static_cast<int64_t>(st.st_mtime);
+        }
+        keep = m_options.predicate(full, name, is_dir, size, mtime);
+      }
+      if (keep) {
+        SearchResult r;
+        r.path = full;
+        r.relative_path = relative;
+        r.is_dir = is_dir;
+        {
+          std::lock_guard<std::mutex> lock(m_out_mutex);
+          m_out.push(std::move(r));
+        }
       }
     }
 
     // Recurse into subdirectories
     if (is_dir) {
-      walk_directory(full, relative, q_lower, depth + 1);
+      walk_directory(full, relative, depth + 1);
     }
   }
   closedir(d);

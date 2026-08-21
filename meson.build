@@ -73,6 +73,7 @@ sources = files(
   'src/app/file_browser/features/nav.cpp',
   'src/app/file_browser/features/pdf_preview.cpp',
   'src/app/file_browser/features/progress.cpp',
+  'src/app/file_browser/features/query_match.cpp',
   'src/app/file_browser/features/recursive_search_worker.cpp',
   'src/app/file_browser/features/selection.cpp',
   'src/app/file_browser/features/svg_preview.cpp',

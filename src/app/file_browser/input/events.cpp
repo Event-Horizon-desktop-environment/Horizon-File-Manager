@@ -2,6 +2,7 @@
 #include "../features/compress.hpp"
 #include "../features/drag.hpp"
 #include "../features/progress.hpp"
+#include "../features/query_match.hpp"
 #include "../features/recursive_search_worker.hpp"
 #include "../features/selection.hpp"
 #include "../features/tab_history.hpp"
@@ -1706,6 +1707,40 @@ void handle_click(AppState& app, int x, int y, int button) {
 
       // Search bar click — set cursor position or clear
       if (in_search_active || in_recursive_search_active) {
+        // Query-mode segment / case / lock hit tests
+        {
+          auto& cb_mode = app.active_pane ? app.r_search_mode : app.search_mode;
+          auto& cb_case = app.active_pane ? app.r_search_case_sensitive : app.search_case_sensitive;
+          auto& cb_lock = app.active_pane ? app.r_search_locked : app.search_locked;
+          auto& cb_mode_x = app.active_pane ? app.r_search_mode_x : app.search_mode_x;
+          auto& cb_mode_w = app.active_pane ? app.r_search_mode_w : app.search_mode_w;
+          auto& cb_case_x = app.active_pane ? app.r_search_case_x : app.search_case_x;
+          auto& cb_case_w = app.active_pane ? app.r_search_case_w : app.search_case_w;
+          auto& cb_lock_x = app.active_pane ? app.r_search_lock_x : app.search_lock_x;
+          auto& cb_lock_w = app.active_pane ? app.r_search_lock_w : app.search_lock_w;
+
+          if (cb_mode_w > 0 && x >= cb_mode_x && x < cb_mode_x + cb_mode_w) {
+            int seg = (x - cb_mode_x) / (cb_mode_w / 4);
+            if (seg >= 0 && seg < 4 && cb_mode != seg) {
+              cb_mode = seg;
+              restart_active_search(app);
+              draw(app);
+            }
+            return;
+          }
+          if (cb_case_w > 0 && x >= cb_case_x && x < cb_case_x + cb_case_w) {
+            cb_case = !cb_case;
+            restart_active_search(app);
+            draw(app);
+            return;
+          }
+          if (cb_lock_w > 0 && x >= cb_lock_x && x < cb_lock_x + cb_lock_w) {
+            cb_lock = !cb_lock;
+            draw(app);
+            return;
+          }
+        }
+
         // Clear button hit test
         if (in_search_clear_w > 0 && x >= in_search_clear_x && x < in_search_clear_x + in_search_clear_w) {
           in_search_query.clear();
@@ -1739,6 +1774,30 @@ void handle_click(AppState& app, int x, int y, int button) {
           in_search_cursor = best_pos;
           in_search_sel_start = -1;
           in_search_sel_end = -1;
+          draw(app);
+          return;
+        }
+      }
+
+      // Search results banner — Clear button
+      if (app.search_banner_clear_w > 0 &&
+          (app.search_active || app.recursive_search_active ||
+           app.r_search_active || app.r_recursive_search_active)) {
+        int banner_y = app.top_bar_height + app.tab_bar_height;
+        if (x >= app.search_banner_clear_x &&
+            x < app.search_banner_clear_x + app.search_banner_clear_w &&
+            y >= banner_y && y < banner_y + 28) {
+          reset_search_filters(app);
+          bool was_rec = app.active_pane ? app.r_recursive_search_active
+                                         : app.recursive_search_active;
+          auto& b_q = app.active_pane ? app.r_search_query : app.search_query;
+          auto& b_rq = app.active_pane ? app.r_recursive_search_query : app.recursive_search_query;
+          b_q.clear();
+          b_rq.clear();
+          if (app.active_pane) { app.r_search_active = false; app.r_recursive_search_active = false; }
+          else { app.search_active = false; app.recursive_search_active = false; }
+          recursive_search_worker().cancel();
+          reload_dir(app);
           draw(app);
           return;
         }
@@ -2883,6 +2942,26 @@ void handle_pointer_move(AppState& app, int x, int y) {
       }
     }
 
+    // Filter-bar control hovers (mode segment / case / lock)
+    bool fb_active = (app.active_pane ? app.r_search_active : app.search_active) ||
+                     (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active);
+    bool fmode_h = false, fcase_h = false, flock_h = false;
+    int fmode_btn = -1;
+    if (fb_active) {
+      auto fm_x = app.active_pane ? app.r_search_mode_x : app.search_mode_x;
+      auto fm_w = app.active_pane ? app.r_search_mode_w : app.search_mode_w;
+      auto fc_x = app.active_pane ? app.r_search_case_x : app.search_case_x;
+      auto fc_w = app.active_pane ? app.r_search_case_w : app.search_case_w;
+      auto fl_x = app.active_pane ? app.r_search_lock_x : app.search_lock_x;
+      auto fl_w = app.active_pane ? app.r_search_lock_w : app.search_lock_w;
+      if (fm_w > 0 && x >= fm_x && x < fm_x + fm_w) {
+        fmode_h = true;
+        fmode_btn = (x - fm_x) / (fm_w / 4);
+      }
+      fcase_h = fc_w > 0 && x >= fc_x && x < fc_x + fc_w;
+      flock_h = fl_w > 0 && x >= fl_x && x < fl_x + fl_w;
+    }
+
     if (bh != (app.active_pane ? app.r_arrow_back_hover : app.arrow_back_hover) ||
         fh != (app.active_pane ? app.r_arrow_forward_hover : app.arrow_forward_hover) ||
         vh != (app.active_pane ? app.r_view_mode_btn_hover : app.view_mode_btn_hover) ||
@@ -2892,6 +2971,10 @@ void handle_pointer_move(AppState& app, int x, int y) {
         gh != (app.active_pane ? app.r_settings_btn_hover : app.settings_btn_hover) ||
         dh != (app.active_pane ? app.r_dots_btn_hover : app.dots_btn_hover) ||
         filter_h != (app.active_pane ? app.r_filter_btn_hover : app.filter_btn_hover) ||
+        fmode_h != (app.active_pane ? app.r_search_mode_hover : app.search_mode_hover) ||
+        fcase_h != (app.active_pane ? app.r_search_case_hover : app.search_case_hover) ||
+        flock_h != (app.active_pane ? app.r_search_lock_hover : app.search_lock_hover) ||
+        fmode_btn != (app.active_pane ? app.r_search_mode_hover_btn : app.search_mode_hover_btn) ||
         close_h != app.win_btn_close_hover || min_h != app.win_btn_min_hover ||
         max_h != app.win_btn_max_hover) {
       (app.active_pane ? app.r_arrow_back_hover : app.arrow_back_hover) = bh;
@@ -2903,6 +2986,10 @@ void handle_pointer_move(AppState& app, int x, int y) {
       (app.active_pane ? app.r_settings_btn_hover : app.settings_btn_hover) = gh;
       (app.active_pane ? app.r_dots_btn_hover : app.dots_btn_hover) = dh;
       (app.active_pane ? app.r_filter_btn_hover : app.filter_btn_hover) = filter_h;
+      (app.active_pane ? app.r_search_mode_hover : app.search_mode_hover) = fmode_h;
+      (app.active_pane ? app.r_search_case_hover : app.search_case_hover) = fcase_h;
+      (app.active_pane ? app.r_search_lock_hover : app.search_lock_hover) = flock_h;
+      (app.active_pane ? app.r_search_mode_hover_btn : app.search_mode_hover_btn) = fmode_btn;
       app.win_btn_close_hover = close_h;
       app.win_btn_min_hover = min_h;
       app.win_btn_max_hover = max_h;
@@ -4279,14 +4366,33 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     auto& k_search_cursor = app.active_pane ? app.r_search_cursor : app.search_cursor;
     auto& k_search_sel_start = app.active_pane ? app.r_search_sel_start : app.search_sel_start;
     auto& k_search_sel_end = app.active_pane ? app.r_search_sel_end : app.search_sel_end;
+    auto& k_search_mode = app.active_pane ? app.r_search_mode : app.search_mode;
+    auto& k_search_case = app.active_pane ? app.r_search_case_sensitive : app.search_case_sensitive;
     auto trigger_search = [&] {
       bool search_from_home = k_recursive_search_active;
+      (app.active_pane ? app.r_search_regex_valid : app.search_regex_valid) =
+          query_is_valid(k_search_query, k_search_mode);
       k_recursive_search_query = k_search_query;
       if (!k_search_query.empty()) {
         app.cur_tab().entries.clear();
         app.cur_tab().visible_entries.clear();
         std::string root = search_from_home ? home_dir() : app.cur_tab().current_path;
-        recursive_search_worker().start_search(root, k_search_query);
+
+        eh::file_browser::SearchOptions opt;
+        opt.mode = k_search_mode;
+        opt.case_sensitive = k_search_case;
+        int ft = app.active_pane ? app.r_filter_type_idx : app.filter_type_idx;
+        int fs = app.active_pane ? app.r_filter_size_idx : app.filter_size_idx;
+        int fd = app.active_pane ? app.r_filter_date_idx : app.filter_date_idx;
+        if (ft > 0 || fs > 0 || fd > 0) {
+          opt.predicate = [ft, fs, fd](const std::string& path,
+                                       const std::string& name, bool is_dir,
+                                       uint64_t size, int64_t mtime) {
+            return search_predicate_passes(ft, fs, fd, path, name, is_dir,
+                                           size, mtime);
+          };
+        }
+        recursive_search_worker().start_search(root, k_search_query, opt);
       } else {
         recursive_search_worker().cancel();
       }
@@ -4308,6 +4414,13 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       return true;
     }
     if (sym == XKB_KEY_Escape) {
+      // Locked bar: first Esc only unlocks, keeping the query
+      auto& k_search_locked = app.active_pane ? app.r_search_locked : app.search_locked;
+      if (k_search_locked) {
+        k_search_locked = false;
+        draw(app);
+        return true;
+      }
       reset_search_filters(app);
       bool was_recursive = k_recursive_search_active;
       k_search_active = false;

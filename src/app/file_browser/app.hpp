@@ -53,6 +53,15 @@ void reload_dir(AppState& app);
 // Names listed in a directory's `.hidden` file (freedesktop convention).
 std::unordered_set<std::string> read_hidden_file(const std::string& dir);
 
+// Thread-safe filter-dropdown predicate for the search worker (type/size/date
+// indices; 0 = any). Implemented in nav.cpp; runs on the worker thread.
+bool search_predicate_passes(int type_idx, int size_idx, int date_idx,
+                             const std::string& path, const std::string& name,
+                             bool is_dir, uint64_t size, int64_t mtime);
+
+// Restart the active pane's search with current query/mode/case/filters.
+void restart_active_search(AppState& app);
+
 // ── Sort dropdown row model (shared by draw + click handling) ──
 struct SortMenuRow {
   enum class Kind {
@@ -200,6 +209,7 @@ void resolve_conflict_choice(AppState& app, int choice);  // 0=Overwrite/Merge, 
 void settings_apply(AppState& app);
 void draw_settings_dialog(AppState& app, cairo_t* cr);
 void draw_sort_menu(AppState& app, cairo_t* cr);
+void draw_search_banner(AppState& app, cairo_t* cr, int x, int y, int w);
 void draw_filter_dropdown(AppState& app, cairo_t* cr, int section);
 void draw_hover_preview(AppState& app, cairo_t* cr);
 void draw_properties_dialog(AppState& app, cairo_t* cr);

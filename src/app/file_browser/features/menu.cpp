@@ -1774,6 +1774,7 @@ void save_file_browser_settings(AppState& app) {
   fbs.sort_natural = app.sort_natural;
   fbs.sort_case_sensitive = app.sort_case_sensitive;
   fbs.sort_hidden_last = app.sort_hidden_last;
+  fbs.filter_bar_open = app.filter_bar_open_by_default;
   fbs.surface_opacity_pct = app.surface_opacity_pct;
   fbs.sidebar_opacity_pct = app.sidebar_opacity_pct;
   fbs.topbar_opacity_pct = app.topbar_opacity_pct;
@@ -1800,6 +1801,7 @@ void settings_apply(AppState& app) {
   fbs.sort_natural = app.sort_natural;
   fbs.sort_case_sensitive = app.sort_case_sensitive;
   fbs.sort_hidden_last = app.sort_hidden_last;
+  fbs.filter_bar_open = app.filter_bar_open_by_default;
   fbs.surface_opacity_pct = app.settings_opacity_pct;
   fbs.sidebar_opacity_pct = app.settings_sidebar_opacity_pct;
   fbs.topbar_opacity_pct = app.settings_topbar_opacity_pct;
@@ -1917,6 +1919,11 @@ void reload_settings_from_config(AppState& app) {
   app.sort_natural = fbs.sort_natural;
   app.sort_case_sensitive = fbs.sort_case_sensitive;
   app.sort_hidden_last = fbs.sort_hidden_last;
+  app.filter_bar_open_by_default = fbs.filter_bar_open;
+  if (fbs.filter_bar_open && !app.filter_bar_default_applied) {
+    app.filter_bar_default_applied = true;
+    app.search_active = true;
+  }
   app.entry_height = std::max(20, static_cast<int>(36.0 * app.zoom_pct / 100.0));
   int icon_sz = static_cast<int>(48.0 * app.zoom_pct / 100.0);
   app.grid_cell_size = std::max(40, icon_sz + static_cast<int>(8.0 * app.zoom_pct / 100.0));

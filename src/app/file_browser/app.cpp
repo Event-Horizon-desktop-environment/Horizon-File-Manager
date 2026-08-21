@@ -181,8 +181,11 @@ void paint(AppState& app, cairo_t* cr) {
   int content_x = sidebar_w;
   int content_w = w - sidebar_w - info_panel_w - ops_panel_w;
   int selector_h = (app.select_dir_mode || app.select_file_mode) ? app.select_bar_h : 0;
-  int content_y = top_h + tab_h;
-  int view_h = h - top_h - tab_h - status_h - selector_h;
+  bool search_banner_on = (app.search_active || app.recursive_search_active ||
+                           app.r_search_active || app.r_recursive_search_active);
+  int banner_h = search_banner_on ? 28 : 0;
+  int content_y = top_h + tab_h + banner_h;
+  int view_h = h - top_h - tab_h - banner_h - status_h - selector_h;
   int pane_top_h = app.split_view ? app.top_bar_height : 0;
 
   // Update info panel metadata if selection changed
@@ -380,6 +383,10 @@ void paint(AppState& app, cairo_t* cr) {
   // Top bar
   if (top_h > 0)
     draw_top_bar(app, cr, w, top_h);
+
+  // Search results banner (under top bar, above content)
+  if (search_banner_on)
+    draw_search_banner(app, cr, content_x, top_h + tab_h, content_w);
 
   // Tab bar (shifted down by top_h)
   cairo_save(cr);

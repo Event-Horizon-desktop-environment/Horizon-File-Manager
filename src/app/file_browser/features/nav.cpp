@@ -1,6 +1,7 @@
 #include "../app.hpp"
 
 #include "app/file_browser/features/desktop_icon_parser.hpp"
+#include "app/file_browser/features/query_match.hpp"
 #include "app/file_browser/features/recursive_search_worker.hpp"
 #include "app/file_browser/features/tab_history.hpp"
 #include "app/file_browser/features/video_worker.hpp"
@@ -698,6 +699,112 @@ static bool matches_filter(const AppState& app, const FileEntry& entry) {
   return true;
 }
 
+// Thread-safe predicate for the recursive search worker: applies the filter
+// dropdown's type/size/date selections to raw stat data. Runs on the worker
+// thread — must not touch AppState.
+bool search_predicate_passes(int ft, int fs, int fd, const std::string& path,
+                             const std::string& name, bool is_dir,
+                             uint64_t size, int64_t mtime) {
+  if (ft > 0) {
+    std::string mime = is_dir ? "inode/directory" : mime_by_ext(path);
+    FileType t = detect_file_type(name, is_dir, mime, path);
+    if (t != static_cast<FileType>(ft - 1)) return false;
+  }
+  if (fs > 0) {
+    switch (fs) {
+      case 1: if (size >= 10240) return false; break;
+      case 2: if (size < 10240 || size >= 102400) return false; break;
+      case 3: if (size < 102400 || size >= 1048576) return false; break;
+      case 4: if (size < 1048576 || size >= 10485760) return false; break;
+      case 5: if (size < 10485760 || size >= 104857600) return false; break;
+      case 6: if (size < 104857600) return false; break;
+    }
+  }
+  if (fd > 0) {
+    if (mtime == 0) return false;
+    time_t now = time(nullptr);
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    int64_t boundary = 0;
+    switch (fd) {
+      case 1: {
+        struct tm tm_today = tm_now;
+        tm_today.tm_hour = 0; tm_today.tm_min = 0; tm_today.tm_sec = 0;
+        boundary = mktime(&tm_today);
+        break;
+      }
+      case 2: {
+        int days_since_monday = (tm_now.tm_wday + 6) % 7;
+        struct tm tm_week = tm_now;
+        tm_week.tm_hour = 0; tm_week.tm_min = 0; tm_week.tm_sec = 0;
+        tm_week.tm_mday -= days_since_monday;
+        boundary = mktime(&tm_week);
+        break;
+      }
+      case 3: {
+        struct tm tm_month = tm_now;
+        tm_month.tm_hour = 0; tm_month.tm_min = 0; tm_month.tm_sec = 0;
+        tm_month.tm_mday = 1;
+        boundary = mktime(&tm_month);
+        break;
+      }
+      case 4: {
+        struct tm tm_year = tm_now;
+        tm_year.tm_hour = 0; tm_year.tm_min = 0; tm_year.tm_sec = 0;
+        tm_year.tm_mday = 1; tm_year.tm_mon = 0;
+        boundary = mktime(&tm_year);
+        break;
+      }
+    }
+    if (mtime < boundary) return false;
+  }
+  return true;
+}
+
+// Query match honoring the filter-bar mode (plain/glob/regex) and case
+// toggle. Empty query matches everything.
+static bool query_matches_entry(const AppState& app, const std::string& name) {
+  const auto& q = app.active_pane ? app.r_search_query : app.search_query;
+  if (q.empty()) return true;
+  int mode = app.active_pane ? app.r_search_mode : app.search_mode;
+  bool cs = app.active_pane ? app.r_search_case_sensitive : app.search_case_sensitive;
+  bool valid = true;
+  return name_matches(name, q, mode, cs, &valid);
+}
+
+// Restart the active pane's search with current query/mode/case/filter
+// settings (used after mode or option changes).
+void restart_active_search(AppState& app) {
+  const auto& q = app.active_pane ? app.r_search_query : app.search_query;
+  bool rec = app.active_pane ? app.r_recursive_search_active
+                             : app.recursive_search_active;
+  if (q.empty() || !(app.search_active || app.recursive_search_active ||
+                     app.r_search_active || app.r_recursive_search_active)) {
+    recursive_search_worker().cancel();
+    return;
+  }
+  app.cur_tab().entries.clear();
+  app.cur_tab().visible_entries.clear();
+
+  SearchOptions opt;
+  opt.mode = app.active_pane ? app.r_search_mode : app.search_mode;
+  opt.case_sensitive = app.active_pane ? app.r_search_case_sensitive
+                                       : app.search_case_sensitive;
+  int ft = app.active_pane ? app.r_filter_type_idx : app.filter_type_idx;
+  int fs = app.active_pane ? app.r_filter_size_idx : app.filter_size_idx;
+  int fd = app.active_pane ? app.r_filter_date_idx : app.filter_date_idx;
+  if (ft > 0 || fs > 0 || fd > 0) {
+    opt.predicate = [ft, fs, fd](const std::string& path,
+                                 const std::string& name, bool is_dir,
+                                 uint64_t size, int64_t mtime) {
+      return search_predicate_passes(ft, fs, fd, path, name, is_dir, size,
+                                     mtime);
+    };
+  }
+  std::string root = rec ? home_dir() : app.cur_tab().current_path;
+  recursive_search_worker().start_search(root, q, opt);
+}
+
 void reset_search_filters(AppState& app) {
   (app.active_pane ? app.r_filter_type_idx : app.filter_type_idx) = 0;
   (app.active_pane ? app.r_filter_size_idx : app.filter_size_idx) = 0;
@@ -716,13 +823,7 @@ void trigger_search_on_filter_change(AppState& app) {
   app.cur_tab().visible_entries.clear();
   for (int i = 0; i < static_cast<int>(app.cur_tab().entries.size()); ++i) {
     if (!app.show_hidden && app.cur_tab().entries[i].is_hidden) continue;
-    if (!(app.active_pane ? app.r_search_query : app.search_query).empty()) {
-      auto q = (app.active_pane ? app.r_search_query : app.search_query);
-      std::transform(q.begin(), q.end(), q.begin(), ::tolower);
-      auto n = app.cur_tab().entries[i].name;
-      std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-      if (n.find(q) == std::string::npos) continue;
-    }
+    if (!query_matches_entry(app, app.cur_tab().entries[i].name)) continue;
     if (!matches_filter(app, app.cur_tab().entries[i])) continue;
     app.cur_tab().visible_entries.push_back(i);
   }
@@ -734,13 +835,7 @@ void apply_filter(AppState& app) {
   app.cur_tab().visible_entries.clear();
   for (int i = 0; i < static_cast<int>(app.cur_tab().entries.size()); ++i) {
     if (!app.show_hidden && app.cur_tab().entries[i].is_hidden) continue;
-    if (!(app.active_pane ? app.r_search_query : app.search_query).empty()) {
-      auto q = (app.active_pane ? app.r_search_query : app.search_query);
-      std::transform(q.begin(), q.end(), q.begin(), ::tolower);
-      auto n = app.cur_tab().entries[i].name;
-      std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-      if (n.find(q) == std::string::npos) continue;
-    }
+    if (!query_matches_entry(app, app.cur_tab().entries[i].name)) continue;
     if (!matches_filter(app, app.cur_tab().entries[i])) continue;
     app.cur_tab().visible_entries.push_back(i);
   }
@@ -955,13 +1050,7 @@ void reload_dir(AppState& app) {
   app.cur_tab().visible_entries.clear();
   for (int i = 0; i < static_cast<int>(app.cur_tab().entries.size()); ++i) {
     if (!app.show_hidden && app.cur_tab().entries[i].is_hidden) continue;
-    if (!(app.active_pane ? app.r_search_query : app.search_query).empty()) {
-      auto q = (app.active_pane ? app.r_search_query : app.search_query);
-      std::transform(q.begin(), q.end(), q.begin(), ::tolower);
-      auto n = app.cur_tab().entries[i].name;
-      std::transform(n.begin(), n.end(), n.begin(), ::tolower);
-      if (n.find(q) == std::string::npos) continue;
-    }
+    if (!query_matches_entry(app, app.cur_tab().entries[i].name)) continue;
     app.cur_tab().visible_entries.push_back(i);
   }
 

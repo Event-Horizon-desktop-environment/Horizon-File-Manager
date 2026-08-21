@@ -291,6 +291,7 @@ struct FileBrowserSettings {
   bool sort_case_sensitive = false;
   bool sort_hidden_last = false;
   bool show_hidden = false;
+  bool filter_bar_open = false;  // open the filter bar on startup
   bool group_by_type = false;
 
   // ── Sidebar favorites (bookmarked folders) ──

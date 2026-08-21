@@ -1333,6 +1333,103 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
       cairo_move_to(cr, right_cursor + (bw - te.width) / 2, text_y);
       cairo_show_text(cr, label.c_str());
     }
+
+    // ── Query-mode segment, case toggle, lock (left of Filter) ──
+    {
+      auto& dw_mode = app.active_pane ? app.r_search_mode : app.search_mode;
+      auto& dw_case = app.active_pane ? app.r_search_case_sensitive : app.search_case_sensitive;
+      auto& dw_lock = app.active_pane ? app.r_search_locked : app.search_locked;
+      auto& dw_mode_x = app.active_pane ? app.r_search_mode_x : app.search_mode_x;
+      auto& dw_mode_w = app.active_pane ? app.r_search_mode_w : app.search_mode_w;
+      auto& dw_case_x = app.active_pane ? app.r_search_case_x : app.search_case_x;
+      auto& dw_case_w = app.active_pane ? app.r_search_case_w : app.search_case_w;
+      auto& dw_lock_x = app.active_pane ? app.r_search_lock_x : app.search_lock_x;
+      auto& dw_lock_w = app.active_pane ? app.r_search_lock_w : app.search_lock_w;
+
+      int bh2 = static_cast<int>(22.0 * zf);
+      int by2 = (top_h - bh2) / 2;
+      int seg_w = static_cast<int>(34.0 * zf);
+      int seg_count = 4;
+      int seg_total = seg_w * seg_count;
+
+      // Lock button (rightmost of this group)
+      dw_lock_w = static_cast<int>(26.0 * zf);
+      right_cursor -= (btn_gap + dw_lock_w);
+      dw_lock_x = right_cursor;
+      {
+        bool hv2 = app.active_pane ? app.r_search_lock_hover : app.search_lock_hover;
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
+                              dw_lock ? 0.95 : hv2 ? 0.6 : 0.35);
+        double cx = right_cursor + dw_lock_w / 2.0;
+        double cy = top_h / 2.0;
+        double s = 5.0 * zf;
+        cairo_set_line_width(cr, 1.4);
+        cairo_rectangle(cr, cx - s * 0.75, cy - s * 0.1, s * 1.5, s * 1.1);
+        if (dw_lock) cairo_fill(cr); else cairo_stroke(cr);
+        cairo_arc(cr, cx, cy - s * 0.1, s * 0.45, M_PI, 2 * M_PI);
+        cairo_stroke(cr);
+      }
+
+      // Case toggle ("Aa")
+      dw_case_w = static_cast<int>(28.0 * zf);
+      right_cursor -= dw_case_w;
+      dw_case_x = right_cursor;
+      {
+        bool hv2 = app.active_pane ? app.r_search_case_hover : app.search_case_hover;
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
+                              dw_case ? 0.95 : hv2 ? 0.6 : 0.35);
+        cairo_text_extents_t te2;
+        cairo_text_extents(cr, "Aa", &te2);
+        cairo_move_to(cr, right_cursor + (dw_case_w - te2.width) / 2, text_y);
+        cairo_show_text(cr, "Aa");
+      }
+      right_cursor -= btn_gap;
+
+      // Mode segment control
+      dw_mode_w = seg_total;
+      right_cursor -= seg_total;
+      dw_mode_x = right_cursor;
+      {
+        static constexpr const char* kSegLabels[] = {"abc", "*", ".*", "txt"};
+        bool hv2 = app.active_pane ? app.r_search_mode_hover : app.search_mode_hover;
+        int hov_btn = app.active_pane ? app.r_search_mode_hover_btn : app.search_mode_hover_btn;
+        for (int si = 0; si < seg_count; ++si) {
+          bool sel = dw_mode == si;
+          int sx = right_cursor + si * seg_w;
+          if (sel) {
+            cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.28);
+            draw_rounded_rect(cr, sx + 1, by2, seg_w - 2, bh2, 5);
+            cairo_fill(cr);
+          } else if (hv2 && si == hov_btn) {
+            cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.10);
+            draw_rounded_rect(cr, sx + 1, by2, seg_w - 2, bh2, 5);
+            cairo_fill(cr);
+          }
+          cairo_text_extents_t te2;
+          cairo_text_extents(cr, kSegLabels[si], &te2);
+          cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
+                                sel ? 1.0 : 0.45);
+          cairo_move_to(cr, sx + (seg_w - te2.width) / 2, text_y);
+          cairo_show_text(cr, kSegLabels[si]);
+        }
+        cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.35);
+        cairo_set_line_width(cr, 1);
+        draw_rounded_rect(cr, right_cursor + 0.5, by2 + 0.5, seg_total - 1, bh2 - 1, 5);
+        cairo_stroke(cr);
+      }
+      right_cursor -= btn_gap;
+
+      // Red invalid underline for malformed regex
+      bool regex_bad = !(app.active_pane ? app.r_search_regex_valid : app.search_regex_valid);
+      if (regex_bad && has_text) {
+        cairo_set_source_rgba(cr, 0.9, 0.25, 0.25, 0.9);
+        cairo_set_line_width(cr, 1.5);
+        cairo_move_to(cr, search_text_left, text_y + static_cast<int>(4.0 * zf));
+        cairo_line_to(cr, search_text_left + static_cast<int>(60.0 * zf),
+                      text_y + static_cast<int>(4.0 * zf));
+        cairo_stroke(cr);
+      }
+    }
   } else if (app.active_pane ? app.r_path_editing : app.path_editing) {
     // ── Editable location bar ──
     auto& dw_pe_buf = app.active_pane ? app.r_path_edit_buf : app.path_edit_buf;
@@ -1946,6 +2043,64 @@ void draw_hover_preview(AppState& app, cairo_t* cr) {
   cairo_text_extents(cr, info.c_str(), &te);
   cairo_move_to(cr, px + (pw - te.width) / 2, name_y + 16);
   cairo_show_text(cr, info.c_str());
+}
+
+// ── search results banner ────────────────────────────────────────
+
+void draw_search_banner(AppState& app, cairo_t* cr, int x, int y, int w) {
+  constexpr int kBannerH = 28;
+  double zf = app.zoom_pct / 100.0;
+
+  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.12);
+  cairo_rectangle(cr, x, y, w, kBannerH);
+  cairo_fill(cr);
+  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.35);
+  cairo_set_line_width(cr, 1);
+  cairo_move_to(cr, x, y + kBannerH - 0.5);
+  cairo_line_to(cr, x + w, y + kBannerH - 0.5);
+  cairo_stroke(cr);
+
+  bool rec = app.active_pane ? app.r_recursive_search_active
+                             : app.recursive_search_active;
+  const auto& q = app.active_pane ? app.r_search_query : app.search_query;
+  std::string root = rec ? home_dir() : app.cur_tab().current_path;
+  if (root.size() > 48) root = "…" + root.substr(root.size() - 47);
+
+  char count_buf[64];
+  std::snprintf(count_buf, sizeof(count_buf), "%d",
+                static_cast<int>(app.cur_tab().visible_entries.size()));
+
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                          CAIRO_FONT_WEIGHT_NORMAL);
+  cairo_set_font_size(cr, 12.0 * zf);
+  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.85);
+  std::string line = "Results for \u201C" + q + "\u201D in " + root +
+                     " \u2014 " + count_buf + " items";
+  cairo_move_to(cr, x + 12, y + kBannerH / 2 + 4);
+  cairo_show_text(cr, line.c_str());
+
+  // Clear button (right side)
+  const char* clear_label = "Clear Search";
+  cairo_text_extents_t te;
+  cairo_text_extents(cr, clear_label, &te);
+  int bw = static_cast<int>(te.width) + static_cast<int>(16.0 * zf);
+  int bh = static_cast<int>(20.0 * zf);
+  int bx = x + w - bw - 8;
+  int by = y + (kBannerH - bh) / 2;
+  app.search_banner_clear_x = bx;
+  app.search_banner_clear_w = bw;
+
+  bool hv = app.search_banner_clear_hover;
+  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b,
+                        hv ? 0.9 : 0.6);
+  draw_rounded_rect(cr, bx, by, bw, bh, 5);
+  cairo_fill(cr);
+  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.3);
+  draw_rounded_rect(cr, bx + 0.5, by + 0.5, bw - 1, bh - 1, 5);
+  cairo_stroke(cr);
+  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
+  cairo_move_to(cr, bx + 8, by + bh / 2 + 4);
+  cairo_show_text(cr, clear_label);
 }
 
 // ── sort menu dropdown ───────────────────────────────────────────

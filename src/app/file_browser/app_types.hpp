@@ -323,8 +323,37 @@ struct AppState {
   int r_search_sel_start = -1;
   int search_sel_end = -1;
   int r_search_sel_end = -1;
+  // Filter-bar query options (per pane)
+  int search_mode = 0;                 // QueryMode: 0=Plain, 1=Glob, 2=Regex, 3=Content
+  int r_search_mode = 0;
+  bool search_case_sensitive = false;
+  bool r_search_case_sensitive = false;
+  bool search_locked = false;          // keep bar + query across navigation
+  bool r_search_locked = false;
+  bool search_regex_valid = true;      // live red-invalid feedback
+  bool r_search_regex_valid = true;
+  // Search results banner (drawn under the top bar while searching)
+  int search_banner_clear_x = 0, search_banner_clear_w = 0;
+  bool search_banner_clear_hover = false;
+  bool filter_bar_open_by_default = false; // persisted preference
+  bool filter_bar_default_applied = false; // one-shot startup activation
   int search_bar_x = 0, search_bar_w = 0;
   int r_search_bar_x = 0, r_search_bar_w = 0;
+  // Filter-bar control rects (mode segment / case / lock)
+  int search_mode_x = 0, search_mode_w = 0;
+  int r_search_mode_x = 0, r_search_mode_w = 0;
+  int search_case_x = 0, search_case_w = 0;
+  int r_search_case_x = 0, r_search_case_w = 0;
+  int search_lock_x = 0, search_lock_w = 0;
+  int r_search_lock_x = 0, r_search_lock_w = 0;
+  bool search_mode_hover = false;
+  bool r_search_mode_hover = false;
+  int search_mode_hover_btn = -1; // hovered segment within the control
+  int r_search_mode_hover_btn = -1;
+  bool search_case_hover = false;
+  bool r_search_case_hover = false;
+  bool search_lock_hover = false;
+  bool r_search_lock_hover = false;
   int search_clear_x = 0, search_clear_w = 0;
   int r_search_clear_x = 0, r_search_clear_w = 0;
   int search_btn_x = 0, search_btn_w = 0;
