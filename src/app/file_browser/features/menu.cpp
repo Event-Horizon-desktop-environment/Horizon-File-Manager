@@ -1,9 +1,11 @@
 #include "../app.hpp"
 #include "app/file_browser/features/compare.hpp"
 #include "app/file_browser/features/compress.hpp"
+#include "app/file_browser/features/dirprops.hpp"
 #include "app/file_browser/features/progress.hpp"
 #include "app/file_browser/features/selection.hpp"
 #include "app/file_browser/features/tab_history.hpp"
+#include "app/file_browser/features/view_zoom.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -23,6 +25,7 @@
 #include <unistd.h>
 
 #include "config/shell_config.hpp"
+#include "base/thread/thread_dispatch.hpp"
 #include "platform/common/palette/matugen_palette.hpp"
 #include "platform/desktop/entries/desktop_xdg_ops.hpp"
 #include "dialog/file_chooser_dialog.hpp"
@@ -432,6 +435,10 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
       if (app.cur_tab().multi_selected.size() == 2 && compare_tool_available())
         actions_item.sub_items.push_back(
           AppState::menu_item(AppState::ContextMenuAction::CompareFiles, "Compare Files"));
+      if (is_dir && app.per_folder_props)
+        actions_item.sub_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::ApplyPropsToSubfolders,
+                              "Apply View Props to Subfolders..."));
       app.context_menu_items.push_back(std::move(actions_item));
     }
 
@@ -1062,6 +1069,60 @@ void execute_context_menu_action(AppState& app, int item_idx) {
     case AppState::ContextMenuAction::CompareFiles:
       compare_selected_files(app);
       return;
+
+    case AppState::ContextMenuAction::ApplyPropsToSubfolders: {
+      // Snapshot the current pane's view properties, then write them into
+      // every subfolder of the selected directory (background thread).
+      int vi = app.cur_tab().selected_idx;
+      if (vi < 0 || vi >= static_cast<int>(app.cur_tab().visible_entries.size())) return;
+      int ri2 = app.cur_tab().visible_entries[vi];
+      if (ri2 < 0 || ri2 >= static_cast<int>(app.cur_tab().entries.size())) return;
+      std::string root_dir = app.cur_tab().entries[ri2].path;
+
+      DirProps p;
+      p.has_mode = true;
+      p.mode = static_cast<int>(app.cur_tab().view_mode);
+      p.has_sort = true;
+      p.sort_field = static_cast<int>(app.cur_tab().sort_field);
+      p.sort_descending = app.cur_tab().sort_descending;
+      p.has_flags = true;
+      p.natural = app.sort_natural;
+      p.case_sensitive = app.sort_case_sensitive;
+      p.hidden_last = app.sort_hidden_last;
+      p.folders_first = app.folders_before_files;
+      p.has_group = true;
+      p.group_field = app.cur_tab().group_field;
+      p.has_zoom = true;
+      p.zoom_level = zoom_level_for_pct(app.zoom_pct);
+      p.has_hidden = true;
+      p.show_hidden = app.show_hidden;
+
+      auto prog = std::make_shared<OperationProgress>();
+      prog->type = OperationType::Extract;
+      prog->active.store(true);
+      app.op_progress = prog;
+      app.ops_panel_open = true;
+      app.operation_status = "Applying view properties...";
+      draw(app);
+
+      std::thread([&app, prog, root_dir, p]() {
+        int written =
+            apply_dir_props_recursive(root_dir, p, [&]() { return prog->cancel.load(); });
+        bool cancelled = prog->cancel.load();
+        DeferredCall::callLater([&app, cancelled, written]() {
+          if (cancelled)
+            app.operation_status = "Apply cancelled";
+          else
+            app.operation_status = "Applied view properties to " +
+                                   std::to_string(written) + " folders";
+          app.operation_status_expires_ms =
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch()).count() + 3000;
+          draw(app);
+        });
+      }).detach();
+      return;
+    }
 
     case AppState::ContextMenuAction::CopyToHome:
     case AppState::ContextMenuAction::CopyToDesktop:
@@ -1793,6 +1854,8 @@ void save_file_browser_settings(AppState& app) {
   fbs.col_perms = app.col_perms;
   fbs.col_ext = app.col_ext;
   fbs.col_target = app.col_target;
+  fbs.dynamic_view = app.dynamic_view;
+  fbs.per_folder_props = app.per_folder_props;
   fbs.show_hidden = app.show_hidden;
   fbs.favorites = app.favorites;
   fbs.window_controls_left = app.window_controls_left;
@@ -1937,6 +2000,8 @@ void reload_settings_from_config(AppState& app) {
   app.col_perms = fbs.col_perms;
   app.col_ext = fbs.col_ext;
   app.col_target = fbs.col_target;
+  app.dynamic_view = fbs.dynamic_view;
+  app.per_folder_props = fbs.per_folder_props;
   app.show_hidden = fbs.show_hidden;
   app.sort_natural = fbs.sort_natural;
   app.sort_case_sensitive = fbs.sort_case_sensitive;

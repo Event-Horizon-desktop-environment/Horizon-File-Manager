@@ -299,6 +299,8 @@ struct FileBrowserSettings {
   bool col_perms = false;
   bool col_ext = false;
   bool col_target = false;
+  bool dynamic_view = true;      // media-heavy folders auto-switch to icon view
+  bool per_folder_props = false; // read/write per-folder .directory view props
 
   // ── Sidebar favorites (bookmarked folders) ──
   std::vector<std::string> favorites;

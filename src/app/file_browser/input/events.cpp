@@ -314,6 +314,7 @@ int settings_hit_test(AppState& app, int x, int y) {
 // ── event handling ───────────────────────────────────────────────
 
 void handle_click(AppState& app, int x, int y, int button) {
+  hide_tooltip(app);
   app.pointerX = static_cast<double>(x);
   app.pointerY = static_cast<double>(y);
 
@@ -3497,6 +3498,7 @@ void handle_pointer_move(AppState& app, int x, int y) {
   if (app.cur_tab().hover_idx != prev_hover &&
       app.preview_mode != AppState::PreviewMode::Space) {
     reset_preview(app);
+    hide_tooltip(app);
     if (app.cur_tab().hover_idx >= 0) {
       int vi = app.cur_tab().hover_idx;
       if (vi >= 0 && vi < static_cast<int>(app.cur_tab().visible_entries.size())) {
@@ -3515,6 +3517,12 @@ void handle_pointer_move(AppState& app, int x, int y) {
             clock_gettime(CLOCK_MONOTONIC, &ts);
             app.preview_hover_start_ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
                                           static_cast<uint64_t>(ts.tv_nsec);
+          } else if (entry.is_dir) {
+            // Rich tooltip for entries without a live preview (folders)
+            app.tooltip_path = entry.path;
+            app.tooltip_active = false;
+            app.tooltip_show_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count() + 200;
           }
         }
       }

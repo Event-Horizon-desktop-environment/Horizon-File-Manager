@@ -197,6 +197,9 @@ struct Tab {
   // Tree view
   std::vector<TreeEntry> tree_entries;
   std::unordered_set<std::string> tree_expanded;
+
+  // Dynamic view: media-heavy folders auto-switch to icon view (one-shot)
+  bool dynamic_view_done = false;
 };
 
 struct AppState {
@@ -347,6 +350,10 @@ struct AppState {
   std::string tooltip_path;
   long long tooltip_show_ms = 0;   // steady-clock deadline
   bool tooltip_active = false;
+  // Dynamic view: media-heavy folders auto-switch to icon view
+  bool dynamic_view = true;
+  // Per-folder .directory view properties (read + write on leave)
+  bool per_folder_props = false;
   // Media-folder auto-icon cache: dir path -> first image child ("" = none)
   std::unordered_map<std::string, std::string> media_folder_child;
   int search_bar_x = 0, search_bar_w = 0;
@@ -472,6 +479,7 @@ struct AppState {
     ReopenClosedTab,
     HideFile,
     UnhideFile,
+    ApplyPropsToSubfolders,
     Separator,
   };
   struct ContextMenuItem {
@@ -652,6 +660,15 @@ struct AppState {
   wl_surface* previewPopupSurface = nullptr;
   wl_subsurface* previewPopupSub = nullptr;
   eh::wayland::ShmBuffer previewPopupBuf{};
+
+  // ── Rich tooltip (metadata card for types without a live preview) ──
+  wl_surface* tooltipPopupSurface = nullptr;
+  wl_subsurface* tooltipPopupSub = nullptr;
+  eh::wayland::ShmBuffer tooltipPopupBuf{};
+  int tooltip_x = 0, tooltip_y = 0;
+  int tooltip_w = 0, tooltip_h = 0;
+  std::string tooltip_title;
+  std::vector<std::string> tooltip_rows;
 
   // ── Info panel (F11) (Phase 8) ──
   bool info_panel_open = false;

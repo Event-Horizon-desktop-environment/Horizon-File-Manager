@@ -227,6 +227,8 @@ FileBrowserSettings read_file_browser_toml() {
     fbs.col_perms = tbl["col_perms"].value_or(false);
     fbs.col_ext = tbl["col_ext"].value_or(false);
     fbs.col_target = tbl["col_target"].value_or(false);
+    fbs.dynamic_view = tbl["dynamic_view"].value_or(true);
+    fbs.per_folder_props = tbl["per_folder_props"].value_or(false);
 
     if (auto* fav = tbl["favorites"].as_array()) {
       for (auto& el : *fav) {
@@ -268,6 +270,8 @@ bool write_file_browser_toml(const FileBrowserSettings& fbs) {
     tbl.emplace("col_perms", fbs.col_perms);
     tbl.emplace("col_ext", fbs.col_ext);
     tbl.emplace("col_target", fbs.col_target);
+    tbl.emplace("dynamic_view", fbs.dynamic_view);
+    tbl.emplace("per_folder_props", fbs.per_folder_props);
 
     toml::array favs;
     for (const auto& f : fbs.favorites) favs.push_back(f);

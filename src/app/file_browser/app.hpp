@@ -97,6 +97,10 @@ void reset_search_filters(AppState& app);
 void reset_preview(AppState& app);
 /// Check if hover preview should activate (called each loop iteration).
 void check_hover_preview(AppState& app);
+/// Hide the rich tooltip popup and clear its timer state.
+void hide_tooltip(AppState& app);
+/// Check if the rich tooltip should activate (called each loop iteration).
+void check_hover_tooltip(AppState& app);
 /// Toggle space/enter preview for the selected file.
 void toggle_space_preview(AppState& app);
 /// Activate (or switch) space preview — does not toggle off.

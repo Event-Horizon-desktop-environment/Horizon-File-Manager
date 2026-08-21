@@ -1157,6 +1157,9 @@ static bool create_window(AppState& app) {
     // ── hover preview timer check ─────────────────────────────────
     check_hover_preview(app);
 
+    // ── rich tooltip timer check ──────────────────────────────────
+    check_hover_tooltip(app);
+
     // ── folder hover-to-open during drag ──────────────────────────
     if (app.drop_hover_open_start_ms > 0 && !app.drop_hover_open_path.empty()) {
       auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(

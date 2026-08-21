@@ -1,6 +1,7 @@
 #include "../app.hpp"
 
 #include "app/file_browser/features/desktop_icon_parser.hpp"
+#include "app/file_browser/features/dirprops.hpp"
 #include "app/file_browser/features/query_match.hpp"
 #include "app/file_browser/features/recursive_search_worker.hpp"
 #include "app/file_browser/features/tab_history.hpp"
@@ -9,6 +10,7 @@
 #include "app/file_browser/features/pdf_preview.hpp"
 #include "app/file_browser/features/epub_preview.hpp"
 #include "app/file_browser/features/image_preview.hpp"
+#include "app/file_browser/features/view_zoom.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -844,6 +846,7 @@ void apply_filter(AppState& app) {
 
 void reload_dir(AppState& app) {
   reset_preview(app);
+  hide_tooltip(app);
   app.cur_tab().entries.clear();
 
   // Virtual computer view — no directory to load
@@ -860,6 +863,38 @@ void reload_dir(AppState& app) {
   // Reset view mode if coming from computer view
   if (app.cur_tab().view_mode == ViewMode::Computer) {
     app.cur_tab().view_mode = app.last_browser_view_mode;
+  }
+
+  // ── Per-folder .directory view properties ──
+  app.cur_tab().dynamic_view_done = false;
+  if (app.per_folder_props) {
+    DirProps dp;
+    if (read_dir_props(app.cur_tab().current_path, &dp)) {
+      auto& tab = app.cur_tab();
+      if (dp.has_mode && dp.mode >= 0 && dp.mode <= 4 &&
+          dp.mode != static_cast<int>(ViewMode::Computer)) {
+        tab.view_mode = static_cast<ViewMode>(dp.mode);
+        app.last_browser_view_mode = tab.view_mode;
+      }
+      if (dp.has_sort && dp.sort_field >= 0 &&
+          dp.sort_field <= static_cast<int>(SortField::LinkTarget)) {
+        tab.sort_field = static_cast<SortField>(dp.sort_field);
+        tab.sort_descending = dp.sort_descending;
+      }
+      if (dp.has_flags) {
+        app.sort_natural = dp.natural;
+        app.sort_case_sensitive = dp.case_sensitive;
+        app.sort_hidden_last = dp.hidden_last;
+        app.folders_before_files = dp.folders_first;
+      }
+      if (dp.has_group && dp.group_field >= 0 && dp.group_field <= 4) {
+        tab.group_field = dp.group_field;
+        tab.group_by_type = (dp.group_field == 1);
+      }
+      if (dp.has_zoom && dp.zoom_level >= 0 && dp.zoom_level <= 16)
+        apply_zoom_pct(app, zoom_pct_for_level(dp.zoom_level));
+      if (dp.has_hidden) app.show_hidden = dp.show_hidden;
+    }
   }
 
   DIR* dir = opendir(app.cur_tab().current_path.c_str());
@@ -1092,6 +1127,40 @@ void reload_dir(AppState& app) {
   if (stat(app.cur_tab().current_path.c_str(), &dir_st) == 0)
     app.cur_tab().dir_mtime = static_cast<int64_t>(dir_st.st_mtime);
 
+  // ── Dynamic view: media-heavy folders auto-switch to icon view once ──
+  // Mirrors Dolphin's applyDynamicView: images/videos must outweigh all other
+  // entries 2:1, with each subdirectory only counting a third.
+  {
+    bool searching = app.search_active || app.recursive_search_active ||
+                     app.r_search_active || app.r_recursive_search_active;
+    auto& tab = app.cur_tab();
+    if (app.dynamic_view && !searching && tab.view_mode == ViewMode::List &&
+        !tab.dynamic_view_done && !tab.entries.empty()) {
+      int media = 0, dirs = 0, others = 0;
+      std::string first_media;
+      for (const auto& e : tab.entries) {
+        if (!app.show_hidden && e.is_hidden) continue;
+        if (e.type == FileType::Image || e.type == FileType::Video) {
+          ++media;
+          if (first_media.empty()) first_media = e.path;
+        } else if (e.is_dir) {
+          ++dirs;
+        } else {
+          ++others;
+        }
+      }
+      double non_media_weight = static_cast<double>(others) +
+                                static_cast<double>(dirs) / 3.0;
+      if (media > 0 &&
+          static_cast<double>(media) >= 2.0 * non_media_weight) {
+        tab.view_mode = ViewMode::Grid;
+        app.last_browser_view_mode = ViewMode::Grid;
+        tab.dynamic_view_done = true;
+        app.media_folder_child[tab.current_path] = first_media;
+      }
+    }
+  }
+
   // Clear pending thumbnail queue since entry list changed
   app.thumb_pending_queue.clear();
 
@@ -1185,7 +1254,38 @@ void clear_thumb_cache(AppState& app) {
 
 // ── navigation ───────────────────────────────────────────────────
 
+// Snapshot current view state into DirProps for per-folder persistence
+static void save_dir_props_before_leave(AppState& app) {
+  if (!app.per_folder_props) return;
+  const std::string old_dir = app.cur_tab().current_path;
+  if (old_dir.empty() || old_dir == "computer://" || old_dir == "trash://" ||
+      old_dir.rfind("recent://", 0) == 0)
+    return;
+
+  DirProps p;
+  p.has_mode = true;
+  p.mode = static_cast<int>(app.cur_tab().view_mode);
+  if (p.mode == static_cast<int>(ViewMode::Computer)) return;
+  p.has_sort = true;
+  p.sort_field = static_cast<int>(app.cur_tab().sort_field);
+  p.sort_descending = app.cur_tab().sort_descending;
+  p.has_flags = true;
+  p.natural = app.sort_natural;
+  p.case_sensitive = app.sort_case_sensitive;
+  p.hidden_last = app.sort_hidden_last;
+  p.folders_first = app.folders_before_files;
+  p.has_group = true;
+  p.group_field = app.cur_tab().group_field;
+  p.has_zoom = true;
+  p.zoom_level = zoom_level_for_pct(app.zoom_pct);
+  p.has_hidden = true;
+  p.show_hidden = app.show_hidden;
+
+  write_dir_props(old_dir, p);
+}
+
 void navigate_to(AppState& app, const std::string& path) {
+  save_dir_props_before_leave(app);
   // Handle virtual "computer://" path
   if (path == "computer://") {
     if (!app.cur_tab().current_path.empty() && app.cur_tab().current_path != path) {
@@ -1245,6 +1345,7 @@ void navigate_up(AppState& app) {
 
 void navigate_back(AppState& app) {
   if (app.cur_tab().nav_history.empty()) return;
+  save_dir_props_before_leave(app);
   app.cur_tab().nav_forward.push_back(app.cur_tab().current_path);
   app.cur_tab().current_path = app.cur_tab().nav_history.back();
   app.cur_tab().nav_history.pop_back();
@@ -1256,6 +1357,7 @@ void navigate_back(AppState& app) {
 
 void navigate_forward(AppState& app) {
   if (app.cur_tab().nav_forward.empty()) return;
+  save_dir_props_before_leave(app);
   app.cur_tab().nav_history.push_back(app.cur_tab().current_path);
   app.cur_tab().current_path = app.cur_tab().nav_forward.back();
   app.cur_tab().nav_forward.pop_back();
@@ -1890,6 +1992,194 @@ void check_hover_preview(AppState& app) {
       }
     }
   }
+}
+
+// ── Rich tooltip popup subsurface helpers ─────────────────────
+
+static void destroy_tooltip_popup(AppState& app) {
+  app.tooltipPopupBuf.destroy();
+  if (app.tooltipPopupSub) {
+    wl_subsurface_destroy(app.tooltipPopupSub);
+    app.tooltipPopupSub = nullptr;
+  }
+  if (app.tooltipPopupSurface) {
+    wl_surface_attach(app.tooltipPopupSurface, nullptr, 0, 0);
+    wl_surface_commit(app.tooltipPopupSurface);
+    wl_surface_destroy(app.tooltipPopupSurface);
+    app.tooltipPopupSurface = nullptr;
+  }
+}
+
+void hide_tooltip(AppState& app) {
+  if (!app.tooltip_active && app.tooltip_path.empty() &&
+      !app.tooltipPopupSurface)
+    return;
+  destroy_tooltip_popup(app);
+  app.tooltip_active = false;
+  app.tooltip_path.clear();
+  app.tooltip_show_ms = 0;
+}
+
+static bool create_tooltip_popup(AppState& app) {
+  destroy_tooltip_popup(app);
+
+  if (app.tooltip_w < 1 || app.tooltip_h < 1) return false;
+
+  wl_surface* surf = wl_compositor_create_surface(app.wl.compositor());
+  if (!surf) return false;
+
+  wl_subsurface* sub = wl_subcompositor_get_subsurface(app.wl.subcompositor(), surf, app.surface);
+  if (!sub) {
+    wl_surface_destroy(surf);
+    return false;
+  }
+
+  int shadow_pad = 6;
+  wl_subsurface_set_position(sub, app.tooltip_x - shadow_pad, app.tooltip_y - shadow_pad);
+  wl_subsurface_place_above(sub, app.surface);
+
+  app.tooltipPopupSurface = surf;
+  app.tooltipPopupSub = sub;
+
+  wl_surface_commit(app.tooltipPopupSurface);
+  return true;
+}
+
+// Draw content is provided by draw.cpp; commit mirrors the preview popup.
+void draw_tooltip_card(AppState& app, cairo_t* cr); // defined in draw.cpp
+
+static void commit_tooltip_popup(AppState& app) {
+  if (!app.tooltipPopupSurface || !app.tooltipPopupSub) return;
+
+  int pw = app.tooltip_w;
+  int ph = app.tooltip_h;
+  if (pw < 1 || ph < 1) return;
+
+  int shadow_pad = 6;
+  int buf_w = pw + shadow_pad * 2;
+  int buf_h = ph + shadow_pad * 2;
+
+  app.tooltipPopupBuf.ensure(app.shm, eh::shell::kPopupNamespace, buf_w, buf_h);
+  cairo_t* cr = app.tooltipPopupBuf.cairo();
+  if (!cr) return;
+
+  cairo_save(cr);
+  cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+  cairo_paint(cr);
+  cairo_restore(cr);
+
+  cairo_save(cr);
+  cairo_translate(cr, -app.tooltip_x + shadow_pad, -app.tooltip_y + shadow_pad);
+  draw_tooltip_card(app, cr);
+  cairo_restore(cr);
+
+  cairo_surface_flush(app.tooltipPopupBuf.cairo_surface());
+
+  wl_surface_attach(app.tooltipPopupSurface, app.tooltipPopupBuf.wl(), 0, 0);
+  wl_surface_damage_buffer(app.tooltipPopupSurface, 0, 0, buf_w, buf_h);
+  app.tooltipPopupBuf.mark_busy();
+  wl_surface_commit(app.tooltipPopupSurface);
+  wl_display_flush(app.wl.display());
+}
+
+void check_hover_tooltip(AppState& app) {
+  if (app.preview_mode == AppState::PreviewMode::Space) return;
+  if (app.context_menu_open || app.preview_active) return;
+  if (app.tooltip_active || app.tooltip_path.empty()) return;
+
+  long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+      std::chrono::steady_clock::now().time_since_epoch()).count();
+  if (now_ms < app.tooltip_show_ms) return;
+
+  // Still hovering the armed entry?
+  int vi = app.cur_tab().hover_idx;
+  if (vi < 0 || vi >= static_cast<int>(app.cur_tab().visible_entries.size())) {
+    hide_tooltip(app);
+    return;
+  }
+  int ri = app.cur_tab().visible_entries[vi];
+  if (ri < 0 || ri >= static_cast<int>(app.cur_tab().entries.size()) ||
+      app.cur_tab().entries[ri].path != app.tooltip_path) {
+    hide_tooltip(app);
+    return;
+  }
+  const FileEntry& entry = app.cur_tab().entries[ri];
+
+  // Metadata rows
+  app.tooltip_title = entry.name;
+  app.tooltip_rows.clear();
+  auto fmt_size = [](uint64_t bytes) -> std::string {
+    if (bytes < 1024) return std::to_string(bytes) + " B";
+    if (bytes < 1024 * 1024) return std::to_string(bytes / 1024) + " KB";
+    if (bytes < 1024ull * 1024 * 1024)
+      return std::to_string(bytes / (1024 * 1024)) + " MB";
+    return std::to_string(bytes / (1024ull * 1024 * 1024)) + " GB";
+  };
+  const char* type_names[] = {"Folder", "Image", "Audio", "Video", "Text",
+                              "Markdown", "Code", "Document", "Font",
+                              "Archive", "Executable", "Web", "File"};
+  {
+    int ti = static_cast<int>(entry.type);
+    std::string row = (ti >= 0 && ti < 13) ? type_names[ti] : "File";
+    if (!entry.is_dir) row += "  \u00B7  " + fmt_size(entry.size);
+    app.tooltip_rows.push_back(row);
+  }
+  if (entry.is_dir) {
+    // Item count via bounded readdir
+    long count = 0;
+    if (DIR* d = opendir(entry.path.c_str())) {
+      while (struct dirent* de = readdir(d)) {
+        std::string n = de->d_name;
+        if (n == "." || n == "..") continue;
+        if (++count > 9999) { count = 9999; break; }
+      }
+      closedir(d);
+    }
+    app.tooltip_rows.push_back(count >= 9999 ? "9999+ items"
+                                             : std::to_string(count) + " items");
+  }
+  {
+    char mb[64]{};
+    struct tm tm_buf{};
+    time_t mt = static_cast<time_t>(entry.modified_sec);
+    if (localtime_r(&mt, &tm_buf))
+      strftime(mb, sizeof(mb), "%Y-%m-%d %H:%M", &tm_buf);
+    app.tooltip_rows.push_back(std::string("Modified ") + mb);
+  }
+  if (!entry.owner.empty())
+    app.tooltip_rows.push_back(entry.owner + ":" + entry.group + "  " +
+                               format_mode(entry.mode));
+
+  // Size: title line + rows
+  int card_w = 250;
+  int row_h = 20;
+  int pad = 12;
+  int title_h = 24;
+  int card_h = pad * 2 + title_h +
+               static_cast<int>(app.tooltip_rows.size()) * row_h;
+  app.tooltip_w = card_w;
+  app.tooltip_h = card_h;
+
+  // Position below-right of cursor, clamped to viewport
+  {
+    int mx = static_cast<int>(app.pointerX);
+    int my = static_cast<int>(app.pointerY);
+    int tx = mx + 16;
+    int ty = my + 18;
+    int content_x = app.sidebar_expanded ? app.sidebar_width : 0;
+    int content_y = app.top_bar_height + app.tab_bar_height;
+    if (tx + card_w > app.width - 10) tx = app.width - card_w - 10;
+    if (tx < content_x + 10) tx = content_x + 10;
+    if (ty + card_h > app.height - app.status_bar_height - 10)
+      ty = my - card_h - 14;
+    if (ty < content_y + 10) ty = content_y + 10;
+    app.tooltip_x = tx;
+    app.tooltip_y = ty;
+  }
+
+  if (create_tooltip_popup(app)) commit_tooltip_popup(app);
+  app.tooltip_active = true;
+  app.pendingRedraw = true;
 }
 
 // ── Preview popup subsurface helpers ──────────────────────────

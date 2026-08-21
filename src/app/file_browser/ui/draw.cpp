@@ -1860,6 +1860,73 @@ static bool is_pdf_preview(const AppState& app) {
   return is_pdf_extension(app.preview_path);
 }
 
+// Rich tooltip metadata card (folders / entries without a live preview).
+// Drawn into the tooltip subsurface at (tooltip_x, tooltip_y).
+void draw_tooltip_card(AppState& app, cairo_t* cr) {
+  int px = app.tooltip_x;
+  int py = app.tooltip_y;
+  int pw = app.tooltip_w;
+  int ph = app.tooltip_h;
+  int radius = 8;
+
+  // Frame (same style as the hover preview popup)
+  for (int s = 3; s >= 0; --s) {
+    double a = 0.08 * (1.0 - s / 4.0);
+    cairo_set_source_rgba(cr, 0, 0, 0, a);
+    draw_rounded_rect(cr, px + s * 2, py + s * 2, pw, ph, radius);
+    cairo_fill(cr);
+  }
+  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, 1.0);
+  draw_rounded_rect(cr, px, py, pw, ph, radius);
+  cairo_fill(cr);
+  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
+  cairo_set_line_width(cr, 1);
+  draw_rounded_rect(cr, px + 0.5, py + 0.5, pw - 1, ph - 1, radius - 0.5);
+  cairo_stroke(cr);
+
+  int pad = 12;
+  int y = py + pad + 6;
+
+  // Title
+  std::string title = app.tooltip_title;
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+  cairo_set_font_size(cr, 12);
+  cairo_text_extents_t te;
+  cairo_text_extents(cr, title.c_str(), &te);
+  if (te.width > pw - pad * 2) {
+    while (title.size() > 4 &&
+           (cairo_text_extents(cr, (title + "...").c_str(), &te), te.width > pw - pad * 2)) {
+      title.pop_back();
+    }
+    title += "...";
+    cairo_text_extents(cr, title.c_str(), &te);
+  }
+  cairo_set_source_rgba(cr, app.text_r * 0.9, app.text_g * 0.9, app.text_b * 0.9, 0.95);
+  cairo_move_to(cr, px + pad, y);
+  cairo_show_text(cr, title.c_str());
+  y += 24;
+
+  // Metadata rows
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+  cairo_set_font_size(cr, 11);
+  for (const auto& row : app.tooltip_rows) {
+    std::string line = row;
+    cairo_text_extents(cr, line.c_str(), &te);
+    if (te.width > pw - pad * 2) {
+      while (line.size() > 4 &&
+             (cairo_text_extents(cr, (line + "...").c_str(), &te), te.width > pw - pad * 2)) {
+        line.pop_back();
+      }
+      line += "...";
+    }
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                          app.text_secondary_b, 0.95);
+    cairo_move_to(cr, px + pad, y);
+    cairo_show_text(cr, line.c_str());
+    y += 20;
+  }
+}
+
 void draw_hover_preview(AppState& app, cairo_t* cr) {
   int px = app.preview_x;
   int py = app.preview_y;
