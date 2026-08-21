@@ -70,6 +70,9 @@ private:
   static void ptr_axis_discrete(void*, wl_pointer*, uint32_t, int32_t) {}
   static void ptr_axis_value120(void*, wl_pointer*, uint32_t, int32_t) {}
   static void ptr_axis_relative_direction(void*, wl_pointer*, uint32_t, uint32_t) {}
+#ifdef WL_POINTER_WARP_SINCE_VERSION
+  static void ptr_warp(void*, wl_pointer*, wl_fixed_t, wl_fixed_t) {}
+#endif
   static constexpr wl_pointer_listener kPointerListener_ = {
       .enter = ptr_enter,
       .leave = ptr_leave,
@@ -82,6 +85,9 @@ private:
       .axis_discrete = ptr_axis_discrete,
       .axis_value120 = ptr_axis_value120,
       .axis_relative_direction = ptr_axis_relative_direction,
+#ifdef WL_POINTER_WARP_SINCE_VERSION
+      .warp = ptr_warp,
+#endif
   };
 
   static void kb_keymap(void* data, wl_keyboard*, uint32_t format, int32_t fd, uint32_t size);

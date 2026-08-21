@@ -209,6 +209,9 @@ void DialogBase::thread_main_() {
     .axis_discrete = [](void*, wl_pointer*, uint32_t, int32_t) {},
     .axis_value120 = [](void*, wl_pointer*, uint32_t, int32_t) {},
     .axis_relative_direction = [](void*, wl_pointer*, uint32_t, uint32_t) {},
+#ifdef WL_POINTER_WARP_SINCE_VERSION
+    .warp = [](void*, wl_pointer*, wl_fixed_t, wl_fixed_t) {},
+#endif
   };
   wl_pointer_add_listener(pointer, &ptr_listener, &is);
 

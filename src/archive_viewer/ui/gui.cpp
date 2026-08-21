@@ -217,6 +217,9 @@ static void pointer_axis_stop(void*, wl_pointer*, uint32_t, uint32_t) {}
 static void pointer_axis_discrete(void*, wl_pointer*, uint32_t, int32_t) {}
 static void pointer_axis_value120(void*, wl_pointer*, uint32_t, int32_t) {}
 static void pointer_axis_relative_direction(void*, wl_pointer*, uint32_t, uint32_t) {}
+#ifdef WL_POINTER_WARP_SINCE_VERSION
+static void pointer_warp(void*, wl_pointer*, wl_fixed_t, wl_fixed_t) {}
+#endif
 
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wmissing-field-initializers"
@@ -224,7 +227,11 @@ static const wl_pointer_listener pointer_listener = {
     pointer_enter, pointer_leave, pointer_motion,
     pointer_button, pointer_axis,
     pointer_frame, pointer_axis_source, pointer_axis_stop, pointer_axis_discrete,
-    pointer_axis_value120, pointer_axis_relative_direction};
+    pointer_axis_value120, pointer_axis_relative_direction,
+#ifdef WL_POINTER_WARP_SINCE_VERSION
+    pointer_warp,
+#endif
+};
 #pragma GCC diagnostic pop
 #pragma GCC diagnostic pop
 
