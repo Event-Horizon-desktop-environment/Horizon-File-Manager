@@ -1700,7 +1700,8 @@ void draw_hover_preview(AppState& app, cairo_t* cr) {
     }
   }
 
-  bool image_preview = (type == FileType::Image && app.preview_thumb);
+  bool fill_preview = ((type == FileType::Image || type == FileType::Video) &&
+                       app.preview_thumb);
 
   // ── Context‑menu style popup (solid fill + outline) ──
   double frame_alpha = app.preview_opacity_pct / 100.0;
@@ -1750,7 +1751,7 @@ void draw_hover_preview(AppState& app, cairo_t* cr) {
     int tw = cairo_image_surface_get_width(app.preview_thumb);
     int th = cairo_image_surface_get_height(app.preview_thumb);
 
-    if (image_preview && tw > 0 && th > 0) {
+    if (fill_preview && tw > 0 && th > 0) {
       int margin = 12;
       int bottom_h = 50;
       int img_x = px + margin;
@@ -3019,6 +3020,221 @@ void draw_confirm_dialog(AppState& app, cairo_t* cr) {
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.12);
     draw_rounded_rect(cr, hx, btn_y, btn_w, btn_h, 6);
     cairo_fill(cr);
+  }
+}
+
+// ── Overwrite/merge conflict dialog (Dolphin-style) ─────────────
+
+void draw_conflict_dialog(AppState& app, cairo_t* cr) {
+  if (app.conflict_queue.empty()) return;
+  const auto& c = app.conflict_queue.front();
+
+  int w = app.width;
+  int h = app.height;
+  int dlg_w = 520;
+  int dlg_h = 320;
+  int dlg_x = (w - dlg_w) / 2;
+  int dlg_y = (h - dlg_h) / 2;
+  double sa = app.surface_opacity_pct / 100.0;
+
+  // Backdrop
+  cairo_set_source_rgba(cr, 0, 0, 0, 0.40);
+  cairo_rectangle(cr, 0, 0, w, h);
+  cairo_fill(cr);
+
+  // Card
+  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, sa);
+  draw_rounded_rect(cr, dlg_x, dlg_y, dlg_w, dlg_h, 12);
+  cairo_fill(cr);
+  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.30);
+  cairo_set_line_width(cr, 1);
+  draw_rounded_rect(cr, dlg_x + 0.5, dlg_y + 0.5, dlg_w - 1, dlg_h - 1, 11.5);
+  cairo_stroke(cr);
+
+  std::string name = fs::path(c.src).filename().string();
+  bool merge = c.src_is_dir && c.dest_is_dir;
+
+  // Title
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+  cairo_set_font_size(cr, 15);
+  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+  {
+    std::string title = merge ? "Merge folder \"" + name + "\"?" :
+                        (c.src_is_dir ? "Replace folder \"" + name + "\"?"
+                                      : "Replace file \"" + name + "\"?");
+    cairo_move_to(cr, dlg_x + 22, dlg_y + 32);
+    cairo_show_text(cr, title.c_str());
+  }
+
+  // Subtitle
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+  cairo_set_font_size(cr, 12);
+  cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
+  {
+    const char* sub = merge
+        ? "The destination contains a folder with the same name. Files with the same name will be replaced."
+        : (c.src_is_dir ? "The destination contains a file where the source has a folder."
+                        : "The destination contains a file with the same name. Overwriting will replace its contents.");
+    cairo_move_to(cr, dlg_x + 22, dlg_y + 52);
+    cairo_show_text(cr, sub);
+  }
+
+  // ── Source vs Destination columns ──
+  auto fmt_time = [](int64_t sec) {
+    if (sec == 0) return std::string("\u2014");
+    time_t t = static_cast<time_t>(sec);
+    struct tm* tm_local = localtime(&t);
+    char buf[64];
+    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", tm_local);
+    return std::string(buf);
+  };
+  auto fmt_size = [](uint64_t sz, bool is_dir) {
+    if (is_dir) return std::string("Folder");
+    char buf[64];
+    double v = static_cast<double>(sz);
+    const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+    int ui = 0;
+    while (v >= 1024.0 && ui < 4) { v /= 1024.0; ++ui; }
+    if (ui == 0) snprintf(buf, sizeof(buf), "%llu B", (unsigned long long)sz);
+    else snprintf(buf, sizeof(buf), "%.1f %s", v, units[ui]);
+    return std::string(buf);
+  };
+  auto draw_column = [&](int x, int y, int col_w, const char* header,
+                         const std::string& p, bool is_dir,
+                         uint64_t sz, int64_t mtime) {
+    // Header pill
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+    cairo_set_font_size(cr, 11);
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
+    cairo_text_extents_t te;
+    cairo_text_extents(cr, header, &te);
+    cairo_move_to(cr, x + (col_w - te.x_advance) / 2, y);
+    cairo_show_text(cr, header);
+
+    // Icon
+    int icon_sz = 44;
+    const auto* ic = app.icons.tray_icon(is_dir ? "folder"
+                                        : icon_name_for_file_type(FileType::File, &p));
+    if (ic && ic->surface) {
+      double iw = static_cast<double>(ic->width);
+      double ih = static_cast<double>(ic->height);
+      if (iw > 0 && ih > 0) {
+        double scale = icon_sz / std::max(1.0, std::max(iw, ih));
+        cairo_save(cr);
+        cairo_translate(cr, x + (col_w - icon_sz) / 2, y + 8);
+        cairo_scale(cr, scale, scale);
+        cairo_set_source_surface(cr, ic->surface,
+                                 (icon_sz / scale - iw) / 2,
+                                 (icon_sz / scale - ih) / 2);
+        cairo_paint(cr);
+        cairo_restore(cr);
+      }
+    }
+
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 12);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    std::string line1 = fmt_size(sz, is_dir);
+    cairo_text_extents(cr, line1.c_str(), &te);
+    cairo_move_to(cr, x + (col_w - te.x_advance) / 2, y + icon_sz + 28);
+    cairo_show_text(cr, line1.c_str());
+
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
+    std::string line2 = fmt_time(mtime);
+    cairo_text_extents(cr, line2.c_str(), &te);
+    cairo_move_to(cr, x + (col_w - te.x_advance) / 2, y + icon_sz + 46);
+    cairo_show_text(cr, line2.c_str());
+  };
+
+  int col_top = dlg_y + 68;
+  int col_w = 200;
+  draw_column(dlg_x + 22, col_top, col_w, "SOURCE", c.src, c.src_is_dir, c.src_size, c.src_mtime);
+  draw_column(dlg_x + dlg_w - 22 - col_w, col_top, col_w, "DESTINATION",
+              c.dest, c.dest_is_dir, c.dest_size, c.dest_mtime);
+  // Divider between columns
+  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
+  cairo_set_line_width(cr, 1);
+  cairo_move_to(cr, dlg_x + dlg_w / 2 + 0.5, col_top + 4);
+  cairo_line_to(cr, dlg_x + dlg_w / 2 + 0.5, col_top + 92);
+  cairo_stroke(cr);
+
+  // ── Apply-to-all checkbox (only when more than one conflict remains) ──
+  int check_y = dlg_y + dlg_h - 96;
+  if (app.conflict_queue.size() > 1) {
+    int box_sz = 16;
+    int box_x = dlg_x + 22;
+    app.conflict_check_rect[0] = box_x;
+    app.conflict_check_rect[1] = check_y;
+    app.conflict_check_rect[2] = box_sz + 220;
+    app.conflict_check_rect[3] = box_sz;
+    bool hov = app.conflict_check_hover ||
+               (app.pointerX >= box_x && app.pointerX < box_x + box_sz + 220 &&
+                app.pointerY >= check_y && app.pointerY < check_y + box_sz);
+    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b,
+                          hov ? 0.55 : 0.35);
+    cairo_set_line_width(cr, 1.5);
+    draw_rounded_rect(cr, box_x, check_y, box_sz, box_sz, 4);
+    cairo_stroke(cr);
+    if (app.conflict_apply_all) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.9);
+      draw_rounded_rect(cr, box_x, check_y, box_sz, box_sz, 4);
+      cairo_fill(cr);
+      // Checkmark
+      cairo_set_source_rgba(cr, 1, 1, 1, 0.95);
+      cairo_set_line_width(cr, 2);
+      cairo_move_to(cr, box_x + 4, check_y + 8);
+      cairo_line_to(cr, box_x + 7, check_y + 11);
+      cairo_line_to(cr, box_x + 12, check_y + 5);
+      cairo_stroke(cr);
+    }
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 12);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
+    std::string label = "Apply this action to all " +
+                        std::to_string(app.conflict_queue.size() - 1) + " remaining";
+    cairo_move_to(cr, box_x + box_sz + 8, check_y + 13);
+    cairo_show_text(cr, label.c_str());
+  } else {
+    app.conflict_check_rect[0] = 0; app.conflict_check_rect[1] = -100;
+    app.conflict_check_rect[2] = 0; app.conflict_check_rect[3] = 0;
+  }
+
+  // ── Buttons: Skip | Cancel | Overwrite(Merge) ──
+  int btn_y = dlg_y + dlg_h - 54;
+  int btn_h = 34;
+  int btn_w = 104;
+  int b2_x = dlg_x + dlg_w - 22 - btn_w;                    // Overwrite/Merge
+  int b1_x = b2_x - 8 - btn_w;                              // Cancel
+  int b0_x = b1_x - 8 - btn_w;                              // Skip
+  double rects[3][4] = {
+    {static_cast<double>(b0_x), static_cast<double>(btn_y), static_cast<double>(btn_w), static_cast<double>(btn_h)},
+    {static_cast<double>(b1_x), static_cast<double>(btn_y), static_cast<double>(btn_w), static_cast<double>(btn_h)},
+    {static_cast<double>(b2_x), static_cast<double>(btn_y), static_cast<double>(btn_w), static_cast<double>(btn_h)},
+  };
+  for (int b = 0; b < 3; ++b)
+    for (int k = 0; k < 4; ++k) app.conflict_btn_rects[b][k] = rects[b][k];
+
+  const char* labels[3] = {"Skip", "Cancel", merge ? "Merge" : "Overwrite"};
+  int centers[3] = {b0_x, b1_x, b2_x};
+  for (int b = 0; b < 3; ++b) {
+    bool primary = (b == 2);
+    bool hov = (app.pointerX >= rects[b][0] && app.pointerX < rects[b][0] + rects[b][2] &&
+                app.pointerY >= rects[b][1] && app.pointerY < rects[b][1] + rects[b][3]);
+    if (primary) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
+                            hov ? 1.0 : 0.90);
+    } else {
+      cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, hov ? 0.85 : 0.6);
+    }
+    draw_rounded_rect(cr, centers[b], btn_y, btn_w, btn_h, 6);
+    cairo_fill(cr);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 13);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_text_extents_t te;
+    cairo_text_extents(cr, labels[b], &te);
+    cairo_move_to(cr, centers[b] + (btn_w - te.x_advance) / 2, btn_y + btn_h / 2 + 4);
+    cairo_show_text(cr, labels[b]);
   }
 }
 
@@ -5176,7 +5392,9 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
   cairo_fill(cr);
 
   // ── Header: centered icon + centered name + centered type ──
-  auto icon = app.icons.tray_icon(p.icon_name.empty() ? (p.is_dir ? "folder" : "text-x-generic") : p.icon_name);
+  auto icon = app.icons.tray_icon(p.multi ? "folder-multiple"
+           : (p.icon_name.empty() ? (p.is_dir ? "folder" : "text-x-generic") : p.icon_name));
+  if (!icon && p.multi) icon = app.icons.tray_icon("text-x-generic");
   if (icon && icon->surface) {
     double iw = icon->width, ih = icon->height;
     if (iw > 0 && ih > 0) {
@@ -5211,15 +5429,16 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
   cairo_move_to(cr, cx + (card_w - te.x_advance) / 2, name_y);
   cairo_show_text(cr, disp_name.c_str());
 
-  // MIME type (centered, secondary)
+  // Type line (centered, secondary) — mime type, or selection summary for multi
   int type_y = name_y + 20;
-  if (!p.mime_type.empty()) {
+  std::string type_line = p.multi ? std::string("Multiple selection") : p.mime_type;
+  if (!type_line.empty()) {
     cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 0.55);
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, 12);
-    cairo_text_extents(cr, p.mime_type.c_str(), &te);
+    cairo_text_extents(cr, type_line.c_str(), &te);
     cairo_move_to(cr, cx + (card_w - te.x_advance) / 2, type_y);
-    cairo_show_text(cr, p.mime_type.c_str());
+    cairo_show_text(cr, type_line.c_str());
   }
 
   // Close X (top right)
@@ -5244,7 +5463,7 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
   cairo_stroke(cr);
 
   // Header separator
-  int header_sep_y = type_y + (p.mime_type.empty() ? 12 : 16);
+  int header_sep_y = type_y + (type_line.empty() ? 12 : 16);
   draw_separator(cr, cx + pad, header_sep_y, card_w - 2 * pad);
 
   // ── Tabs ──
@@ -5346,6 +5565,35 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
 
   // ── Basic tab ──
   if (content_tab == 0) {
+  if (p.multi) {
+    // Combined summary for a multi-selection
+    std::string items_str;
+    if (p.dir_count > 0 && p.file_count > 0)
+      items_str = std::to_string(p.dir_count) + (p.dir_count == 1 ? " folder, " : " folders, ") +
+                  std::to_string(p.file_count) + (p.file_count == 1 ? " file" : " files");
+    else if (p.dir_count > 0)
+      items_str = std::to_string(p.dir_count) + (p.dir_count == 1 ? " folder" : " folders");
+    else
+      items_str = std::to_string(p.file_count) + (p.file_count == 1 ? " file" : " files");
+    draw_info_row("Items", items_str);
+
+    char sz[64];
+    double sz_val = static_cast<double>(p.size);
+    const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+    int ui = 0;
+    while (sz_val >= 1024.0 && ui < 4) { sz_val /= 1024.0; ++ui; }
+    if (ui == 0)
+      snprintf(sz, sizeof(sz), "%llu B", (unsigned long long)p.size);
+    else
+      snprintf(sz, sizeof(sz), "%.1f %s (%llu bytes)", sz_val, units[ui], (unsigned long long)p.size);
+    draw_info_row("Size", sz);
+
+    if (!p.location.empty()) draw_info_row("Location", p.location);
+
+    draw_section("Ownership");
+    draw_info_row("Owner", p.owner_name);
+    draw_info_row("Group", p.group_name);
+  } else {
     draw_info_row("Name", p.name);
     if (!p.mime_type.empty()) draw_info_row("Type", p.mime_type);
     if (p.is_dir) {
@@ -5400,6 +5648,7 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
     draw_section("Ownership");
     draw_info_row("Owner", p.owner_name);
     draw_info_row("Group", p.group_name);
+  }
 
     if (p.can_be_executable) {
       ly += 4;

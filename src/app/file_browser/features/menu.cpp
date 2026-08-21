@@ -9,6 +9,7 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <unordered_set>
 #include <vector>
@@ -35,6 +36,248 @@ static std::uint64_t menu_expiry_3s() {
 }
 
 namespace eh::file_browser {
+
+// ── Overwrite/merge conflict resolution (Dolphin-style) ──────────
+
+static void conflict_cleanup(AppState& app) {
+  app.conflict_open = false;
+  app.conflict_srcs.clear();
+  app.conflict_queue.clear();
+  app.conflict_overwrite.clear();
+  app.conflict_skipped.clear();
+  app.conflict_dst_names.clear();
+  app.conflict_dest_dir.clear();
+  app.conflict_is_move = false;
+  app.conflict_success_toast.clear();
+  app.conflict_clear_cut = false;
+  app.conflict_apply_all = false;
+  app.conflict_hover_btn = -1;
+}
+
+// Launch the async copy/move for everything that wasn't skipped
+static void start_planned_fs_operation(AppState& app) {
+  std::vector<std::string> final_srcs;
+  std::vector<std::string> dst_names;
+  for (size_t i = 0; i < app.conflict_srcs.size(); ++i) {
+    const auto& s = app.conflict_srcs[i];
+    if (std::find(app.conflict_skipped.begin(), app.conflict_skipped.end(), s)
+        != app.conflict_skipped.end())
+      continue;
+    final_srcs.push_back(s);
+    dst_names.push_back(i < app.conflict_dst_names.size() ? app.conflict_dst_names[i] : "");
+  }
+  if (final_srcs.empty()) {
+    conflict_cleanup(app);
+    return;
+  }
+
+  // Undo record with the actual destination paths
+  {
+    AppState::UndoRecord rec{app.conflict_is_move ? AppState::UndoRecord::Type::PasteCut
+                                                  : AppState::UndoRecord::Type::PasteCopy, {}, {}};
+    fs::path dest(app.conflict_dest_dir);
+    for (size_t i = 0; i < final_srcs.size(); ++i) {
+      std::string name = dst_names[i].empty()
+          ? fs::path(final_srcs[i]).filename().string()
+          : dst_names[i];
+      if (app.conflict_is_move) rec.paths_a.push_back(final_srcs[i]);
+      rec.paths_b.push_back((dest / name).string());
+    }
+    app.redo_stack.clear();
+    app.undo_stack.push_back(std::move(rec));
+    if (app.undo_stack.size() > app.kMaxUndo)
+      app.undo_stack.erase(app.undo_stack.begin());
+  }
+
+  bool is_move = app.conflict_is_move;
+  bool clear_cut = app.conflict_clear_cut;
+  std::string toast = app.conflict_success_toast;
+  auto prog = std::make_shared<OperationProgress>();
+  prog->type = is_move ? OperationType::Move : OperationType::Copy;
+  start_async_op(final_srcs, app.conflict_dest_dir, is_move, prog,
+      [&app, is_move, clear_cut, toast](bool cancelled) {
+        if (!cancelled) {
+          if (clear_cut) app.cut_paths.clear();
+          app.operation_status = toast;
+          app.operation_status_expires_ms = menu_expiry_3s();
+        }
+        app.op_progress.reset();
+        conflict_cleanup(app);
+        reload_dir(app);
+        draw(app);
+      },
+      app.conflict_overwrite, dst_names);
+  app.op_progress = prog;
+  app.ops_panel_open = true;
+}
+
+void request_fs_operation(AppState& app, const std::vector<std::string>& srcs,
+                          const std::string& dest_dir, bool is_move,
+                          const std::string& success_toast, bool clear_cut) {
+  conflict_cleanup(app);
+  app.conflict_dest_dir = dest_dir;
+  app.conflict_is_move = is_move;
+  app.conflict_success_toast = success_toast;
+  app.conflict_clear_cut = clear_cut;
+
+  std::error_code ec;
+  fs::path dest(dest_dir);
+  for (const auto& src : srcs) {
+    fs::path sp(src);
+    if (!fs::exists(sp, ec)) continue;
+
+    fs::path dp = dest / sp.filename();
+
+    // Dropping/pasting an item onto itself — duplicate under a unique name
+    if (fs::exists(dp, ec) && fs::equivalent(sp, dp, ec)) {
+      int n = 2;
+      fs::path unique = dp;
+      while (fs::exists(unique, ec))
+        unique = dest / (sp.stem().string() + " (" + std::to_string(n++) + ")" +
+                         sp.extension().string());
+      app.conflict_srcs.push_back(src);
+      app.conflict_dst_names.push_back(unique.filename().string());
+      continue;
+    }
+
+    app.conflict_srcs.push_back(src);
+
+    if (fs::exists(dp, ec)) {
+      AppState::ConflictEntry c;
+      c.src = src;
+      c.dest = dp.string();
+      c.src_is_dir = fs::is_directory(sp, ec);
+      c.dest_is_dir = fs::is_directory(dp, ec);
+      struct stat st{};
+      if (stat(src.c_str(), &st) == 0) {
+        c.src_size = S_ISDIR(st.st_mode) ? 0 : static_cast<uint64_t>(st.st_size);
+        c.src_mtime = st.st_mtime;
+      }
+      if (stat(c.dest.c_str(), &st) == 0) {
+        c.dest_size = S_ISDIR(st.st_mode) ? 0 : static_cast<uint64_t>(st.st_size);
+        c.dest_mtime = st.st_mtime;
+      }
+      app.conflict_queue.push_back(std::move(c));
+      app.conflict_dst_names.push_back("");
+    } else {
+      app.conflict_dst_names.push_back("");
+    }
+  }
+
+  if (app.conflict_queue.empty()) {
+    start_planned_fs_operation(app);
+    draw(app);
+    return;
+  }
+  app.conflict_open = true;
+  app.conflict_apply_all = false;
+  draw(app);
+}
+
+// ── Paste: file URIs if present, otherwise save clipboard image data ──
+
+void paste_clipboard(AppState& app) {
+  auto cf = app.clipboard.read_files(app.wl.display());
+  if (!cf.paths.empty()) {
+    request_fs_operation(app, cf.paths, app.cur_tab().current_path, cf.is_cut,
+                         cf.is_cut ? "Moved" : "Pasted", cf.is_cut);
+    return;
+  }
+
+  // No files on the clipboard — try to save image data (e.g. a screenshot)
+  std::string mime;
+  std::string data = app.clipboard.read_image(&mime, app.wl.display());
+  if (data.empty()) {
+    draw(app);
+    return;
+  }
+
+  std::string ext = ".png";
+  if (mime.find("jpeg") != std::string::npos || mime.find("jpg") != std::string::npos) ext = ".jpg";
+  else if (mime.find("webp") != std::string::npos) ext = ".webp";
+  else if (mime.find("gif") != std::string::npos) ext = ".gif";
+  else if (mime.find("bmp") != std::string::npos) ext = ".bmp";
+  else if (mime.find("tiff") != std::string::npos) ext = ".tif";
+
+  char ts[32]{};
+  std::time_t t = std::time(nullptr);
+  std::tm lt{};
+  localtime_r(&t, &lt);
+  std::strftime(ts, sizeof(ts), "%Y-%m-%d %H-%M-%S", &lt);
+
+  const fs::path dir(app.cur_tab().current_path);
+  fs::path candidate = dir / ("Pasted Image " + std::string(ts) + ext);
+  int n = 2;
+  std::error_code ec;
+  while (fs::exists(candidate, ec))
+    candidate = dir / ("Pasted Image " + std::string(ts) + " (" + std::to_string(n++) + ")" + ext);
+
+  {
+    std::ofstream out(candidate, std::ios::binary | std::ios::trunc);
+    if (!out) {
+      draw(app);
+      return;
+    }
+    out.write(data.data(), static_cast<std::streamsize>(data.size()));
+    out.close();
+    if (!out) {
+      fs::remove(candidate, ec);
+      draw(app);
+      return;
+    }
+  }
+
+  AppState::UndoRecord rec{AppState::UndoRecord::Type::NewFile, {}, {}};
+  rec.paths_b.push_back(candidate.string());
+  app.redo_stack.clear();
+  app.undo_stack.push_back(std::move(rec));
+  if (app.undo_stack.size() > app.kMaxUndo)
+    app.undo_stack.erase(app.undo_stack.begin());
+
+  app.operation_status = "Pasted";
+  app.operation_status_expires_ms = menu_expiry_3s();
+  reload_dir(app);
+  draw(app);
+}
+
+void resolve_conflict_choice(AppState& app, int choice) {
+  if (!app.conflict_open || app.conflict_queue.empty()) return;
+
+  if (choice == 2) {  // Cancel
+    conflict_cleanup(app);
+    draw(app);
+    return;
+  }
+
+  const AppState::ConflictEntry cur = app.conflict_queue.front();
+  bool apply_all = app.conflict_apply_all;
+
+  if (choice == 0) {  // Overwrite / Merge
+    if (apply_all) {
+      for (const auto& c : app.conflict_queue)
+        app.conflict_overwrite.push_back(c.src);
+      app.conflict_queue.clear();
+    } else {
+      app.conflict_overwrite.push_back(cur.src);
+      app.conflict_queue.erase(app.conflict_queue.begin());
+    }
+  } else {  // Skip
+    if (apply_all) {
+      for (const auto& c : app.conflict_queue)
+        app.conflict_skipped.push_back(c.src);
+      app.conflict_queue.clear();
+    } else {
+      app.conflict_skipped.push_back(cur.src);
+      app.conflict_queue.erase(app.conflict_queue.begin());
+    }
+  }
+
+  if (app.conflict_queue.empty()) {
+    app.conflict_open = false;
+    start_planned_fs_operation(app);
+  }
+  draw(app);
+}
 
 // ── context menu ─────────────────────────────────────────────────
 
@@ -341,57 +584,7 @@ void execute_context_menu_action(AppState& app, int item_idx) {
   }
 
   if (action == AppState::ContextMenuAction::Paste) {
-    auto cf = app.clipboard.read_files(app.wl.display());
-    if (!cf.paths.empty()) {
-      std::error_code ec;
-      fs::path dest(app.cur_tab().current_path);
-      AppState::UndoRecord rec{cf.is_cut ? AppState::UndoRecord::Type::PasteCut
-                                         : AppState::UndoRecord::Type::PasteCopy, {}, {}};
-      if (cf.is_cut) rec.paths_a = cf.paths;
-
-      // Resolve target paths first (synchronous)
-      std::vector<std::string> src_paths;
-      std::vector<std::string> dst_paths;
-      for (const auto& src : cf.paths) {
-        fs::path sp(src);
-        if (!fs::exists(sp, ec)) continue;
-        fs::path target = dest / sp.filename();
-        int n = 2;
-        while (fs::exists(target, ec)) {
-          target = dest / (sp.stem().string() + " (" + std::to_string(n) + ")" + sp.extension().string());
-          n++;
-        }
-        src_paths.push_back(src);
-        dst_paths.push_back(target.string());
-      }
-
-      // Push undo record with resolved paths
-      if (!dst_paths.empty()) {
-        rec.paths_b = dst_paths;
-        app.redo_stack.clear();
-        app.undo_stack.push_back(std::move(rec));
-        if (app.undo_stack.size() > app.kMaxUndo)
-          app.undo_stack.erase(app.undo_stack.begin());
-      }
-
-      // Start async background copy/move
-      bool is_cut = cf.is_cut;
-      auto prog = std::make_shared<OperationProgress>();
-      prog->type = is_cut ? OperationType::Move : OperationType::Copy;
-      start_async_op(src_paths, dest.string(), is_cut, prog,
-          [&app, is_cut](bool cancelled) {
-            if (!cancelled) {
-              app.operation_status = is_cut ? "Moved" : "Pasted";
-              app.operation_status_expires_ms = menu_expiry_3s();
-            }
-            app.op_progress.reset();
-            reload_dir(app);
-            draw(app);
-          });
-      app.op_progress = prog;
-      app.ops_panel_open = true;
-    }
-    draw(app);
+    paste_clipboard(app);
     return;
   }
 
@@ -737,32 +930,7 @@ void execute_context_menu_action(AppState& app, int item_idx) {
           if (r >= 0 && r < static_cast<int>(app.cur_tab().entries.size()))
             src_paths.push_back(app.cur_tab().entries[r].path);
         }
-
-        // Push undo record
-        {
-          AppState::UndoRecord rec{AppState::UndoRecord::Type::PasteCopy, {}, {}};
-          for (const auto& src : src_paths)
-            rec.paths_b.push_back((fs::path(dest) / fs::path(src).filename()).string());
-          app.redo_stack.clear();
-          app.undo_stack.push_back(std::move(rec));
-          if (app.undo_stack.size() > app.kMaxUndo)
-            app.undo_stack.erase(app.undo_stack.begin());
-        }
-
-        auto prog = std::make_shared<OperationProgress>();
-        prog->type = OperationType::Copy;
-        start_async_op(src_paths, dest, false, prog,
-            [&app](bool cancelled) {
-              if (!cancelled) {
-                app.operation_status = "Copied to destination";
-                app.operation_status_expires_ms = menu_expiry_3s();
-              }
-              app.op_progress.reset();
-              reload_dir(app);
-              draw(app);
-            });
-        app.op_progress = prog;
-        app.ops_panel_open = true;
+        request_fs_operation(app, src_paths, dest, false, "Copied to destination", false);
       }
       draw(app);
       return;
@@ -779,34 +947,7 @@ void execute_context_menu_action(AppState& app, int item_idx) {
           if (r >= 0 && r < static_cast<int>(app.cur_tab().entries.size()))
             src_paths.push_back(app.cur_tab().entries[r].path);
         }
-
-        // Push undo record
-        {
-          AppState::UndoRecord rec{AppState::UndoRecord::Type::PasteCut, {}, {}};
-          for (const auto& src : src_paths) {
-            rec.paths_a.push_back(src);
-            rec.paths_b.push_back((fs::path(dest) / fs::path(src).filename()).string());
-          }
-          app.redo_stack.clear();
-          app.undo_stack.push_back(std::move(rec));
-          if (app.undo_stack.size() > app.kMaxUndo)
-            app.undo_stack.erase(app.undo_stack.begin());
-        }
-
-        auto prog = std::make_shared<OperationProgress>();
-        prog->type = OperationType::Move;
-        start_async_op(src_paths, dest, true, prog,
-            [&app](bool cancelled) {
-              if (!cancelled) {
-                app.operation_status = "Moved to destination";
-                app.operation_status_expires_ms = menu_expiry_3s();
-              }
-              app.op_progress.reset();
-              reload_dir(app);
-              draw(app);
-            });
-        app.op_progress = prog;
-        app.ops_panel_open = true;
+        request_fs_operation(app, src_paths, dest, true, "Moved to destination", false);
       }
       draw(app);
       return;
@@ -1117,9 +1258,22 @@ void execute_context_menu_action(AppState& app, int item_idx) {
       app.operation_status_expires_ms = menu_expiry_3s();
       break;
     }
-    case AppState::ContextMenuAction::Properties:
-      show_properties(app, entry.path, entry.icon_name);
+    case AppState::ContextMenuAction::Properties: {
+      bool is_multi = app.cur_tab().multi_selected.size() > 1;
+      if (is_multi) {
+        std::vector<std::string> paths;
+        for (int vis_idx : app.cur_tab().multi_selected) {
+          if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
+          int r = app.cur_tab().visible_entries[vis_idx];
+          if (r < 0 || r >= static_cast<int>(app.cur_tab().entries.size())) continue;
+          paths.push_back(app.cur_tab().entries[r].path);
+        }
+        show_properties_multi(app, paths);
+      } else {
+        show_properties(app, entry.path, entry.icon_name);
+      }
       break;
+    }
 
     case AppState::ContextMenuAction::Settings:
       break;
@@ -1438,19 +1592,7 @@ void open_settings(AppState& app) {
   create_settings_window(app);
 }
 
-void save_current_folder_settings(AppState& app) {
-  if (app.cur_tab().current_path.empty()) return;
-  app.per_folder_settings[app.cur_tab().current_path] = {
-    app.cur_tab().view_mode,
-    app.cur_tab().sort_field,
-    app.cur_tab().sort_descending,
-    app.cur_tab().group_by_type
-  };
-}
-
 void save_file_browser_settings(AppState& app) {
-  save_current_folder_settings(app);
-
   eh::config::FileBrowserSettings fbs;
   fbs.zoom_pct = app.zoom_pct;
   fbs.folders_before_files = app.folders_before_files;
@@ -1466,14 +1608,6 @@ void save_file_browser_settings(AppState& app) {
   fbs.sort_descending = app.cur_tab().sort_descending;
   fbs.group_by_type = app.cur_tab().group_by_type;
   fbs.show_hidden = app.show_hidden;
-  for (const auto& [path, fs] : app.per_folder_settings) {
-    eh::config::FileBrowserSettings::PerFolder pf;
-    pf.view_mode = static_cast<int>(fs.view_mode);
-    pf.sort_field = static_cast<int>(fs.sort_field);
-    pf.sort_descending = fs.sort_descending;
-    pf.group_by_type = fs.group_by_type;
-    fbs.per_folder[path] = pf;
-  }
   fbs.favorites = app.favorites;
   fbs.window_controls_left = app.window_controls_left;
   (void)eh::config::write_file_browser_toml(fbs);
@@ -1481,36 +1615,24 @@ void save_file_browser_settings(AppState& app) {
 }
 
 void settings_apply(AppState& app) {
-  save_current_folder_settings(app);
-
   // Save file browser settings to its own file
-  {
-    eh::config::FileBrowserSettings fbs;
-    fbs.zoom_pct = app.settings_zoom_pct;
-    fbs.folders_before_files = app.settings_folders_before_files;
-    fbs.surface_opacity_pct = app.settings_opacity_pct;
-    fbs.sidebar_opacity_pct = app.settings_sidebar_opacity_pct;
-    fbs.topbar_opacity_pct = app.settings_topbar_opacity_pct;
-    fbs.statusbar_opacity_pct = app.settings_statusbar_opacity_pct;
-    fbs.preview_opacity_pct = app.settings_preview_opacity_pct;
-    fbs.dialog_opacity_pct = app.settings_dialog_opacity_pct;
-    fbs.properties_opacity_pct = app.settings_properties_opacity_pct;
-    fbs.view_mode = static_cast<int>(app.cur_tab().view_mode);
-    fbs.sort_field = static_cast<int>(app.cur_tab().sort_field);
-    fbs.sort_descending = app.cur_tab().sort_descending;
-    fbs.group_by_type = app.cur_tab().group_by_type;
-    fbs.show_hidden = app.show_hidden;
-    for (const auto& [path, fs] : app.per_folder_settings) {
-      eh::config::FileBrowserSettings::PerFolder pf;
-      pf.view_mode = static_cast<int>(fs.view_mode);
-      pf.sort_field = static_cast<int>(fs.sort_field);
-      pf.sort_descending = fs.sort_descending;
-      pf.group_by_type = fs.group_by_type;
-      fbs.per_folder[path] = pf;
-    }
-    fbs.favorites = app.favorites;
-    (void)eh::config::write_file_browser_toml(fbs);
-  }
+  eh::config::FileBrowserSettings fbs;
+  fbs.zoom_pct = app.settings_zoom_pct;
+  fbs.folders_before_files = app.settings_folders_before_files;
+  fbs.surface_opacity_pct = app.settings_opacity_pct;
+  fbs.sidebar_opacity_pct = app.settings_sidebar_opacity_pct;
+  fbs.topbar_opacity_pct = app.settings_topbar_opacity_pct;
+  fbs.statusbar_opacity_pct = app.settings_statusbar_opacity_pct;
+  fbs.preview_opacity_pct = app.settings_preview_opacity_pct;
+  fbs.dialog_opacity_pct = app.settings_dialog_opacity_pct;
+  fbs.properties_opacity_pct = app.settings_properties_opacity_pct;
+  fbs.view_mode = static_cast<int>(app.cur_tab().view_mode);
+  fbs.sort_field = static_cast<int>(app.cur_tab().sort_field);
+  fbs.sort_descending = app.cur_tab().sort_descending;
+  fbs.group_by_type = app.cur_tab().group_by_type;
+  fbs.show_hidden = app.show_hidden;
+  fbs.favorites = app.favorites;
+  (void)eh::config::write_file_browser_toml(fbs);
 
   // Terminal preference is a global setting — update the main config
   {
@@ -1604,6 +1726,8 @@ void reload_settings_from_config(AppState& app) {
   app.dialog_opacity_pct = fbs.dialog_opacity_pct;
   app.properties_opacity_pct = fbs.properties_opacity_pct;
   app.cur_tab().view_mode = static_cast<ViewMode>(fbs.view_mode);
+  if (app.cur_tab().view_mode != ViewMode::Computer)
+    app.last_browser_view_mode = app.cur_tab().view_mode;
   app.cur_tab().sort_field = static_cast<SortField>(std::clamp(fbs.sort_field, 0, 5));
   app.cur_tab().sort_descending = fbs.sort_descending;
   app.cur_tab().group_by_type = fbs.group_by_type;
@@ -1615,17 +1739,6 @@ void reload_settings_from_config(AppState& app) {
 
   app.favorites = fbs.favorites;
   app.window_controls_left = fbs.window_controls_left;
-
-  // Load per-folder settings
-  app.per_folder_settings.clear();
-  for (const auto& [path, pf] : fbs.per_folder) {
-    app.per_folder_settings[path] = {
-      static_cast<ViewMode>(pf.view_mode),
-      static_cast<SortField>(pf.sort_field),
-      pf.sort_descending,
-      pf.group_by_type
-    };
-  }
 
   // Sync icon theme from shell config
   if (!sc.dock.iconTheme.empty() && sc.dock.iconTheme != app.last_icon_theme) {
@@ -1996,6 +2109,92 @@ void show_properties(AppState& app, const std::string& path, const std::string& 
       }
     }
   }
+
+  p.scroll_px = 0;
+  p.combo_open = -1;
+  p.combo_hover_item = -1;
+  create_props_window(app);
+}
+
+void show_properties_multi(AppState& app, const std::vector<std::string>& paths) {
+  auto& p = app.properties;
+  p = AppState::PropertiesState{};
+  p.open = true;
+  p.multi = true;
+  p.paths = paths;
+
+  uint64_t total_size = 0;
+  bool have_representative = false;
+
+  // Executable-capable extensions (same list as single-item properties)
+  static const std::vector<std::string> exec_exts = {
+    ".sh", ".bash", ".zsh", ".fish", ".csh", ".ksh",
+    ".bin", ".elf", ".exe", ".msi", ".out", ".app", ".run",
+    ".com", ".bat", ".cmd", ".ps1",
+    ".appimage", ".desktop", ".deb", ".rpm", ".appdir", ".flatpak", ".snap",
+    ".py", ".pl", ".rb", ".lua", ".js", ".ts", ".php",
+  };
+
+  for (const auto& path : paths) {
+    struct stat st;
+    if (stat(path.c_str(), &st) != 0) continue;
+
+    if (S_ISDIR(st.st_mode)) {
+      ++p.dir_count;
+      uint64_t total = 0;
+      std::error_code ec;
+      for (auto& entry : fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied, ec)) {
+        if (ec) break;
+        if (entry.is_regular_file(ec)) {
+          struct stat fst;
+          if (stat(entry.path().c_str(), &fst) == 0)
+            total += static_cast<uint64_t>(fst.st_size);
+        }
+      }
+      total_size += total;
+    } else {
+      ++p.file_count;
+      total_size += static_cast<uint64_t>(st.st_size);
+    }
+
+    // Representative metadata from the first item: times, ownership, permissions
+    if (!have_representative) {
+      have_representative = true;
+      p.modified_sec = st.st_mtime;
+      p.accessed_sec = st.st_atime;
+      p.created_sec = st.st_ctime;
+      p.current_mode = st.st_mode;
+      auto perm_level = [](bool r, bool w, bool x) {
+        if (!r) return 0;
+        if (!w) return 1;
+        if (!x) return 2;
+        return 3;
+      };
+      p.perm_owner = perm_level(st.st_mode & S_IRUSR, st.st_mode & S_IWUSR, st.st_mode & S_IXUSR);
+      p.perm_group = perm_level(st.st_mode & S_IRGRP, st.st_mode & S_IWGRP, st.st_mode & S_IXGRP);
+      p.perm_other = perm_level(st.st_mode & S_IROTH, st.st_mode & S_IWOTH, st.st_mode & S_IXOTH);
+      p.executable = (st.st_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
+      struct passwd* pw = getpwuid(st.st_uid);
+      p.owner_name = pw ? pw->pw_name : std::to_string(st.st_uid);
+      struct group* gr = getgrgid(st.st_gid);
+      p.group_name = gr ? gr->gr_name : std::to_string(st.st_gid);
+    }
+
+    if (!S_ISDIR(st.st_mode) && !p.can_be_executable) {
+      std::string fname = fs::path(path).filename().string();
+      auto dotpos = fname.rfind('.');
+      if (dotpos != std::string::npos) {
+        std::string ext = fname.substr(dotpos);
+        for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        p.can_be_executable = std::find(exec_exts.begin(), exec_exts.end(), ext) != exec_exts.end();
+      }
+    }
+  }
+
+  p.size = total_size;
+  p.name = std::to_string(paths.size()) + (paths.size() == 1 ? " item" : " items");
+  if (!paths.empty())
+    p.location = fs::path(paths.front()).parent_path().string();
 
   p.scroll_px = 0;
   p.combo_open = -1;

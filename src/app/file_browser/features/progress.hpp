@@ -56,6 +56,8 @@ void start_async_op(
     const std::string& dest_dir,
     bool is_move,
     std::shared_ptr<OperationProgress> prog,
-    OpCompleteCallback on_complete = nullptr);
+    OpCompleteCallback on_complete = nullptr,
+    const std::vector<std::string>& allow_overwrite = {},
+    const std::vector<std::string>& dst_names = {});
 
 } // namespace eh::file_browser

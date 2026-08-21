@@ -332,7 +332,11 @@ void handle_props_click(AppState& app, int x, int y, int button) {
     mode |= (app.properties.perm_other >= 3 ? S_IXOTH : 0);
     mode |= (app.properties.current_mode & ~(S_IRWXU | S_IRWXG | S_IRWXO));
 
-    chmod(app.properties.path.c_str(), mode);
+    if (app.properties.multi) {
+      for (const auto& t : app.properties.paths) chmod(t.c_str(), mode);
+    } else {
+      chmod(app.properties.path.c_str(), mode);
+    }
     app.properties.current_mode = mode;
     app.props_pendingRedraw = true;
     return;
@@ -347,7 +351,19 @@ void handle_props_click(AppState& app, int x, int y, int button) {
     } else {
       mode &= ~(S_IXUSR | S_IXGRP | S_IXOTH);
     }
-    chmod(app.properties.path.c_str(), mode);
+    if (app.properties.multi) {
+      // Flip only the exec bits on each item, preserving individual modes
+      for (const auto& t : app.properties.paths) {
+        struct stat st;
+        if (stat(t.c_str(), &st) != 0) continue;
+        mode_t m = st.st_mode;
+        if (app.properties.executable) m |= S_IXUSR | S_IXGRP | S_IXOTH;
+        else m &= ~(S_IXUSR | S_IXGRP | S_IXOTH);
+        chmod(t.c_str(), m);
+      }
+    } else {
+      chmod(app.properties.path.c_str(), mode);
+    }
     app.properties.current_mode = mode;
     app.props_pendingRedraw = true;
     return;

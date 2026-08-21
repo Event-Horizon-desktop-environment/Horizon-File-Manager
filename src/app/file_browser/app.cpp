@@ -400,6 +400,7 @@ void paint(AppState& app, cairo_t* cr) {
   if (app.rename_ui_open) draw_rename_ui(app, cr);
   if (app.batch_rename_open) draw_batch_rename(app, cr);
   if (app.confirm_open) draw_confirm_dialog(app, cr);
+  if (app.conflict_open) draw_conflict_dialog(app, cr);
   if (app.password_dialog_open) draw_password_dialog(app, cr);
   if (app.compress_dialog_open) draw_compress_dialog(app, cr);
   if (app.term_chooser_open) draw_terminal_chooser(app, cr);

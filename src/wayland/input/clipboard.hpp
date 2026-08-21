@@ -74,6 +74,11 @@ public:
   [[nodiscard]] std::string read_data(const std::string& mime_type, wl_display* display = nullptr);
   [[nodiscard]] ClipboardFiles read_files(wl_display* display = nullptr);
 
+  // Best image MIME offered by the current selection ("image/png", …), or empty
+  [[nodiscard]] std::string selection_image_mime() const;
+  // Raw bytes of the clipboard image (e.g. a screenshot), or empty if none
+  [[nodiscard]] std::string read_image(std::string* mime_out = nullptr, wl_display* display = nullptr);
+
   [[nodiscard]] bool selection_has_mime(const std::string& mime_type) const;
 
   // Protocol callback entrypoints used by the C-style listeners
@@ -139,7 +144,8 @@ private:
   void notify_changed();
 
   [[nodiscard]] bool selection_supports_text() const;
-  [[nodiscard]] std::string receive_offer_as_mime(const std::string& mime, wl_display* display) const;
+  [[nodiscard]] std::string receive_offer_as_mime(const std::string& mime, wl_display* display,
+                                                  std::size_t max_bytes) const;
   [[nodiscard]] std::string receive_offer_as_text(wl_display* display) const;
 
   wl_display* display_ = nullptr;

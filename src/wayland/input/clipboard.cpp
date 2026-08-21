@@ -23,6 +23,14 @@ constexpr std::string_view kUtf8String = "UTF8_STRING";
 constexpr std::string_view kGnomeCopiedFiles = "x-special/gnome-copied-files";
 constexpr std::string_view kUriList = "text/uri-list";
 
+// Read caps: text offers are small, image payloads (screenshots) can be large
+constexpr std::size_t kMaxTextBytes = 4u * 1024u * 1024u;
+constexpr std::size_t kMaxImageBytes = 64u * 1024u * 1024u;
+
+constexpr std::array<std::string_view, 6> kPreferredImageMimes{
+    "image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp", "image/tiff",
+};
+
 void close_fd(int& fd) {
   if (fd >= 0) {
     close(fd);
@@ -537,10 +545,11 @@ std::string ClipboardService::receive_offer_as_text(wl_display* display) const {
   for (const auto& m : selectionMimes_) if (m == kTextUtf8) hasUtf8 = true;
   if (!hasUtf8 && !selectionMimes_.empty()) mime = selectionMimes_.front();
 
-  return receive_offer_as_mime(mime, display);
+  return receive_offer_as_mime(mime, display, kMaxTextBytes);
 }
 
-std::string ClipboardService::receive_offer_as_mime(const std::string& mime, wl_display* display) const {
+std::string ClipboardService::receive_offer_as_mime(const std::string& mime, wl_display* display,
+                                                    std::size_t max_bytes) const {
   if (!selectionOffer_ || mime.empty()) return {};
 
   int fds[2]{-1, -1};
@@ -563,7 +572,7 @@ std::string ClipboardService::receive_offer_as_mime(const std::string& mime, wl_
     ssize_t r = read(fds[0], buf.data(), buf.size());
     if (r <= 0) break;
     out.append(buf.data(), static_cast<std::size_t>(r));
-    if (out.size() > (4u * 1024u * 1024u)) break;
+    if (out.size() > max_bytes) break;
   }
   close_fd(fds[0]);
   return out;
@@ -575,7 +584,48 @@ std::string ClipboardService::read_selection_text(wl_display* display) {
 
 std::string ClipboardService::read_data(const std::string& mime_type, wl_display* display) {
   if (!selection_has_mime(mime_type)) return {};
-  return receive_offer_as_mime(mime_type, display);
+  return receive_offer_as_mime(mime_type, display, kMaxTextBytes);
+}
+
+std::string ClipboardService::selection_image_mime() const {
+  for (std::string_view pref : kPreferredImageMimes) {
+    for (const auto& m : selectionMimes_) {
+      if (m == pref) return std::string(pref);
+    }
+  }
+  // Any other image/* the source offers
+  for (const auto& m : selectionMimes_) {
+    if (m.rfind("image/", 0) == 0) return m;
+  }
+  return {};
+}
+
+std::string ClipboardService::read_image(std::string* mime_out, wl_display* display) {
+  // Dispatch any pending selection events so selectionMimes_ is current
+  if (display) {
+    wl_display_flush(display);
+    wl_display_dispatch_pending(display);
+  }
+
+  std::string mime = selection_image_mime();
+  if (mime.empty()) return {};
+  if (mime_out) *mime_out = mime;
+
+  std::string data = receive_offer_as_mime(mime, display, kMaxImageBytes);
+  if (data.empty()) return {};
+
+  // Sanity check: reject obviously bogus payloads (e.g. text sent as image/*)
+  static constexpr std::string_view kPngMagic = "\x89PNG\r\n\x1a\n";
+  bool looks_png = data.size() >= kPngMagic.size() && data.compare(0, kPngMagic.size(), kPngMagic) == 0;
+  bool looks_jpeg = data.size() >= 3 && static_cast<unsigned char>(data[0]) == 0xFF &&
+                    static_cast<unsigned char>(data[1]) == 0xD8 && static_cast<unsigned char>(data[2]) == 0xFF;
+  bool looks_gif = data.size() >= 6 && (data.compare(0, 6, "GIF87a") == 0 || data.compare(0, 6, "GIF89a") == 0);
+  bool looks_bmp = data.size() >= 2 && data[0] == 'B' && data[1] == 'M';
+  bool looks_webp = data.size() >= 12 && data.compare(0, 4, "RIFF") == 0 && data.compare(8, 4, "WEBP") == 0;
+  bool looks_tiff = data.size() >= 4 && (data.compare(0, 4, "II*\0") == 0 || data.compare(0, 4, "MM\0*") == 0);
+  if (!(looks_png || looks_jpeg || looks_gif || looks_bmp || looks_webp || looks_tiff)) return {};
+
+  return data;
 }
 
 ClipboardFiles ClipboardService::read_files(wl_display* display) {
@@ -591,7 +641,7 @@ ClipboardFiles ClipboardService::read_files(wl_display* display) {
 
   // 1) Try x-special/gnome-copied-files
   if (selection_has_mime(std::string(kGnomeCopiedFiles))) {
-    std::string raw = receive_offer_as_mime(std::string(kGnomeCopiedFiles), display);
+    std::string raw = receive_offer_as_mime(std::string(kGnomeCopiedFiles), display, kMaxTextBytes);
     if (!raw.empty()) {
       std::istringstream iss(raw);
       std::string line;
@@ -618,7 +668,7 @@ ClipboardFiles ClipboardService::read_files(wl_display* display) {
 
   // 2) Fall back to text/uri-list
   if (selection_has_mime(std::string(kUriList))) {
-    std::string raw = receive_offer_as_mime(std::string(kUriList), display);
+    std::string raw = receive_offer_as_mime(std::string(kUriList), display, kMaxTextBytes);
     if (!raw.empty()) {
       std::istringstream iss(raw);
       std::string line;

@@ -454,7 +454,11 @@ void handle_click(AppState& app, int x, int y, int button) {
         // Preserve non-permission bits (setuid, setgid, sticky, etc.)
         mode |= (app.properties.current_mode & ~(S_IRWXU | S_IRWXG | S_IRWXO));
 
-        chmod(app.properties.path.c_str(), mode);
+        if (app.properties.multi) {
+          for (const auto& t : app.properties.paths) chmod(t.c_str(), mode);
+        } else {
+          chmod(app.properties.path.c_str(), mode);
+        }
         app.properties.current_mode = mode;
         draw(app);
         return;
@@ -470,7 +474,19 @@ void handle_click(AppState& app, int x, int y, int button) {
         } else {
           mode &= ~(S_IXUSR | S_IXGRP | S_IXOTH);
         }
-        chmod(app.properties.path.c_str(), mode);
+        if (app.properties.multi) {
+          // Flip only the exec bits on each item, preserving individual modes
+          for (const auto& t : app.properties.paths) {
+            struct stat st;
+            if (stat(t.c_str(), &st) != 0) continue;
+            mode_t m = st.st_mode;
+            if (app.properties.executable) m |= S_IXUSR | S_IXGRP | S_IXOTH;
+            else m &= ~(S_IXUSR | S_IXGRP | S_IXOTH);
+            chmod(t.c_str(), m);
+          }
+        } else {
+          chmod(app.properties.path.c_str(), mode);
+        }
         app.properties.current_mode = mode;
         draw(app);
         return;
@@ -483,6 +499,30 @@ void handle_click(AppState& app, int x, int y, int button) {
         return;
       }
     }
+  }
+
+  // ── Overwrite/merge conflict dialog clicks ──
+  if (app.conflict_open) {
+    if (button == 0x110) {
+      // Checkbox
+      const auto& cr = app.conflict_check_rect;
+      if (app.pointerX >= cr[0] && app.pointerX < cr[0] + cr[2] &&
+          app.pointerY >= cr[1] && app.pointerY < cr[1] + cr[3]) {
+        app.conflict_apply_all = !app.conflict_apply_all;
+        draw(app);
+        return;
+      }
+      // Buttons: 0=Skip, 1=Cancel, 2=Overwrite/Merge
+      for (int b = 0; b < 3; ++b) {
+        const auto& r = app.conflict_btn_rects[b];
+        if (x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3]) {
+          resolve_conflict_choice(app, b);
+          return;
+        }
+      }
+      // Modal — ignore clicks elsewhere while open
+    }
+    return;
   }
 
   // ── Confirm dialog clicks ──
@@ -1592,6 +1632,7 @@ void handle_click(AppState& app, int x, int y, int button) {
         else if (cur == ViewMode::Grid) app.cur_tab().view_mode = ViewMode::Compact;
         else if (cur == ViewMode::Compact) app.cur_tab().view_mode = ViewMode::Tree;
         else app.cur_tab().view_mode = ViewMode::List;
+        app.last_browser_view_mode = app.cur_tab().view_mode;
         save_file_browser_settings(app);
         draw(app);
         return;
@@ -1865,6 +1906,8 @@ void handle_click(AppState& app, int x, int y, int button) {
       app.sidebar_hover_idx = sb_idx;
       auto& loc = app.sidebar_locations[sb_idx];
       if (loc.kind == SidebarLocation::Kind::Computer) {
+        if (app.cur_tab().view_mode != ViewMode::Computer)
+          app.last_browser_view_mode = app.cur_tab().view_mode;
         app.cur_tab().view_mode = ViewMode::Computer;
         app.cur_tab().current_path = "computer://";
         app.cur_tab().selected_idx = -1;
@@ -4662,61 +4705,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   }
 
   if (ctrl && (sym == XKB_KEY_V || sym == XKB_KEY_v)) {
-    auto cf = app.clipboard.read_files(app.wl.display());
-    if (!cf.paths.empty()) {
-      std::error_code ec;
-      fs::path dest(app.cur_tab().current_path);
-      AppState::UndoRecord rec{cf.is_cut ? AppState::UndoRecord::Type::PasteCut
-                                         : AppState::UndoRecord::Type::PasteCopy, {}, {}};
-      if (cf.is_cut) rec.paths_a = cf.paths;
-
-      // Resolve target paths first (synchronous)
-      std::vector<std::string> src_paths;
-      std::vector<std::string> dst_paths;
-      for (const auto& src : cf.paths) {
-        fs::path sp(src);
-        if (!fs::exists(sp, ec)) continue;
-        fs::path target = dest / sp.filename();
-        int n = 2;
-        while (fs::exists(target, ec)) {
-          target = dest / (sp.stem().string() + " (" + std::to_string(n) + ")" + sp.extension().string());
-          n++;
-        }
-        src_paths.push_back(src);
-        dst_paths.push_back(target.string());
-      }
-
-      // Push undo record with resolved paths
-      if (!dst_paths.empty()) {
-        rec.paths_b = dst_paths;
-        app.redo_stack.clear();
-        app.undo_stack.push_back(std::move(rec));
-        if (app.undo_stack.size() > app.kMaxUndo)
-          app.undo_stack.erase(app.undo_stack.begin());
-      }
-
-      // Start async background copy/move
-      bool is_cut = cf.is_cut;
-      auto prog = std::make_shared<OperationProgress>();
-      prog->type = is_cut ? OperationType::Move : OperationType::Copy;
-      start_async_op(src_paths, dest.string(), is_cut, prog,
-          [&app, is_cut](bool cancelled) {
-            if (!cancelled) {
-              app.cut_paths.clear();
-              app.operation_status = is_cut ? "Moved" : "Pasted";
-              app.operation_status_expires_ms =
-                  std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::steady_clock::now().time_since_epoch()).count() + 3000;
-            }
-            app.op_progress.reset();
-            reload_dir(app);
-            draw(app);
-          });
-      app.op_progress = prog;
-    } else {
-      reload_dir(app);
-      draw(app);
-    }
+    paste_clipboard(app);
     return true;
   }
 
@@ -4779,6 +4768,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
 
   if (ctrl && (sym == XKB_KEY_1)) {
     app.cur_tab().view_mode = ViewMode::List;
+    app.last_browser_view_mode = ViewMode::List;
     save_file_browser_settings(app);
     draw(app);
     return true;
@@ -4786,6 +4776,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
 
   if (ctrl && (sym == XKB_KEY_2)) {
     app.cur_tab().view_mode = ViewMode::Grid;
+    app.last_browser_view_mode = ViewMode::Grid;
     save_file_browser_settings(app);
     draw(app);
     return true;
@@ -4799,6 +4790,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
 
   if (ctrl && (sym == XKB_KEY_4)) {
     app.cur_tab().view_mode = ViewMode::Tree;
+    app.last_browser_view_mode = ViewMode::Tree;
     save_file_browser_settings(app);
     draw(app);
     return true;
@@ -4806,6 +4798,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
 
   if (ctrl && (sym == XKB_KEY_5)) {
     app.cur_tab().view_mode = ViewMode::Compact;
+    app.last_browser_view_mode = ViewMode::Compact;
     save_file_browser_settings(app);
     draw(app);
     return true;

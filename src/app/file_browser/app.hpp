@@ -127,6 +127,7 @@ void draw_create_dialog(AppState& app, cairo_t* cr);
 void draw_rename_ui(AppState& app, cairo_t* cr);
 void draw_batch_rename(AppState& app, cairo_t* cr);
 void draw_confirm_dialog(AppState& app, cairo_t* cr);
+void draw_conflict_dialog(AppState& app, cairo_t* cr);
 void draw_password_dialog(AppState& app, cairo_t* cr);
 void draw_compress_dialog(AppState& app, cairo_t* cr);
 void draw_terminal_chooser(AppState& app, cairo_t* cr);
@@ -162,8 +163,14 @@ void draw_open_with(AppState& app, cairo_t* cr);
 // ── Settings dialog (file_browser_menu.cpp + draw.cpp) ───────────
 
 void open_settings(AppState& app);
-void save_current_folder_settings(AppState& app);
 void save_file_browser_settings(AppState& app);
+void request_fs_operation(AppState& app, const std::vector<std::string>& srcs,
+                          const std::string& dest_dir, bool is_move,
+                          const std::string& success_toast, bool clear_cut = false);
+// Paste clipboard contents into the current directory: file URIs if present,
+// otherwise saves clipboard image data (screenshots) as a new image file.
+void paste_clipboard(AppState& app);
+void resolve_conflict_choice(AppState& app, int choice);  // 0=Overwrite/Merge, 1=Skip, 2=Cancel
 void settings_apply(AppState& app);
 void draw_settings_dialog(AppState& app, cairo_t* cr);
 void draw_sort_menu(AppState& app, cairo_t* cr);
@@ -175,6 +182,7 @@ void draw_operations_panel(AppState& app, cairo_t* cr);
 int properties_hit_test(AppState& app, int x, int y);
 int settings_hit_test(AppState& app, int x, int y);
 void show_properties(AppState& app, const std::string& path, const std::string& icon_name = "");
+void show_properties_multi(AppState& app, const std::vector<std::string>& paths);
 void reload_settings_from_config(AppState& app);
 void reload_colors_from_config(AppState& app);
 

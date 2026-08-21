@@ -42,6 +42,56 @@ cairo_surface_t* scale_surface(cairo_surface_t* src, int max_px) {
   return scaled;
 }
 
+// ── full-res preview frame helpers ─────────────────────────
+
+struct PngReadCtx {
+  const std::vector<unsigned char>* data;
+  size_t pos;
+};
+
+cairo_status_t png_read_cb(void* closure, unsigned char* out,
+                           unsigned int len) {
+  auto* ctx = static_cast<PngReadCtx*>(closure);
+  if (!ctx || ctx->pos + len > ctx->data->size())
+    return CAIRO_STATUS_READ_ERROR;
+  std::memcpy(out, ctx->data->data() + ctx->pos, len);
+  ctx->pos += len;
+  return CAIRO_STATUS_SUCCESS;
+}
+
+cairo_surface_t* extract_preview_frame(const std::string& path, int max_px) {
+#ifdef FFMPEGTHUMBNAILER_BIN
+  std::string cmd = "\"" FFMPEGTHUMBNAILER_BIN "\"";
+#else
+  std::string cmd = "ffmpegthumbnailer";
+#endif
+  // -s <px> scales so the long side is max_px; PNG written to stdout
+  cmd += " -s " + std::to_string(max_px) + " -c png -i \"";
+  cmd += path;
+  cmd += "\" -o - 2>/dev/null";
+
+  FILE* fp = popen(cmd.c_str(), "r");
+  if (!fp) return nullptr;
+
+  std::vector<unsigned char> png;
+  std::array<unsigned char, 65536> buf{};
+  size_t n;
+  while ((n = fread(buf.data(), 1, buf.size(), fp)) > 0)
+    png.insert(png.end(), buf.begin(), buf.begin() + static_cast<long>(n));
+  pclose(fp);
+
+  if (png.empty()) return nullptr;
+
+  PngReadCtx ctx{&png, 0};
+  cairo_surface_t* frame =
+      cairo_image_surface_create_from_png_stream(png_read_cb, &ctx);
+  if (!frame || cairo_surface_status(frame) != CAIRO_STATUS_SUCCESS) {
+    cairo_surface_destroy(frame);
+    return nullptr;
+  }
+  return frame;
+}
+
 } // namespace
 
 // ── VideoThumbWorker ───────────────────────────────────────
@@ -64,8 +114,18 @@ void VideoThumbWorker::enqueue(const std::string& path, int max_px,
   {
     std::lock_guard<std::mutex> lock(m_in_mutex);
     if (m_pending.count(path)) return;
-    m_in.push({path, max_px, cache_path, src_mtime});
+    m_in.push({path, max_px, cache_path, src_mtime, false});
     m_pending.insert(path);
+  }
+  m_in_cv.notify_one();
+}
+
+void VideoThumbWorker::enqueue_preview(const std::string& path, int max_px) {
+  {
+    std::lock_guard<std::mutex> lock(m_in_mutex);
+    if (m_prev_pending.count(path)) return;
+    m_in.push({path, max_px, {}, 0, true});
+    m_prev_pending.insert(path);
   }
   m_in_cv.notify_one();
 }
@@ -75,6 +135,14 @@ bool VideoThumbWorker::poll(VideoThumbResult& out) {
   if (m_out.empty()) return false;
   out = std::move(m_out.front());
   m_out.pop();
+  return true;
+}
+
+bool VideoThumbWorker::poll_preview(VideoThumbResult& out) {
+  std::lock_guard<std::mutex> lock(m_out_mutex);
+  if (m_prev_out.empty()) return false;
+  out = std::move(m_prev_out.front());
+  m_prev_out.pop();
   return true;
 }
 
@@ -98,7 +166,25 @@ void VideoThumbWorker::thread_main(int /*thread_id*/) {
 
       item = std::move(m_in.front());
       m_in.pop();
-      m_pending.erase(item.path);
+      if (item.preview)
+        m_prev_pending.erase(item.path);
+      else
+        m_pending.erase(item.path);
+    }
+
+    // Full-res preview frame — decoded here, handed straight to the UI
+    // thread (never enters the thumbnail caches)
+    if (item.preview) {
+      cairo_surface_t* frame = extract_preview_frame(item.path, item.max_px);
+      std::lock_guard<std::mutex> lock(m_out_mutex);
+      // Bound stale results in case the UI stops polling for them
+      while (m_prev_out.size() >= 4) {
+        if (m_prev_out.front().surface)
+          cairo_surface_destroy(m_prev_out.front().surface);
+        m_prev_out.pop();
+      }
+      m_prev_out.push({item.path, frame}); // null surface signals failure
+      continue;
     }
 
     // Generate cache file if needed

@@ -691,12 +691,7 @@ void reload_dir(AppState& app) {
 
   // Reset view mode if coming from computer view
   if (app.cur_tab().view_mode == ViewMode::Computer) {
-    auto it = app.per_folder_settings.find(app.cur_tab().current_path);
-    if (it != app.per_folder_settings.end()) {
-      app.cur_tab().view_mode = it->second.view_mode;
-    } else {
-      app.cur_tab().view_mode = ViewMode::List;
-    }
+    app.cur_tab().view_mode = app.last_browser_view_mode;
   }
 
   DIR* dir = opendir(app.cur_tab().current_path.c_str());
@@ -871,7 +866,8 @@ void navigate_to(AppState& app, const std::string& path) {
   // Handle virtual "computer://" path
   if (path == "computer://") {
     if (!app.cur_tab().current_path.empty() && app.cur_tab().current_path != path) {
-      save_current_folder_settings(app);
+      if (app.cur_tab().view_mode != ViewMode::Computer)
+        app.last_browser_view_mode = app.cur_tab().view_mode;
       app.cur_tab().nav_history.push_back(app.cur_tab().current_path);
       app.cur_tab().nav_forward.clear();
     }
@@ -893,9 +889,8 @@ void navigate_to(AppState& app, const std::string& path) {
   std::string resolved = fs::absolute(path).string();
   if (!fs::is_directory(resolved)) return;
 
-  // Save current folder settings before leaving
+  // Push current folder onto the back stack before leaving
   if (!app.cur_tab().current_path.empty() && app.cur_tab().current_path != resolved) {
-    save_current_folder_settings(app);
     app.cur_tab().nav_history.push_back(app.cur_tab().current_path);
     app.cur_tab().nav_forward.clear();
   }
@@ -906,15 +901,10 @@ void navigate_to(AppState& app, const std::string& path) {
   app.cur_tab().scroll_smooth_current = 0;
   app.cur_tab().scroll_smooth_target = 0;
 
-  // Apply per-folder settings for the new path
-  auto it = app.per_folder_settings.find(resolved);
-  if (it != app.per_folder_settings.end()) {
-    app.cur_tab().view_mode = it->second.view_mode;
-    app.cur_tab().sort_field = it->second.sort_field;
-    app.cur_tab().sort_descending = it->second.sort_descending;
-    app.cur_tab().group_by_type = it->second.group_by_type;
-  } else if (app.cur_tab().view_mode == ViewMode::Computer) {
-    app.cur_tab().view_mode = ViewMode::List;
+  // View/sort settings are global — keep the current ones across folders.
+  // Only recover if we were in the virtual computer view.
+  if (app.cur_tab().view_mode == ViewMode::Computer) {
+    app.cur_tab().view_mode = app.last_browser_view_mode;
   }
 
   reload_dir(app);
@@ -1343,6 +1333,41 @@ static void destroy_preview_popup(AppState& app);
 static bool create_preview_popup(AppState& app);
 static void commit_preview_popup(AppState& app);
 
+// Aspect-fit the hover popup around a full-res frame (same math as images)
+static void size_hover_popup_to_frame(int& popup_w, int& popup_h,
+                                      int tw, int th) {
+  int max_w = 700;
+  int max_h = 800;
+  int margin = 12;        // whitespace around image within image area
+  int bottom_h = 50;      // filename + info area
+  double scale = std::min({static_cast<double>(max_w - margin * 2) / tw,
+                          static_cast<double>(max_h - margin * 2 - bottom_h) / th, 1.0});
+  popup_w = std::max(150, static_cast<int>(tw * scale + margin * 2));
+  popup_h = std::max(150, static_cast<int>(th * scale + margin * 2 + bottom_h));
+}
+
+// Position the hover popup centered on mouse X, above mouse Y, clamped on screen
+static void place_hover_popup(AppState& app, int mx, int my,
+                              int popup_w, int popup_h) {
+  int popup_x = mx - popup_w / 2;
+  int popup_y = my - popup_h - 20; // above cursor with 20px gap
+
+  int content_x = app.sidebar_expanded ? app.sidebar_width : 0;
+  int content_y = app.top_bar_height + app.tab_bar_height;
+  if (popup_x < content_x + 10) popup_x = content_x + 10;
+  if (popup_x + popup_w > app.width - 10)
+    popup_x = app.width - popup_w - 10;
+  if (popup_y < content_y + 10)          // above viewport → flip below
+    popup_y = my + 20;
+  if (popup_y + popup_h > app.height - app.status_bar_height - 10)
+    popup_y = app.height - app.status_bar_height - popup_h - 10;
+
+  app.preview_x = popup_x;
+  app.preview_y = popup_y;
+  app.preview_w = popup_w;
+  app.preview_h = popup_h;
+}
+
 void reset_preview(AppState& app) {
   // Clean up popup surface if it exists
   destroy_preview_popup(app);
@@ -1402,12 +1427,16 @@ void check_hover_preview(AppState& app) {
               cairo_surface_reference(app.preview_thumb);
             else
               preview_log("hover_preview: IMAGE thumb FAIL path=%s", entry.path.c_str());
-          } else if (entry.type == FileType::Video || entry.type == FileType::Audio) {
+          } else if (entry.type == FileType::Video) {
+            // Pull a full-res frame from the video (async), like image decode;
+            // popup upgrades to it when the extraction lands
+            video_worker().enqueue_preview(entry.path, kVideoPreviewFrameMaxPx);
+          } else if (entry.type == FileType::Audio) {
             app.preview_thumb = get_thumbnail(app, entry.path, 256);
             if (app.preview_thumb)
               cairo_surface_reference(app.preview_thumb);
             else
-              preview_log("hover_preview: VIDEO/AUDIO thumb FAIL path=%s", entry.path.c_str());
+              preview_log("hover_preview: AUDIO thumb FAIL path=%s", entry.path.c_str());
           }
 
           // PDF gets a rendered thumbnail via poppler
@@ -1447,37 +1476,11 @@ void check_hover_preview(AppState& app) {
           if (entry.type == FileType::Image && app.preview_thumb) {
             int tw = cairo_image_surface_get_width(app.preview_thumb);
             int th = cairo_image_surface_get_height(app.preview_thumb);
-            if (tw > 0 && th > 0) {
-              int max_w = 700;
-              int max_h = 800;
-              int margin = 12;        // whitespace around image within image area
-              int bottom_h = 50;      // filename + info area
-              double scale = std::min({static_cast<double>(max_w - margin * 2) / tw,
-                                      static_cast<double>(max_h - margin * 2 - bottom_h) / th, 1.0});
-              popup_w = std::max(150, static_cast<int>(tw * scale + margin * 2));
-              popup_h = std::max(150, static_cast<int>(th * scale + margin * 2 + bottom_h));
-            }
+            if (tw > 0 && th > 0)
+              size_hover_popup_to_frame(popup_w, popup_h, tw, th);
           }
 
-          // Compute popup position: centered on mouse X, above mouse Y
-          int popup_x = mx - popup_w / 2;
-          int popup_y = my - popup_h - 20; // above cursor with 20px gap
-
-          // Clamp to stay on screen
-          int content_x = app.sidebar_expanded ? app.sidebar_width : 0;
-          int content_y = app.top_bar_height + app.tab_bar_height;
-          if (popup_x < content_x + 10) popup_x = content_x + 10;
-          if (popup_x + popup_w > app.width - 10)
-            popup_x = app.width - popup_w - 10;
-          if (popup_y < content_y + 10)          // above viewport → flip below
-            popup_y = my + 20;
-          if (popup_y + popup_h > app.height - app.status_bar_height - 10)
-            popup_y = app.height - app.status_bar_height - popup_h - 10;
-
-          app.preview_x = popup_x;
-          app.preview_y = popup_y;
-          app.preview_w = popup_w;
-          app.preview_h = popup_h;
+          place_hover_popup(app, mx, my, popup_w, popup_h);
           app.preview_path = entry.path;
 
           // Create + draw + commit the subsurface popup
@@ -1493,14 +1496,53 @@ void check_hover_preview(AppState& app) {
   }
 
   // Re-try thumbnail for async decodes (video, etc.) while preview is active
-  if (app.preview_active && !app.preview_thumb && app.preview_entry_idx >= 0) {
+  if (app.preview_active && app.preview_entry_idx >= 0) {
     int vi = app.preview_entry_idx;
     if (vi >= 0 && vi < static_cast<int>(app.cur_tab().visible_entries.size())) {
       int ri = app.cur_tab().visible_entries[vi];
       if (ri >= 0 && ri < static_cast<int>(app.cur_tab().entries.size())) {
         const auto& entry = app.cur_tab().entries[ri];
-        if (entry.type == FileType::Image || entry.type == FileType::Video ||
-            entry.type == FileType::Audio) {
+        if (entry.type == FileType::Video) {
+          // Poll for the full-res frame extraction
+          VideoThumbResult res;
+          while (video_worker().poll_preview(res)) {
+            if (res.path != app.preview_path) {
+              // Stale result from an earlier hover
+              if (res.surface) cairo_surface_destroy(res.surface);
+              continue;
+            }
+            if (res.surface) {
+              // Upgrade: swap in the full-res frame and resize the popup
+              // around it, like images
+              if (app.preview_thumb)
+                cairo_surface_destroy(app.preview_thumb);
+              app.preview_thumb = res.surface; // take ownership
+              int tw = cairo_image_surface_get_width(app.preview_thumb);
+              int th = cairo_image_surface_get_height(app.preview_thumb);
+              if (tw > 0 && th > 0) {
+                int popup_w = 260;
+                int popup_h = 240;
+                size_hover_popup_to_frame(popup_w, popup_h, tw, th);
+                place_hover_popup(app, static_cast<int>(app.pointerX),
+                                  static_cast<int>(app.pointerY),
+                                  popup_w, popup_h);
+                if (create_preview_popup(app))
+                  commit_preview_popup(app);
+              }
+              app.pendingRedraw = true;
+            } else if (!app.preview_thumb) {
+              // Extraction failed — fall back to the low-res cached thumb
+              cairo_surface_t* thumb = get_thumbnail(app, entry.path, 256);
+              if (thumb) {
+                cairo_surface_reference(thumb);
+                app.preview_thumb = thumb;
+                app.pendingRedraw = true;
+              }
+            }
+            break;
+          }
+        } else if (!app.preview_thumb &&
+                   (entry.type == FileType::Image || entry.type == FileType::Audio)) {
           cairo_surface_t* thumb = get_thumbnail(app, entry.path, 256);
           if (thumb) {
             cairo_surface_reference(thumb);

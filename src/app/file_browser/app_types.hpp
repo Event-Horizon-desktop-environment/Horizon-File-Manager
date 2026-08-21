@@ -141,14 +141,6 @@ struct TreeEntry {
   bool is_expanded = false;
 };
 
-// ── Per-folder view mode settings ──
-struct FolderSettings {
-  ViewMode view_mode = ViewMode::List;
-  SortField sort_field = SortField::Name;
-  bool sort_descending = false;
-  bool group_by_type = false;
-};
-
 // ── Breadcrumb segment ──
 struct BreadcrumbSegment {
   std::string label;
@@ -665,9 +657,40 @@ struct AppState {
   double settings_hit_matugen_toggle[4]{};
   int settings_slider_dragging = 0;
 
+  // ── Overwrite/merge conflict dialog (Dolphin-style) ──
+  struct ConflictEntry {
+    std::string src;
+    std::string dest;
+    bool src_is_dir = false;
+    bool dest_is_dir = false;
+    uint64_t src_size = 0;
+    uint64_t dest_size = 0;
+    int64_t src_mtime = 0;
+    int64_t dest_mtime = 0;
+  };
+  bool conflict_open = false;
+  std::vector<std::string> conflict_srcs;        // all planned sources
+  std::vector<ConflictEntry> conflict_queue;     // unresolved conflicts
+  std::vector<std::string> conflict_overwrite;   // sources approved for overwrite
+  std::vector<std::string> conflict_skipped;     // sources skipped
+  std::vector<std::string> conflict_dst_names;   // parallel dest filenames ("" = keep)
+  std::string conflict_dest_dir;
+  bool conflict_is_move = false;
+  std::string conflict_success_toast;            // status text on success
+  bool conflict_clear_cut = false;               // clear cut_paths on success
+  bool conflict_apply_all = false;               // checkbox state
+  int conflict_hover_btn = -1;
+  double conflict_btn_rects[3][4]{};             // Skip, Cancel, Overwrite/Merge
+  double conflict_check_rect[4]{};
+  bool conflict_check_hover = false;
+
   // ── Properties dialog ──
   struct PropertiesState {
     bool open = false;
+    bool multi = false;                 // combined properties for a multi-selection
+    std::vector<std::string> paths;     // all selected paths (multi mode)
+    uint64_t file_count = 0;            // selected regular files (multi mode)
+    uint64_t dir_count = 0;             // selected folders (multi mode)
     std::string path;
     std::string name;
     std::string mime_type;
@@ -758,8 +781,8 @@ struct AppState {
   int computer_content_h = 0;
   bool computer_needs_refresh = true;
 
-  // ── Per-folder view mode memory ──
-  std::unordered_map<std::string, FolderSettings> per_folder_settings;
+  // ── Last non-computer view mode (restored when leaving computer://) ──
+  ViewMode last_browser_view_mode = ViewMode::List;
 
   // ── List view column widths (proportional, stored as fractions of total) ──
   double col_name_frac = 0.45;

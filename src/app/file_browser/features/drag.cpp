@@ -42,6 +42,16 @@ std::string file_uri_for_path(const std::string& abs_path) {
   return out;
 }
 
+// True when both paths resolve to the same directory
+bool is_same_directory(const std::filesystem::path& a, const std::filesystem::path& b) {
+  std::error_code ec;
+  if (std::filesystem::exists(a, ec) && std::filesystem::exists(b, ec)) {
+    bool eq = std::filesystem::equivalent(a, b, ec);
+    if (!ec) return eq;
+  }
+  return a.lexically_normal() == b.lexically_normal();
+}
+
 std::string canonical_abs_path(const std::string& path) {
   std::error_code ec;
   auto c = std::filesystem::weakly_canonical(path, ec);
@@ -884,56 +894,30 @@ void data_device_drop(void* data, wl_data_device*) {
                                           XKB_STATE_MODS_EFFECTIVE) != 0;
     }
 
-    // Resolve target paths and push undo record (synchronous)
-    std::vector<std::string> src_paths;
+    // Filter out items already inside the target directory — dropping them
+    // back where they came from is a no-op, just release
+    std::vector<std::string> ops;
+    ops.reserve(app.drag_paths.size());
     for (const auto& src : app.drag_paths) {
-      std::string dest = (std::filesystem::path(target) / std::filesystem::path(src).filename()).string();
-      src_paths.push_back(dest);
+      if (!is_same_directory(std::filesystem::path(src).parent_path(),
+                             std::filesystem::path(target)))
+        ops.push_back(src);
     }
-    {
-      AppState::UndoRecord rec{ctrl ? AppState::UndoRecord::Type::PasteCopy
-                                    : AppState::UndoRecord::Type::PasteCut, {}, {}};
-      if (ctrl) {
-        rec.paths_b = src_paths;
-      } else {
-        rec.paths_a = app.drag_paths;
-        rec.paths_b = src_paths;
-      }
-      app.redo_stack.clear();
-      app.undo_stack.push_back(std::move(rec));
-      if (app.undo_stack.size() > app.kMaxUndo)
-        app.undo_stack.erase(app.undo_stack.begin());
+    if (ops.empty()) {
+      app.drop_target_path.clear();
+      app.drop_target_idx = -1;
+      app.drop_target_is_sidebar = false;
+      app.drop_target_sidebar_idx = -1;
+      app.drop_target_fav_section = false;
+      app.drop_target_is_valid = false;
+      app.drop_x = 0;
+      app.drop_y = 0;
+      app.pendingRedraw = true;
+      return;
     }
 
-    // Start async copy/move
-    {
-      auto prog = std::make_shared<OperationProgress>();
-      prog->type = ctrl ? OperationType::Copy : OperationType::Move;
-      std::vector<std::string> drag_src = app.drag_paths;
-      start_async_op(drag_src, target, !ctrl, prog,
-          [&app, ctrl](bool cancelled) {
-            if (!cancelled) {
-              app.operation_status = ctrl ? "Copied" : "Moved";
-              app.operation_status_expires_ms =
-                  std::chrono::duration_cast<std::chrono::milliseconds>(
-                      std::chrono::steady_clock::now().time_since_epoch()).count() + 3000;
-            }
-            app.op_progress.reset();
-            // Clear drop target state
-            app.drop_target_path.clear();
-            app.drop_target_idx = -1;
-            app.drop_target_is_sidebar = false;
-            app.drop_target_sidebar_idx = -1;
-            app.drop_target_fav_section = false;
-            app.drop_target_is_valid = false;
-            app.drop_x = 0;
-            app.drop_y = 0;
-            reload_dir(app);
-            app.pendingRedraw = true;
-          });
-      app.op_progress = prog;
-      app.ops_panel_open = true;
-    }
+    // Conflict-checked copy/move (may open the overwrite dialog)
+    request_fs_operation(app, ops, target, !ctrl, ctrl ? "Copied" : "Moved", false);
 
     return;
   }
@@ -1022,33 +1006,19 @@ void data_device_drop(void* data, wl_data_device*) {
   // Use the compositor-negotiated action to decide copy vs move
   bool is_move = app.drop_chosen_action == WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
 
-  // Start async copy/move
-  {
-    auto prog = std::make_shared<OperationProgress>();
-    prog->type = is_move ? OperationType::Move : OperationType::Copy;
-    start_async_op(paths, target, is_move, prog,
-        [&app, is_move](bool cancelled) {
-          if (!cancelled) {
-            app.operation_status = is_move ? "Moved" : "Copied";
-            app.operation_status_expires_ms =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now().time_since_epoch()).count() + 3000;
-          }
-          app.op_progress.reset();
-          app.drop_target_path.clear();
-          app.drop_target_idx = -1;
-          app.drop_target_is_sidebar = false;
-          app.drop_target_sidebar_idx = -1;
-          app.drop_target_fav_section = false;
-          app.drop_target_is_valid = false;
-          app.drop_x = 0;
-          app.drop_y = 0;
-          reload_dir(app);
-          app.pendingRedraw = true;
-        });
-    app.op_progress = prog;
-    app.ops_panel_open = true;
+  // Skip items already inside the target directory
+  std::vector<std::string> ops;
+  ops.reserve(paths.size());
+  for (auto& p : paths) {
+    if (!is_same_directory(std::filesystem::path(p).parent_path(),
+                           std::filesystem::path(target)))
+      ops.push_back(std::move(p));
   }
+  if (ops.empty()) return;
+
+  // Conflict-checked copy/move (may open the overwrite dialog)
+  request_fs_operation(app, ops, target, is_move,
+                       is_move ? "Moved" : "Copied", false);
 }
 
 void setup_drop_receiver(AppState& app) {

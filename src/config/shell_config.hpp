@@ -290,14 +290,6 @@ struct FileBrowserSettings {
   bool show_hidden = false;
   bool group_by_type = false;
 
-  struct PerFolder {
-    int view_mode = 0;
-    int sort_field = 0;
-    bool sort_descending = false;
-    bool group_by_type = false;
-  };
-  std::unordered_map<std::string, PerFolder> per_folder;
-
   // ── Sidebar favorites (bookmarked folders) ──
   std::vector<std::string> favorites;
 
