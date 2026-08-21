@@ -10,19 +10,24 @@
 #include "app/file_browser/features/image_preview.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <set>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include <dirent.h>
 #include <fcntl.h>
+#include <grp.h>
 #include <pwd.h>
 #include <sys/stat.h>
 #include <unistd.h>
@@ -61,6 +66,73 @@ static std::string xdg_user_dir(const char* env, const char* fallback) {
 
 static bool is_hidden_file(const std::string& name) {
   return !name.empty() && name[0] == '.';
+}
+
+// Names listed in a directory's `.hidden` file are treated as hidden too
+// (freedesktop convention, honored by Dolphin/Nemo).
+std::unordered_set<std::string> read_hidden_file(const std::string& dir) {
+  std::unordered_set<std::string> names;
+  std::ifstream f(dir + "/.hidden");
+  if (!f.is_open()) return names;
+  std::string line;
+  while (std::getline(f, line)) {
+    while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+    if (!line.empty()) names.insert(line);
+  }
+  return names;
+}
+
+// Digit-aware "natural" comparison: embedded number runs compare by value,
+// so file2 < file10. Honors case sensitivity preference.
+static int natural_compare(const std::string& a, const std::string& b,
+                           bool case_sensitive) {
+  size_t i = 0, j = 0;
+  auto fold = [&](unsigned char c) {
+    return case_sensitive ? c : static_cast<unsigned char>(std::tolower(c));
+  };
+  while (i < a.size() && j < b.size()) {
+    unsigned char ca = a[i], cb = b[j];
+    if (std::isdigit(ca) && std::isdigit(cb)) {
+      // Skip leading zeros but remember there was one
+      size_t si = i, sj = j;
+      while (si < a.size() && a[si] == '0') ++si;
+      while (sj < b.size() && b[sj] == '0') ++sj;
+      size_t ei = si, ej = sj;
+      while (ei < a.size() && std::isdigit(static_cast<unsigned char>(a[ei]))) ++ei;
+      while (ej < b.size() && std::isdigit(static_cast<unsigned char>(b[ej]))) ++ej;
+      size_t li = ei - si, lj = ej - sj;
+      if (li != lj) return li < lj ? -1 : 1;
+      while (si < ei) {
+        if (a[si] != b[sj]) return a[si] < b[sj] ? -1 : 1;
+        ++si; ++sj;
+      }
+      i = ei; j = ej;
+    } else {
+      unsigned char fa = fold(ca), fb = fold(cb);
+      if (fa != fb) return fa < fb ? -1 : 1;
+      ++i; ++j;
+    }
+  }
+  if (i < a.size()) return 1;
+  if (j < b.size()) return -1;
+  return 0;
+}
+
+// Owner/group name lookup with caching to avoid repeated passwd/group hits.
+static const std::string& user_name(uid_t uid) {
+  static std::unordered_map<uid_t, std::string> cache;
+  auto it = cache.find(uid);
+  if (it != cache.end()) return it->second;
+  struct passwd* pw = getpwuid(uid);
+  return cache.emplace(uid, pw ? pw->pw_name : std::to_string(uid)).first->second;
+}
+
+static const std::string& group_name(gid_t gid) {
+  static std::unordered_map<gid_t, std::string> cache;
+  auto it = cache.find(gid);
+  if (it != cache.end()) return it->second;
+  struct group* gr = getgrgid(gid);
+  return cache.emplace(gid, gr ? gr->gr_name : std::to_string(gid)).first->second;
 }
 
 static FileType mime_to_file_type(const std::string& mime) {
@@ -698,6 +770,9 @@ void reload_dir(AppState& app) {
   DIR* dir = opendir(app.cur_tab().current_path.c_str());
   if (!dir) return;
 
+  const std::unordered_set<std::string> hidden_names =
+      read_hidden_file(app.cur_tab().current_path);
+
   struct dirent* dent;
   while ((dent = readdir(dir)) != nullptr) {
     std::string name = dent->d_name;
@@ -711,7 +786,8 @@ void reload_dir(AppState& app) {
     FileEntry e;
     e.name = name;
     e.path = full;
-    e.is_hidden = is_hidden_file(name);
+    e.in_hidden_file = hidden_names.count(name) > 0;
+    e.is_hidden = is_hidden_file(name) || e.in_hidden_file;
     e.is_symlink = (dent->d_type == DT_LNK);
 
     if (dent->d_type == DT_DIR) {
@@ -723,6 +799,32 @@ void reload_dir(AppState& app) {
     if (stat_ok) {
       e.size = static_cast<uint64_t>(st.st_size);
       e.modified_sec = static_cast<int64_t>(st.st_mtime);
+      e.mode = st.st_mode;
+      e.readable = (st.st_mode & (S_IRUSR | S_IRGRP | S_IROTH)) != 0 ||
+                   geteuid() == 0;
+      e.writable = (st.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) != 0 ||
+                   geteuid() == 0;
+      e.owner = user_name(st.st_uid);
+      e.group = group_name(st.st_gid);
+    }
+
+    // Symlink target (for LinkTarget sorting / emblems)
+    if (e.is_symlink) {
+      char buf[4096];
+      ssize_t n = readlink(full.c_str(), buf, sizeof(buf) - 1);
+      if (n > 0) {
+        buf[n] = '\0';
+        e.link_target = buf;
+      }
+    }
+
+    // Lowercase extension without the dot ("tar.gz" keeps full suffix chain)
+    if (!e.is_dir) {
+      auto dot = name.rfind('.');
+      if (dot != std::string::npos && dot + 1 < name.size()) {
+        e.extension = name.substr(dot + 1);
+        for (auto& c : e.extension) c = std::tolower(c);
+      }
     }
 
     if (!e.is_dir) {
@@ -771,6 +873,9 @@ void reload_dir(AppState& app) {
     [&](const FileEntry& a, const FileEntry& b) {
       if (app.folders_before_files && a.is_dir != b.is_dir) return a.is_dir;
 
+      // Hidden entries optionally sort after everything else
+      if (app.sort_hidden_last && a.is_hidden != b.is_hidden) return !a.is_hidden;
+
       // Group by type: primary sort key when enabled
       if (app.cur_tab().group_by_type) {
         int ta = static_cast<int>(a.type);
@@ -778,10 +883,25 @@ void reload_dir(AppState& app) {
         if (ta != tb) return ta < tb;
       }
 
+      auto name_cmp = [&](const std::string& x, const std::string& y) -> int {
+        if (app.sort_natural)
+          return natural_compare(x, y, app.sort_case_sensitive);
+        if (app.sort_case_sensitive)
+          return x.compare(y);
+        // Plain case-folded lexicographic
+        size_t n = std::min(x.size(), y.size());
+        for (size_t k = 0; k < n; ++k) {
+          unsigned char cx = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(x[k])));
+          unsigned char cy = static_cast<unsigned char>(std::tolower(static_cast<unsigned char>(y[k])));
+          if (cx != cy) return cx < cy ? -1 : 1;
+        }
+        return x.size() < y.size() ? -1 : (x.size() > y.size() ? 1 : 0);
+      };
+
       int cmp = 0;
       switch (app.cur_tab().sort_field) {
         case SortField::Name:
-          cmp = strverscmp(a.name.c_str(), b.name.c_str());
+          cmp = name_cmp(a.name, b.name);
           break;
         case SortField::Size:
           if (a.size < b.size) cmp = -1;
@@ -801,7 +921,27 @@ void reload_dir(AppState& app) {
           break;
         case SortField::Type:
           cmp = static_cast<int>(a.type) - static_cast<int>(b.type);
-          if (cmp == 0) cmp = strverscmp(a.name.c_str(), b.name.c_str());
+          if (cmp == 0) cmp = name_cmp(a.name, b.name);
+          break;
+        case SortField::Owner:
+          cmp = a.owner.compare(b.owner);
+          if (cmp == 0) cmp = name_cmp(a.name, b.name);
+          break;
+        case SortField::Group:
+          cmp = a.group.compare(b.group);
+          if (cmp == 0) cmp = name_cmp(a.name, b.name);
+          break;
+        case SortField::Permissions:
+          cmp = (a.mode & 0777) - (b.mode & 0777);
+          if (cmp == 0) cmp = name_cmp(a.name, b.name);
+          break;
+        case SortField::Extension:
+          cmp = a.extension.compare(b.extension);
+          if (cmp == 0) cmp = name_cmp(a.name, b.name);
+          break;
+        case SortField::LinkTarget:
+          cmp = a.link_target.compare(b.link_target);
+          if (cmp == 0) cmp = name_cmp(a.name, b.name);
           break;
       }
       // FirstModified/LastModified have fixed directions, ignore sort_descending
@@ -1770,6 +1910,9 @@ bool process_pending_thumbnails(AppState& app) {
   if (search_is_active && !(app.active_pane ? app.r_search_query : app.search_query).empty()) {
     bool got_any = false;
     SearchResult sr;
+    // Cache of per-directory .hidden sets for the current result batch
+    static std::unordered_map<std::string, std::unordered_set<std::string>> sr_hidden;
+    sr_hidden.clear();
     while (recursive_search_worker().poll(sr)) {
       got_any = true;
       FileEntry entry;
@@ -1783,6 +1926,18 @@ bool process_pending_thumbnails(AppState& app) {
         entry.mime_type = mime_by_ext(entry.name);
       }
       entry.type = detect_file_type(entry.name, sr.is_dir, entry.mime_type);
+      entry.is_hidden = is_hidden_file(entry.name);
+
+      // Honor the parent directory's .hidden file
+      std::string parent = (slash != std::string::npos) ? filename.substr(0, slash)
+                                                        : std::string();
+      if (!parent.empty()) {
+        auto it = sr_hidden.find(parent);
+        if (it == sr_hidden.end())
+          it = sr_hidden.emplace(parent, read_hidden_file(parent)).first;
+        if (it->second.count(entry.name) > 0) entry.is_hidden = true;
+      }
+      if (!app.show_hidden && entry.is_hidden) continue;
 
       // XDG user-directory icons from system theme
       if (entry.is_dir) {

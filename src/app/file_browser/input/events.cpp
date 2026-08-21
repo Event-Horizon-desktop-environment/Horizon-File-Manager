@@ -1379,14 +1379,45 @@ void handle_click(AppState& app, int x, int y, int button) {
     if ((app.active_pane ? app.r_sort_menu_open : app.sort_menu_open)) {
       if (x >= (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) && x < (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) + (app.active_pane ? app.r_sort_menu_w : app.sort_menu_w) &&
           y >= (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) && y < (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) + (app.active_pane ? app.r_sort_menu_h : app.sort_menu_h)) {
-        int rel_y = y - (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) - 6;
-        int idx = rel_y / 30;
-        if (idx >= 0 && idx < 6) {
-          app.cur_tab().sort_field = static_cast<SortField>(idx);
-          (app.active_pane ? app.r_sort_menu_open : app.sort_menu_open) = false;
-          save_file_browser_settings(app);
-          reload_dir(app);
-          draw(app);
+        int rel_y = y - (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) - kSortMenuPad;
+        int idx = rel_y / kSortMenuItemH;
+        if (idx >= 0 && idx < sort_menu_row_count()) {
+          const SortMenuRow& row = sort_menu_row(idx);
+          bool changed = false;
+          switch (row.kind) {
+            case SortMenuRow::Kind::Field:
+              app.cur_tab().sort_field = static_cast<SortField>(row.field);
+              changed = true;
+              break;
+            case SortMenuRow::Kind::ToggleDescending:
+              app.cur_tab().sort_descending = !app.cur_tab().sort_descending;
+              changed = true;
+              break;
+            case SortMenuRow::Kind::ToggleFoldersFirst:
+              app.folders_before_files = !app.folders_before_files;
+              changed = true;
+              break;
+            case SortMenuRow::Kind::ToggleHiddenLast:
+              app.sort_hidden_last = !app.sort_hidden_last;
+              changed = true;
+              break;
+            case SortMenuRow::Kind::ToggleNatural:
+              app.sort_natural = !app.sort_natural;
+              changed = true;
+              break;
+            case SortMenuRow::Kind::ToggleCaseSensitive:
+              app.sort_case_sensitive = !app.sort_case_sensitive;
+              changed = true;
+              break;
+            default:
+              break; // separator: keep menu open
+          }
+          if (changed) {
+            (app.active_pane ? app.r_sort_menu_open : app.sort_menu_open) = false;
+            save_file_browser_settings(app);
+            reload_dir(app);
+            draw(app);
+          }
           return;
         }
       } else {

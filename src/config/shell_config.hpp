@@ -287,6 +287,9 @@ struct FileBrowserSettings {
   int view_mode = 0;             // 0=List, 1=Grid
   int sort_field = 0;            // 0=Name, 1=Size, 2=Modified, 3=Type
   bool sort_descending = false;
+  bool sort_natural = true;
+  bool sort_case_sensitive = false;
+  bool sort_hidden_last = false;
   bool show_hidden = false;
   bool group_by_type = false;
 

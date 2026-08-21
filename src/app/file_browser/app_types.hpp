@@ -47,6 +47,11 @@ enum class SortField {
   Type,
   FirstModified,
   LastModified,
+  Owner,
+  Group,
+  Permissions,
+  Extension,
+  LinkTarget,
 };
 
 enum class FileType {
@@ -415,6 +420,8 @@ struct AppState {
     MoveToDesktop,
     MoveToOtherPane,
     ReopenClosedTab,
+    HideFile,
+    UnhideFile,
     Separator,
   };
   struct ContextMenuItem {
@@ -910,6 +917,9 @@ struct AppState {
   // ── Live config values ──
   double zoom_pct = 100.0;
   bool folders_before_files = true;
+  bool sort_natural = true;          // digit-aware name comparison
+  bool sort_case_sensitive = false;
+  bool sort_hidden_last = false;     // hidden entries sort after visible ones
   int surface_opacity_pct = 100;
   int sidebar_opacity_pct = 100;
   int topbar_opacity_pct = 100;

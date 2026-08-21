@@ -214,6 +214,9 @@ FileBrowserSettings read_file_browser_toml() {
     fbs.view_mode = tbl["view_mode"].value_or(0);
     fbs.sort_field = tbl["sort_field"].value_or(0);
     fbs.sort_descending = tbl["sort_descending"].value_or(false);
+    fbs.sort_natural = tbl["sort_natural"].value_or(true);
+    fbs.sort_case_sensitive = tbl["sort_case_sensitive"].value_or(false);
+    fbs.sort_hidden_last = tbl["sort_hidden_last"].value_or(false);
     fbs.show_hidden = tbl["show_hidden"].value_or(false);
     fbs.window_controls_left = tbl["window_controls_left"].value_or(false);
     fbs.group_by_type = tbl["group_by_type"].value_or(false);
@@ -245,6 +248,9 @@ bool write_file_browser_toml(const FileBrowserSettings& fbs) {
     tbl.emplace("view_mode", fbs.view_mode);
     tbl.emplace("sort_field", fbs.sort_field);
     tbl.emplace("sort_descending", fbs.sort_descending);
+    tbl.emplace("sort_natural", fbs.sort_natural);
+    tbl.emplace("sort_case_sensitive", fbs.sort_case_sensitive);
+    tbl.emplace("sort_hidden_last", fbs.sort_hidden_last);
     tbl.emplace("show_hidden", fbs.show_hidden);
     tbl.emplace("window_controls_left", fbs.window_controls_left);
     tbl.emplace("group_by_type", fbs.group_by_type);

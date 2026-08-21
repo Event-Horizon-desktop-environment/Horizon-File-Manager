@@ -363,6 +363,18 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
       app.context_menu_items.push_back(
         AppState::menu_item(AppState::ContextMenuAction::PasteInto, "Paste Into Folder"));
     app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Rename, "Rename"));
+    {
+      int real_for_hide = app.cur_tab().visible_entries[item_idx];
+      bool listed = real_for_hide >= 0 &&
+                    real_for_hide < static_cast<int>(app.cur_tab().entries.size()) &&
+                    app.cur_tab().entries[real_for_hide].in_hidden_file;
+      if (listed)
+        app.context_menu_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::UnhideFile, "Unhide"));
+      else
+        app.context_menu_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::HideFile, "Hide"));
+    }
     app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::OpenFileLocation, "Open File Location"));
     app.context_menu_items.push_back(AppState::menu_separator());
 
@@ -1003,6 +1015,43 @@ void execute_context_menu_action(AppState& app, int item_idx) {
       invert_selection(app);
       draw(app);
       return;
+
+    case AppState::ContextMenuAction::HideFile:
+    case AppState::ContextMenuAction::UnhideFile: {
+      if (app.context_menu_file_idx >= 0 &&
+          app.context_menu_file_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+        int r = app.cur_tab().visible_entries[app.context_menu_file_idx];
+        if (r >= 0 && r < static_cast<int>(app.cur_tab().entries.size())) {
+          const std::string& name = app.cur_tab().entries[r].name;
+          std::string hidden_path = app.cur_tab().current_path + "/.hidden";
+          std::vector<std::string> lines;
+          {
+            std::ifstream in(hidden_path);
+            std::string line;
+            while (std::getline(in, line)) {
+              while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+              if (!line.empty()) lines.push_back(line);
+            }
+          }
+          if (action == AppState::ContextMenuAction::HideFile) {
+            if (std::find(lines.begin(), lines.end(), name) == lines.end())
+              lines.push_back(name);
+          } else {
+            lines.erase(std::remove(lines.begin(), lines.end(), name), lines.end());
+          }
+          std::error_code ec;
+          if (lines.empty()) {
+            fs::remove(hidden_path, ec);
+          } else {
+            std::ofstream out(hidden_path, std::ios::trunc);
+            for (const auto& l : lines) out << l << "\n";
+          }
+          reload_dir(app);
+        }
+      }
+      draw(app);
+      return;
+    }
 
     case AppState::ContextMenuAction::SelectPattern:
       open_select_pattern(app);
@@ -1722,6 +1771,9 @@ void save_file_browser_settings(AppState& app) {
   eh::config::FileBrowserSettings fbs;
   fbs.zoom_pct = app.zoom_pct;
   fbs.folders_before_files = app.folders_before_files;
+  fbs.sort_natural = app.sort_natural;
+  fbs.sort_case_sensitive = app.sort_case_sensitive;
+  fbs.sort_hidden_last = app.sort_hidden_last;
   fbs.surface_opacity_pct = app.surface_opacity_pct;
   fbs.sidebar_opacity_pct = app.sidebar_opacity_pct;
   fbs.topbar_opacity_pct = app.topbar_opacity_pct;
@@ -1745,6 +1797,9 @@ void settings_apply(AppState& app) {
   eh::config::FileBrowserSettings fbs;
   fbs.zoom_pct = app.settings_zoom_pct;
   fbs.folders_before_files = app.settings_folders_before_files;
+  fbs.sort_natural = app.sort_natural;
+  fbs.sort_case_sensitive = app.sort_case_sensitive;
+  fbs.sort_hidden_last = app.sort_hidden_last;
   fbs.surface_opacity_pct = app.settings_opacity_pct;
   fbs.sidebar_opacity_pct = app.settings_sidebar_opacity_pct;
   fbs.topbar_opacity_pct = app.settings_topbar_opacity_pct;
@@ -1854,10 +1909,14 @@ void reload_settings_from_config(AppState& app) {
   app.cur_tab().view_mode = static_cast<ViewMode>(fbs.view_mode);
   if (app.cur_tab().view_mode != ViewMode::Computer)
     app.last_browser_view_mode = app.cur_tab().view_mode;
-  app.cur_tab().sort_field = static_cast<SortField>(std::clamp(fbs.sort_field, 0, 5));
+  app.cur_tab().sort_field = static_cast<SortField>(std::clamp(
+      fbs.sort_field, 0, static_cast<int>(SortField::LinkTarget)));
   app.cur_tab().sort_descending = fbs.sort_descending;
   app.cur_tab().group_by_type = fbs.group_by_type;
   app.show_hidden = fbs.show_hidden;
+  app.sort_natural = fbs.sort_natural;
+  app.sort_case_sensitive = fbs.sort_case_sensitive;
+  app.sort_hidden_last = fbs.sort_hidden_last;
   app.entry_height = std::max(20, static_cast<int>(36.0 * app.zoom_pct / 100.0));
   int icon_sz = static_cast<int>(48.0 * app.zoom_pct / 100.0);
   app.grid_cell_size = std::max(40, icon_sz + static_cast<int>(8.0 * app.zoom_pct / 100.0));

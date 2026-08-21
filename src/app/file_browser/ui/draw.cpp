@@ -258,7 +258,54 @@ static const char* icon_name_for_file_type(FileType ft, const std::string* file_
   return name;
 }
 
-static void draw_file_icon_cairo(AppState& app, cairo_t* cr, int x, int y,
+// Small status badge drawn over a file icon's lower-left corner.
+// kind: 0 = symlink (accent arrow), 1 = read-only (padlock), 2 = no access
+static void draw_emblem_badge(AppState& app, cairo_t* cr, double cx, double cy,
+                              double r, int kind) {
+  // Backing disc
+  if (kind == 0) {
+    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 1.0);
+  } else if (kind == 1) {
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                          app.text_secondary_b, 1.0);
+  } else {
+    cairo_set_source_rgba(cr, 0.85, 0.25, 0.25, 1.0);
+  }
+  cairo_arc(cr, cx, cy, r, 0, 2 * M_PI);
+  cairo_fill(cr);
+  cairo_set_line_width(cr, std::max(1.0, r * 0.14));
+  cairo_set_source_rgba(cr, 1, 1, 1, 0.9);
+
+  if (kind == 0) {
+    // Diagonal arrow (symlink)
+    double a = r * 0.45;
+    cairo_move_to(cr, cx - a, cy + a);
+    cairo_line_to(cr, cx + a * 0.8, cy - a * 0.8);
+    cairo_stroke(cr);
+    // Arrowhead
+    cairo_move_to(cr, cx + a * 0.8, cy - a * 0.8);
+    cairo_line_to(cr, cx + a * 0.8 - a * 0.55, cy - a * 0.8);
+    cairo_stroke(cr);
+    cairo_move_to(cr, cx + a * 0.8, cy - a * 0.8);
+    cairo_line_to(cr, cx + a * 0.8, cy - a * 0.8 + a * 0.55);
+    cairo_stroke(cr);
+  } else if (kind == 1) {
+    // Padlock: shackle arc + body
+    double bw = r * 0.9, bh = r * 0.7;
+    cairo_rectangle(cr, cx - bw / 2, cy - bh * 0.1, bw, bh);
+    cairo_fill(cr);
+    cairo_set_line_width(cr, std::max(1.0, r * 0.18));
+    cairo_arc(cr, cx, cy - bh * 0.1, bw * 0.32, M_PI, 2 * M_PI);
+    cairo_stroke(cr);
+  } else {
+    // "No entry" bar
+    double bw = r * 1.1, bh = r * 0.28;
+    cairo_rectangle(cr, cx - bw / 2, cy - bh / 2, bw, bh);
+    cairo_fill(cr);
+  }
+}
+
+static void draw_file_icon_body(AppState& app, cairo_t* cr, int x, int y,
                                   int size, FileType ft, bool selected,
                                   const std::string& icon_name = {},
                                   cairo_surface_t* thumb = nullptr,
@@ -400,6 +447,39 @@ static void draw_file_icon_cairo(AppState& app, cairo_t* cr, int x, int y,
                 y + (size + te.height) / 2 - te.y_bearing);
   cairo_show_text(cr, label);
   cairo_restore(cr);
+}
+
+// Icon + status emblems (symlink / read-only / no access)
+static void draw_file_icon_cairo(AppState& app, cairo_t* cr, int x, int y,
+                                  int size, FileType ft, bool selected,
+                                  const std::string& icon_name = {},
+                                  cairo_surface_t* thumb = nullptr,
+                                  const std::string* file_path = nullptr,
+                                  const FileEntry* entry = nullptr) {
+  draw_file_icon_body(app, cr, x, y, size, ft, selected, icon_name, thumb, file_path);
+  if (!entry) return;
+
+  // Skip emblems on tiny icons
+  if (size < 24) return;
+
+  double r = std::max(5.0, size * 0.11);
+  double pad = r * 0.4;
+  double cy = y + size - r - pad;
+  double cx = x + r + pad;
+  int drawn = 0;
+
+  if (entry->is_symlink) {
+    draw_emblem_badge(app, cr, cx + drawn * (r * 2 + pad * 1.6), cy, r, 0);
+    ++drawn;
+  }
+  if (entry->readable && !entry->writable) {
+    draw_emblem_badge(app, cr, cx + drawn * (r * 2 + pad * 1.6), cy, r, 1);
+    ++drawn;
+  }
+  if (!entry->readable || (entry->is_dir && entry->mode &&
+                           !(entry->mode & S_IXUSR))) {
+    draw_emblem_badge(app, cr, cx + drawn * (r * 2 + pad * 1.6), cy, r, 2);
+  }
 }
 
 static std::string format_size(uint64_t bytes) {
@@ -933,6 +1013,11 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
       case SortField::Type:           return "Type";
       case SortField::FirstModified:  return "First";
       case SortField::LastModified:   return "Last";
+      case SortField::Owner:          return "Owner";
+      case SortField::Group:          return "Group";
+      case SortField::Permissions:    return "Perms";
+      case SortField::Extension:      return "Ext";
+      case SortField::LinkTarget:     return "Target";
     }
     return "Sort";
   };
@@ -1865,14 +1950,35 @@ void draw_hover_preview(AppState& app, cairo_t* cr) {
 
 // ── sort menu dropdown ───────────────────────────────────────────
 
-static constexpr const char* kSortMenuLabels[] = {
-  "Name",
-  "Size",
-  "Date Modified",
-  "Type",
-  "First Modified",
-  "Last Modified",
-};
+static const std::vector<SortMenuRow>& sort_menu_rows() {
+  using K = SortMenuRow::Kind;
+  static const std::vector<SortMenuRow> rows = {
+    {K::Field, "Name", static_cast<int>(SortField::Name)},
+    {K::Field, "Size", static_cast<int>(SortField::Size)},
+    {K::Field, "Date Modified", static_cast<int>(SortField::Modified)},
+    {K::Field, "Type", static_cast<int>(SortField::Type)},
+    {K::Field, "Owner", static_cast<int>(SortField::Owner)},
+    {K::Field, "Group", static_cast<int>(SortField::Group)},
+    {K::Field, "Permissions", static_cast<int>(SortField::Permissions)},
+    {K::Field, "Extension", static_cast<int>(SortField::Extension)},
+    {K::Field, "Link Target", static_cast<int>(SortField::LinkTarget)},
+    {K::Field, "First Modified", static_cast<int>(SortField::FirstModified)},
+    {K::Field, "Last Modified", static_cast<int>(SortField::LastModified)},
+    {K::Separator, "", 0},
+    {K::ToggleDescending, "Descending", 0},
+    {K::ToggleFoldersFirst, "Folders First", 0},
+    {K::ToggleHiddenLast, "Hidden Last", 0},
+    {K::ToggleNatural, "Natural Order", 0},
+    {K::ToggleCaseSensitive, "Case Sensitive", 0},
+  };
+  return rows;
+}
+
+int sort_menu_row_count() { return static_cast<int>(sort_menu_rows().size()); }
+
+const SortMenuRow& sort_menu_row(int index) {
+  return sort_menu_rows()[static_cast<size_t>(index)];
+}
 
 void draw_sort_menu(AppState& app, cairo_t* cr) {
   // Per-pane position helpers
@@ -1883,10 +1989,10 @@ void draw_sort_menu(AppState& app, cairo_t* cr) {
   auto& dm_sort_menu_hover = app.active_pane ? app.r_sort_menu_hover : app.sort_menu_hover;
   auto& dm_sort_btn_x = app.active_pane ? app.r_sort_btn_x : app.sort_btn_x;
 
-  static constexpr int kItemH = 30;
-  static constexpr int kPad = 6;
-  int n = static_cast<int>(std::size(kSortMenuLabels));
-  int menu_w = 160;
+  static constexpr int kItemH = kSortMenuItemH;
+  static constexpr int kPad = kSortMenuPad;
+  int n = sort_menu_row_count();
+  int menu_w = 180;
   int menu_h = n * kItemH + kPad * 2;
 
   // Position below the sort button
@@ -1921,8 +2027,41 @@ void draw_sort_menu(AppState& app, cairo_t* cr) {
 
   for (int i = 0; i < n; ++i) {
     int row_y = dm_sort_menu_y + kPad + i * kItemH;
+    const SortMenuRow& row = sort_menu_row(i);
     bool hovered = (i == dm_sort_menu_hover);
-    bool active = static_cast<int>(app.cur_tab().sort_field) == i;
+
+    if (row.kind == SortMenuRow::Kind::Separator) {
+      cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
+      cairo_set_line_width(cr, 1);
+      cairo_move_to(cr, dm_sort_menu_x + 10, row_y + kItemH / 2 + 0.5);
+      cairo_line_to(cr, dm_sort_menu_x + menu_w - 10, row_y + kItemH / 2 + 0.5);
+      cairo_stroke(cr);
+      continue;
+    }
+
+    bool active = false;
+    switch (row.kind) {
+      case SortMenuRow::Kind::Field:
+        active = static_cast<int>(app.cur_tab().sort_field) == row.field;
+        break;
+      case SortMenuRow::Kind::ToggleDescending:
+        active = app.cur_tab().sort_descending;
+        break;
+      case SortMenuRow::Kind::ToggleFoldersFirst:
+        active = app.folders_before_files;
+        break;
+      case SortMenuRow::Kind::ToggleHiddenLast:
+        active = app.sort_hidden_last;
+        break;
+      case SortMenuRow::Kind::ToggleNatural:
+        active = app.sort_natural;
+        break;
+      case SortMenuRow::Kind::ToggleCaseSensitive:
+        active = app.sort_case_sensitive;
+        break;
+      default:
+        break;
+    }
 
     if (hovered) {
       cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
@@ -1930,7 +2069,7 @@ void draw_sort_menu(AppState& app, cairo_t* cr) {
       cairo_fill(cr);
     }
 
-    // Checkmark for current sort field
+    // Checkmark for current sort field / enabled toggle
     if (active) {
       cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 1.0);
       cairo_move_to(cr, dm_sort_menu_x + 14, row_y + kItemH / 2 + 4);
@@ -1939,10 +2078,10 @@ void draw_sort_menu(AppState& app, cairo_t* cr) {
 
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
     cairo_move_to(cr, dm_sort_menu_x + 14 + (active ? 14 : 0), row_y + kItemH / 2 + 4);
-    cairo_show_text(cr, kSortMenuLabels[i]);
+    cairo_show_text(cr, row.label);
 
-    // Direction arrow beside active item
-    if (active) {
+    // Direction arrow beside the active field
+    if (row.kind == SortMenuRow::Kind::Field && active) {
       cairo_move_to(cr, dm_sort_menu_x + menu_w - 20, row_y + kItemH / 2 + 4);
       cairo_show_text(cr, app.cur_tab().sort_descending ? "↑" : "↓");
     }
@@ -2282,7 +2421,7 @@ void draw_list_view(AppState& app, cairo_t* cr, int content_x,
       thumb = get_thumbnail_lazy(app, vi, entry.path, icon_size);
     }
     draw_file_icon_cairo(app, cr, content_x + 8, y + (entry_h - icon_size) / 2,
-                          icon_size, entry.type, selected, entry.icon_name, thumb, &entry.path);
+                          icon_size, entry.type, selected, entry.icon_name, thumb, &entry.path, &entry);
 
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                             CAIRO_FONT_WEIGHT_NORMAL);
@@ -2469,7 +2608,7 @@ void draw_grid_view(AppState& app, cairo_t* cr, int content_x,
       thumb = get_thumbnail_lazy(app, vi, entry.path, icon_size);
     }
     draw_file_icon_cairo(app, cr, bg_x, bg_y,
-                          icon_size, entry.type, selected, entry.icon_name, thumb, &entry.path);
+                          icon_size, entry.type, selected, entry.icon_name, thumb, &entry.path, &entry);
 
     // Label (word/char-wrapped to 2 lines; extension preserved if truncation
     // is needed; top-anchored so spacing is consistent regardless of 1 vs 2 lines)
@@ -6321,11 +6460,13 @@ void build_tree_entries(AppState& app) {
       // Read children recursively
       std::vector<TreeEntry> children;
       std::error_code ec;
+      const auto hidden_names = read_hidden_file(entry.path);
       for (auto& de : fs::directory_iterator(entry.path, ec)) {
         auto path = de.path();
         auto name = path.filename().string();
         if (name.empty()) continue;
-        if (name[0] == '.' && !app.show_hidden) continue;
+        if (!app.show_hidden &&
+            (name[0] == '.' || hidden_names.count(name) > 0)) continue;
         bool is_dir = de.is_directory(ec);
         bool child_expanded = tab.tree_expanded.count(path.string()) > 0;
         children.push_back({name, path.string(), is_dir, 1, is_dir, child_expanded});
@@ -6337,11 +6478,13 @@ void build_tree_entries(AppState& app) {
       for (auto& child : children) {
         if (child.is_dir && child.is_expanded) {
           std::vector<TreeEntry> grandchildren;
+          const auto ghidden = read_hidden_file(child.path);
           for (auto& gde : fs::directory_iterator(child.path, ec)) {
             auto gp = gde.path();
             auto gn = gp.filename().string();
             if (gn.empty()) continue;
-            if (gn[0] == '.' && !app.show_hidden) continue;
+            if (!app.show_hidden &&
+                (gn[0] == '.' || ghidden.count(gn) > 0)) continue;
             bool gd = gde.is_directory(ec);
             grandchildren.push_back({gn, gp.string(), gd, 2, gd, false});
           }
@@ -6488,7 +6631,7 @@ void draw_compact_view(AppState& app, cairo_t* cr, int content_x,
       thumb = get_thumbnail_lazy(app, vi, entry.path, icon_size);
     }
     draw_file_icon_cairo(app, cr, content_x + 6, y + (entry_h - icon_size) / 2,
-                          icon_size, entry.type, selected, entry.icon_name, thumb, &entry.path);
+                          icon_size, entry.type, selected, entry.icon_name, thumb, &entry.path, &entry);
 
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, 12.0 * zf);

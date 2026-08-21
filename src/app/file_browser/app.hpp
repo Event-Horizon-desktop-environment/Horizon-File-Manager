@@ -3,6 +3,7 @@
 #include "app/file_browser/app_types.hpp"
 
 #include <string>
+#include <unordered_set>
 
 #include <cairo/cairo.h>
 
@@ -48,6 +49,30 @@ void navigate_forward(AppState& app);
 
 /// Reload the current directory listing.
 void reload_dir(AppState& app);
+
+// Names listed in a directory's `.hidden` file (freedesktop convention).
+std::unordered_set<std::string> read_hidden_file(const std::string& dir);
+
+// ── Sort dropdown row model (shared by draw + click handling) ──
+struct SortMenuRow {
+  enum class Kind {
+    Field,               // sort_field selector (field = SortField as int)
+    ToggleDescending,    // reverse order
+    ToggleFoldersFirst,
+    ToggleHiddenLast,
+    ToggleNatural,
+    ToggleCaseSensitive,
+    Separator,
+  };
+  Kind kind = Kind::Separator;
+  const char* label = "";
+  int field = 0; // valid when kind == Field
+};
+
+int sort_menu_row_count();
+const SortMenuRow& sort_menu_row(int index);
+inline constexpr int kSortMenuItemH = 30;
+inline constexpr int kSortMenuPad = 6;
 
 /// Re-apply the current search filter / hidden filter to the existing entries.
 void apply_filter(AppState& app);
