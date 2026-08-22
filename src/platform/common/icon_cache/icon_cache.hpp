@@ -138,6 +138,9 @@ struct IconCacheData {
   // directory so lookups never touch the filesystem.
   std::vector<std::unordered_map<std::string, std::string>> dirIndexes;
   bool indexesBuilt = false;
+  // Set while a worker scans theme dirs; paint threads must never block on
+  // the index build, so the scan itself runs outside mtx.
+  std::atomic<bool> indexesBeingBuilt{false};
 
   // Keys that fully failed resolution — rejected in O(1) afterwards.
   std::unordered_set<std::string> negativeKeys{};

@@ -345,6 +345,16 @@ struct AppState {
   std::atomic<bool> scan_progress_flag{false};
   std::atomic<bool> scan_cancel{false};
   bool scan_apply_deferred = false;
+  // While true, xdg configure events paint a flat background frame instead
+  // of the full UI, so the window maps on screen within a few ms of launch.
+  bool startup_blank_frame = false;
+  // Post-startup burst of extra frames so asynchronously-resolved theme
+  // icons (sidebar etc.) appear immediately instead of on the next event.
+  int icon_catchup_frames = 0;
+  // True only during the very first navigation at process start: skip the
+  // inline fast-path wait in reload_dir so the first frame paints ASAP and
+  // the listing applies from the frame loop instead.
+  bool startup_loading = false;
   std::thread scan_thread;
   // Identity of the in-flight scan (written/read on UI thread only).
   std::string scan_active_path;
@@ -702,6 +712,9 @@ struct AppState {
     int64_t mtime_sec = 0;   // dir mtime when measured (staleness check)
   };
   std::map<std::string, DirStatEntry> dir_stat_cache;
+  // Hover-preview async decode request (pool result upgrades the popup)
+  std::string preview_req_path;
+  int preview_req_px = 0;
 
   // ── Desktop file icon cache ──
   std::string last_reload_path;

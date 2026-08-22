@@ -33,7 +33,11 @@ struct PaintPhase {
   ~PaintPhase() {
     double ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
-    if (ms >= 50.0) log->emplace_back(name, ms);
+    // Always record the first paint's phases (startup diagnostics); after
+    // that only >=50 ms phases are worth logging.
+    static std::atomic<int> first_paint{0};
+    bool first = first_paint.fetch_add(1, std::memory_order_relaxed) < 40;
+    if (ms >= 50.0 || (first && ms >= 0.5)) log->emplace_back(name, ms);
   }
 };
 }  // namespace
@@ -476,6 +480,16 @@ void paint(AppState& app, cairo_t* cr) {
   // Operations panel (right sidebar)
   { auto ph = phase("opspanel"); draw_operations_panel(app, cr); }
 
+  {
+    static std::atomic<bool> logged_first{false};
+    bool is_first_paint = !logged_first.exchange(true);
+    if (is_first_paint && !slow_phases.empty() &&
+        trace::enabled().load(std::memory_order_relaxed)) {
+      for (auto& [n, ms] : slow_phases)
+        trace::log("PAINT FIRST %s %.2f ms", n, ms);
+      slow_phases.clear();
+    }
+  }
   if (!slow_phases.empty() && trace::enabled().load(std::memory_order_relaxed)) {
     for (auto& [n, ms] : slow_phases)
       trace::log("PAINT SLOW %s %.1f ms", n, ms);

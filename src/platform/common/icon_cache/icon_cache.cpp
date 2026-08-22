@@ -27,6 +27,8 @@
 namespace fs = std::filesystem;
 
 namespace eh::icons {
+static void iconcache_rebuild_search_dirs_locked(IconCacheData& d);
+static void iconcache_build_indexes_locked(IconCacheData& d);
 
 static bool icon_debug() {
   static bool on = [] {
@@ -533,7 +535,8 @@ void IconCache::set_icon_theme(std::string themeId) {
 }
 
 void IconCache::prewarm_search_dirs() {
-  rebuild_search_dirs_if_needed();
+  std::lock_guard<std::mutex> lk(d_->mtx);
+  iconcache_rebuild_search_dirs_locked(*d_);
 }
 
 bool IconCache::refresh_auto_theme_if_needed() { return false; }
@@ -613,40 +616,14 @@ static void scan_index_subdir(const fs::path& dir,
   closedir(dp);
 }
 
-void IconCache::build_indexes_if_needed() {
-  // caller holds d_->mtx
-  if (d_->indexesBuilt) return;
-  rebuild_search_dirs_if_needed();
-  d_->dirIndexes.assign(d_->searchDirs.size(), {});
-  for (std::size_t i = 0; i < d_->searchDirs.size(); ++i) {
-    auto& idx = d_->dirIndexes[i];
-    for (const char* sub : kIndexSubdirs) {
-      scan_index_subdir(fs::path(d_->searchDirs[i]) / sub, idx);
-    }
-  }
-  d_->indexesBuilt = true;
-  d_->stIndexBuilds.fetch_add(1, std::memory_order_relaxed);
-  ICON_DBG("built indexes for %zu theme dirs\n", d_->searchDirs.size());
-}
+// Locked-domain helpers: callers must hold IconCacheData::mtx.
+static void iconcache_rebuild_search_dirs_locked(IconCacheData& d) {
+  if (d.searchDirsBuilt) return;
+  d.searchDirs.clear();
 
-// Probe one theme index for a candidate name. Returns the stored path or {}.
-static std::string index_lookup(IconCacheData& d, std::size_t dir_idx,
-                                const std::string& name) {
-  d.stIndexLookups.fetch_add(1, std::memory_order_relaxed);
-  auto& idx = d.dirIndexes[dir_idx];
-  if (auto it = idx.find(name); it != idx.end()) return it->second;
-  if (auto it = idx.find(name + "-symbolic"); it != idx.end()) return it->second;
-  return {};
-}
-
-void IconCache::rebuild_search_dirs_if_needed() {
-  // caller holds d_->mtx
-  if (d_->searchDirsBuilt) return;
-  d_->searchDirs.clear();
-
-  std::string theme = d_->themeOverride;
+  std::string theme = d.themeOverride;
   if (theme.empty()) theme = "Adwaita";
-  ICON_DBG("theme override: '%s'\n", d_->themeOverride.c_str());
+  ICON_DBG("theme override: '%s'\n", d.themeOverride.c_str());
   ICON_DBG("final theme: '%s'\n", theme.c_str());
 
   // Collect theme search path with inheritance
@@ -676,12 +653,47 @@ void IconCache::rebuild_search_dirs_if_needed() {
       auto td = fs::path(base) / t;
       if (fs::is_directory(td) && seen.insert(td.string()).second) {
         ICON_DBG("  search dir: %s\n", td.c_str());
-        d_->searchDirs.push_back(td.string());
+        d.searchDirs.push_back(td.string());
       }
     }
   }
 
-  d_->searchDirsBuilt = true;
+  d.searchDirsBuilt = true;
+}
+
+static void iconcache_build_indexes_locked(IconCacheData& d) {
+  if (d.indexesBuilt) return;
+  iconcache_rebuild_search_dirs_locked(d);
+  d.dirIndexes.assign(d.searchDirs.size(), {});
+  for (std::size_t i = 0; i < d.searchDirs.size(); ++i) {
+    auto& idx = d.dirIndexes[i];
+    for (const char* sub : kIndexSubdirs) {
+      scan_index_subdir(fs::path(d.searchDirs[i]) / sub, idx);
+    }
+  }
+  d.indexesBuilt = true;
+  d.stIndexBuilds.fetch_add(1, std::memory_order_relaxed);
+  ICON_DBG("built indexes for %zu theme dirs\n", d.searchDirs.size());
+}
+
+void IconCache::build_indexes_if_needed() {
+  // caller holds d_->mtx
+  iconcache_build_indexes_locked(*d_);
+}
+
+// Probe one theme index for a candidate name. Returns the stored path or {}.
+static std::string index_lookup(IconCacheData& d, std::size_t dir_idx,
+                                const std::string& name) {
+  d.stIndexLookups.fetch_add(1, std::memory_order_relaxed);
+  auto& idx = d.dirIndexes[dir_idx];
+  if (auto it = idx.find(name); it != idx.end()) return it->second;
+  if (auto it = idx.find(name + "-symbolic"); it != idx.end()) return it->second;
+  return {};
+}
+
+void IconCache::rebuild_search_dirs_if_needed() {
+  // caller holds d_->mtx
+  iconcache_rebuild_search_dirs_locked(*d_);
 }
 
 static void touch_lru_locked(IconCacheData& d, const std::string& key) {
@@ -738,9 +750,52 @@ static void resolve_and_insert(IconCacheData& d, const std::string& key,
   }
 
   // Resolve via in-memory indexes: candidates x theme dirs, no syscalls.
+  // First job on a worker also builds the theme index — deliberately OUTSIDE
+  // mtx so paint threads doing cache checks never wait behind a ~5-17 ms
+  // filesystem scan (they just draw placeholders until results land).
+  {
+    bool need = false;
+    {
+      std::lock_guard<std::mutex> lk(d.mtx);
+      need = !d.indexesBuilt && !d.searchDirs.empty();
+    }
+    if (need) {
+      bool expected = false;
+      if (d.indexesBeingBuilt.compare_exchange_strong(expected, true)) {
+        std::vector<std::unordered_map<std::string, std::string>> local;
+        {
+          std::lock_guard<std::mutex> lk(d.mtx);
+          iconcache_rebuild_search_dirs_locked(d);
+          local.assign(d.searchDirs.size(), {});
+        }
+        for (std::size_t i = 0; i < local.size(); ++i) {
+          for (const char* sub : kIndexSubdirs) {
+            scan_index_subdir(fs::path(d.searchDirs[i]) / sub, local[i]);
+          }
+        }
+        std::lock_guard<std::mutex> lk(d.mtx);
+        d.dirIndexes = std::move(local);
+        d.indexesBuilt = true;
+        d.indexesBeingBuilt.store(false);
+      } else {
+        // Another thread is building; let it finish before looking up.
+        for (;;) {
+          bool built, building;
+          {
+            std::lock_guard<std::mutex> lk(d.mtx);
+            built = d.indexesBuilt;
+            building = d.indexesBeingBuilt.load(std::memory_order_acquire);
+          }
+          if (built || !building) break;
+          std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+      }
+    }
+  }
   std::string path;
   {
     std::lock_guard<std::mutex> lk(d.mtx);
+    if (!d.indexesBuilt) iconcache_build_indexes_locked(d);
     for (const auto& cand : icon_name_candidates(icon_name)) {
       for (std::size_t i = 0; i < d.searchDirs.size(); ++i) {
         path = index_lookup(d, i, cand);
@@ -782,10 +837,12 @@ const IconEntry* IconCache::resolve_and_cache(const std::string& key,
                                               const std::string& icon_name,
                                               bool is_tray) {
   (void)is_tray;
-  rebuild_search_dirs_if_needed();
 
   {
     std::lock_guard<std::mutex> lk(d_->mtx);
+    // Must hold mtx: search dirs feed the index lookups below and the worker
+    // may rebuild them concurrently.
+    if (!d_->searchDirsBuilt) iconcache_rebuild_search_dirs_locked(*d_);
     auto it = d_->cache.find(key);
     if (it != d_->cache.end()) {
       touch_lru_locked(*d_, key);
@@ -825,10 +882,14 @@ void IconCache::ensure_worker_started() {
   std::lock_guard<std::mutex> lk(d_->mtx);
   if (d_->workerRunning.load()) return;
   d_->quit.store(false);
+  // Claim the running flag BEFORE spawning: it is only cleared by the
+  // worker on exit, so concurrent enqueuers can never double-spawn and
+  // destroy a joinable std::thread (which would call std::terminate).
+  d_->workerRunning.store(true);
   auto d = d_;
-  d_->worker = std::make_unique<std::thread>([d]() {
-    d->workerRunning.store(true);
-    for (;;) {
+  try {
+    d_->worker = std::make_unique<std::thread>([d]() {
+      for (;;) {
       IconCacheData::PendingLoad job;
       {
         std::unique_lock<std::mutex> lk(d->mtx);
@@ -846,6 +907,10 @@ void IconCache::ensure_worker_started() {
     }
     d->workerRunning.store(false);
   });
+  } catch (...) {
+    d_->workerRunning.store(false);
+    throw;
+  }
 }
 
 void IconCache::stop_worker() {
@@ -918,7 +983,8 @@ const IconEntry* IconCache::tray_icon(const std::string& icon_name, int pixel_si
       d_->stNegativeHits.fetch_add(1, std::memory_order_relaxed);
       return nullptr;
     }
-    build_indexes_if_needed();
+    // NOTE: no index build here on purpose — the worker thread owns it.
+    // Building theme indexes on the paint thread cost ~17 ms on first draw.
   }
 
   enqueue_async(key, icon_name, px);

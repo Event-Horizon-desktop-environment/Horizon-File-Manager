@@ -1,4 +1,5 @@
 #include "../app.hpp"
+#include "../trace.hpp"
 #include "../features/view_zoom.hpp"
 #include "app/file_browser/features/thumb_pool.hpp"
 #include "app/file_browser/features/dir_stats.hpp"
@@ -145,11 +146,8 @@ cairo_surface_t* eh_thumb_decode(const std::string& path, int size,
 cairo_surface_t* get_thumbnail(AppState& app, const std::string& path,
                                         int size) {
   auto it = app.thumb_cache.find(path);
-  if (it != app.thumb_cache.end()) {
-    app.thumb_lru.remove(path);
-    app.thumb_lru.push_front(path);
-    return it->second;
-  }
+  if (it != app.thumb_cache.end())
+    return it->second;  // hot-path: no O(n) LRU reorder
 
   // Check disk cache before decoding
   if (cairo_surface_t* s = load_cached_thumbnail(path, size)) {
@@ -222,11 +220,10 @@ static cairo_surface_t* get_thumbnail_lazy(AppState& app, int vi,
                                             const std::string& path,
                                             int size) {
   auto it = app.thumb_cache.find(path);
-  if (it != app.thumb_cache.end()) {
-    app.thumb_lru.remove(path);
-    app.thumb_lru.push_front(path);
-    return it->second;
-  }
+  if (it != app.thumb_cache.end())
+    return it->second;  // No LRU reorder here: std::list::remove is O(n) and
+                        // this runs for every visible row on every frame.
+                        // Recency is tracked at install time instead.
   thumb_pool_enqueue(app, path, size);
   return nullptr;
 }
@@ -517,6 +514,19 @@ static std::string format_size(uint64_t bytes) {
 
 void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
                   int) {
+  // One-shot: log first-paint sub-phases to find cold-start hot spots.
+  struct SubMark { const char* n; };
+  auto sub_t0 = std::chrono::steady_clock::now();
+  auto sub = [&, tag = ""](const char* n) mutable {
+    static int calls = 0;
+    if (calls++ > 6) return;   // only the first paint's marks
+    double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - sub_t0).count();
+    if (trace::enabled().load(std::memory_order_relaxed))
+      trace::log("SIDEBAR FIRST %s %.2f ms", n, ms);
+    sub_t0 = std::chrono::steady_clock::now();
+    (void)tag;
+  };
   double zf = app.zoom_pct / 100.0;
   int total = static_cast<int>(app.sidebar_locations.size());
   // Find section boundaries in sidebar_locations order:
@@ -631,7 +641,20 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
           trash_icon = trash_has_files() ? "user-trash-full" : "user-trash";
           icon_name = trash_icon.c_str();
         }
-        const auto* ic = app.icons.tray_icon(icon_name);
+        // Async resolve: never decode theme SVGs on the paint thread.
+        // The placeholder letter shows for a frame or two, then the real
+        // icon pops in (catch-up frames are scheduled right after startup).
+        const auto* ic = [&]{
+          auto ti0 = std::chrono::steady_clock::now();
+          const auto* r = app.icons.tray_icon(icon_name, icon_sz);
+          static std::atomic<int> tic{0};
+          if (tic.fetch_add(1, std::memory_order_relaxed) < 12 &&
+              trace::enabled().load(std::memory_order_relaxed))
+            trace::log("SIDEBAR tray[%s] %.2f ms", icon_name,
+                       std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - ti0).count());
+          return r;
+        }();
         if (ic && ic->surface) {
           double iw = static_cast<double>(ic->width);
           double ih = static_cast<double>(ic->height);
@@ -657,7 +680,18 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
 
     // For items with extra usage row, center icon in the main row (top 36px)
     int main_row_h = static_cast<int>(36.0 * zf);
-    draw_icon_at(icon_x, y + (main_row_h - icon_sz) / 2);
+    {
+      auto mi0 = std::chrono::steady_clock::now();
+      draw_icon_at(icon_x, y + (main_row_h - icon_sz) / 2);
+      static std::atomic<int> mic{0};
+      if (mic.fetch_add(1, std::memory_order_relaxed) < 12 &&
+          trace::enabled().load(std::memory_order_relaxed)) {
+        trace::log("SIDEBAR icon[%s] %.2f ms", loc.label.c_str(),
+                   std::chrono::duration<double, std::milli>(
+                       std::chrono::steady_clock::now() - mi0)
+                       .count());
+      }
+    }
 
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                             CAIRO_FONT_WEIGHT_NORMAL);
@@ -777,11 +811,13 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
     y += 1 + static_cast<int>(16.0 * zf);
   };
 
+  sub("pre");
   // ── PLACES ──
   draw_header("PLACES");
   for (int i = 0; i < std::min(places_end, total); ++i)
     draw_item(i);
 
+  sub("places");
   // ── FAVORITES ──
   if (fav_start > places_end) {
     draw_divider();
@@ -891,6 +927,7 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
     y += item_h;
   }
 
+  sub("favorites");
   // ── DRIVES ──
   if (drives_start < total) {
     draw_divider();
@@ -1951,6 +1988,25 @@ void warmup_text_rendering() {
       cairo_text_extents(cr, "Ag", &te);
       cairo_move_to(cr, 2, 10);
       cairo_show_text(cr, "Ag");
+    }
+  }
+  // Sidebar/labels render via the toy API at these sizes; warming the glyph
+  // caches here keeps the cost off the first real paint (~2-3 ms saved).
+  {
+    static const char* kUiStrings[] = {
+        "My Computer", "Home", "Desktop", "Documents", "Downloads",
+        "Pictures", "Music", "Videos", "Trash", "Root", "File System",
+    };
+    // Sidebar/toolbar render at zoom-scaled sizes (10..16 px typical); warm
+    // every candidate size so the real paint never rasterizes glyphs cold.
+    for (int weight : {CAIRO_FONT_WEIGHT_NORMAL, CAIRO_FONT_WEIGHT_BOLD}) {
+      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                             static_cast<cairo_font_weight_t>(weight));
+      for (double sz : {11.0, 13.0, 14.0, 16.0}) {
+        cairo_set_font_size(cr, sz);
+        cairo_move_to(cr, 0, sz);
+        for (const char* str : kUiStrings) cairo_show_text(cr, str);
+      }
     }
   }
   cairo_surface_flush(s);
@@ -3244,15 +3300,11 @@ void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
       std::snprintf(status_buf, sizeof(status_buf), "%zu results",
                     app.cur_tab().entries.size());
     } else {
-      int total_files = 0, total_dirs = 0;
-      for (auto& e : app.cur_tab().entries) {
-        if (!app.show_hidden && e.is_hidden) continue;
-        if (e.is_dir) ++total_dirs;
-        else ++total_files;
-      }
+      // Aggregates are cached on the tab (rebuilt when entries change);
+      // scanning 900k entries here every frame used to cost ~25 ms/frame.
       std::snprintf(status_buf, sizeof(status_buf),
-                    "%d items (%d files, %d dirs)", total_files + total_dirs,
-                    total_files, total_dirs);
+                    "%d items (%d files, %d dirs)", app.cur_tab().cached_total_items,
+                    app.cur_tab().cached_total_files, app.cur_tab().cached_total_dirs);
     }
   }
 
@@ -3271,11 +3323,22 @@ void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
 
   std::string free_str;
   {
-    struct statvfs sv;
-    if (statvfs(app.cur_tab().current_path.c_str(), &sv) == 0) {
-      uint64_t free_bytes = static_cast<uint64_t>(sv.f_bavail) * sv.f_frsize;
-      free_str = format_size(free_bytes) + " free";
+    // statvfs can block for hundreds of ms on slow/network mounts — never
+    // call it more than once per 2 s per path.
+    static std::string s_path;
+    static uint64_t s_free = 0;
+    static bool s_valid = false;
+    static std::chrono::steady_clock::time_point s_at{};
+    auto now = std::chrono::steady_clock::now();
+    if (!s_valid || s_path != app.cur_tab().current_path ||
+        now - s_at > std::chrono::milliseconds(2000)) {
+      struct statvfs sv;
+      s_valid = statvfs(app.cur_tab().current_path.c_str(), &sv) == 0;
+      if (s_valid) s_free = static_cast<uint64_t>(sv.f_bavail) * sv.f_frsize;
+      s_path = app.cur_tab().current_path;
+      s_at = now;
     }
+    if (s_valid) free_str = format_size(s_free) + " free";
   }
 
   cairo_text_extents_t te;

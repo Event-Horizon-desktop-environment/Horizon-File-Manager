@@ -9,6 +9,8 @@
 #include <csignal>
 #include <memory>
 
+#include <thread>
+
 #include <poll.h>
 #include <signal.h>
 #include <sys/stat.h>
@@ -44,6 +46,31 @@ volatile sig_atomic_t g_signal{0};
 void signal_handler(int) { g_signal = 1; }
 }
 
+// ── early blank frame ────────────────────────────────────────────
+
+// Paint a flat background into the first free buffer and map it. Used only
+// during cold start so the compositor shows the window before fonts/assets/
+// the real scene are ready.
+static void paint_blank_frame(AppState& app) {
+  for (int i = 0; i < 2; ++i) {
+    if (app.buf[i].busy()) continue;
+    auto* cr = app.buf[i].cairo();
+    if (!cr) return;
+    cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
+    cairo_set_source_rgb(cr, app.bg_r, app.bg_g, app.bg_b);
+    cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+    cairo_surface_flush(app.buf[i].cairo_surface());
+    wl_surface_attach(app.surface, app.buf[i].wl(), 0, 0);
+    wl_surface_damage_buffer(app.surface, 0, 0, app.buf[i].width(),
+                             app.buf[i].height());
+    app.buf[i].mark_busy();
+    wl_surface_commit(app.surface);
+    if (app.wl.display()) wl_display_flush(app.wl.display());
+    return;
+  }
+}
+
 // ── Wayland listeners ────────────────────────────────────────────
 
 static void xdg_wm_base_ping(void*, xdg_wm_base* wm, uint32_t serial) {
@@ -57,6 +84,19 @@ static void xdg_surface_configure(void* data, xdg_surface* surface,
                                    uint32_t serial) {
   auto& app = *static_cast<AppState*>(data);
   xdg_surface_ack_configure(surface, serial);
+
+  // Cold start: map with a flat background immediately; the full UI lands
+  // once assets/fonts are warm (embed clears startup_blank_frame after).
+  if (app.startup_blank_frame) {
+    if (app.width > 0 && app.height > 0) {
+      if (app.buf[0].width() != app.width || app.buf[0].height() != app.height) {
+        app.buf[0].ensure(app.shm, "eh-fb-a", app.width, app.height);
+        app.buf[1].ensure(app.shm, "eh-fb-b", app.width, app.height);
+      }
+      paint_blank_frame(app);
+    }
+    return;
+  }
 
   if (app.width <= 0 || app.height <= 0) return;
 
@@ -782,7 +822,16 @@ static bool create_window(AppState& app) {
 // ── run standalone ───────────────────────────────────────────────
 
 [[nodiscard]] int run_standalone(const std::string& initial_path) {
+  const auto startup_t0 = std::chrono::steady_clock::now();
+  auto startup_mark = [&](const char* what) {
+    if (!trace::enabled().load(std::memory_order_relaxed)) return;
+    double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - startup_t0)
+                    .count();
+    trace::log("STARTUP %s %.1f ms", what, ms);
+  };
   g_app = std::make_unique<AppState>();
+  startup_mark("appstate");
   AppState& app = *g_app;
   app.initial_navigate_path = initial_path;
 
@@ -790,6 +839,7 @@ static bool create_window(AppState& app) {
     std::cerr << "WAYLAND_DISPLAY not set or compositor unavailable.\n";
     return 1;
   }
+  startup_mark("connect");
 
   if (!connect_globals(app)) {
     std::cerr << "Failed to connect Wayland globals.\n";
@@ -818,19 +868,39 @@ static bool create_window(AppState& app) {
     }
   }
 
+  startup_mark("globals");
   if (!create_window(app)) {
     std::cerr << "Failed to create file browser window.\n";
     return 1;
   }
+  startup_mark("window");
 
-  // Load arrow-icon SVGs at high resolution for crisp rendering at all zoom levels.
+  // Map the window NOW with a flat background frame: the initial commit
+  // above makes the compositor send configure; one roundtrip receives it,
+  // and the xdg handler paints a blank frame instead of the full UI.
+  app.startup_blank_frame = true;
+  wl_display_roundtrip(app.wl.display());
+  startup_mark("mapped");
+  // Start the icon worker now so the theme-index scan (~5-17 ms of file I/O)
+  // overlaps SVG asset decoding instead of blocking the first sidebar draw.
+  app.icons.tray_icon("user-home", 64);
+  // Warm fonts/glyph caches on a helper thread concurrently with the asset,
+  // settings, and sidebar work below (cairo/pango are internally locked).
+  std::thread warm_thr([] { warmup_text_rendering(); });
+
+  // Load arrow-icon SVGs at high resolution for crisp rendering at all zoom
+  // levels. The six large rasters decode on a helper thread in parallel with
+  // the small ones below (~2 ms off cold start).
+  startup_mark("arrows_begin");
   static constexpr int kArrowIconLoadPx = 256;
-  app.arrow_left_svg  = eh::shell::asset::load_asset_svg("UI", "arrow-left.svg", kArrowIconLoadPx);
-  app.arrow_right_svg = eh::shell::asset::load_asset_svg("UI", "arrow-right.svg", kArrowIconLoadPx);
-  app.arrow_up_svg    = eh::shell::asset::load_asset_svg("UI", "arrow-up.svg", kArrowIconLoadPx);
-  app.search_svg      = eh::shell::asset::load_asset_svg("UI", "search.svg", kArrowIconLoadPx);
-  app.folder_search_svg = eh::shell::asset::load_asset_svg("UI", "folder-search.svg", kArrowIconLoadPx);
-  app.mounted_svg     = eh::shell::asset::load_asset_svg("UI", "Mounted.svg", kArrowIconLoadPx);
+  std::thread svg_big([&app] {
+    app.arrow_left_svg    = eh::shell::asset::load_asset_svg("UI", "arrow-left.svg", kArrowIconLoadPx);
+    app.arrow_right_svg   = eh::shell::asset::load_asset_svg("UI", "arrow-right.svg", kArrowIconLoadPx);
+    app.arrow_up_svg      = eh::shell::asset::load_asset_svg("UI", "arrow-up.svg", kArrowIconLoadPx);
+    app.search_svg        = eh::shell::asset::load_asset_svg("UI", "search.svg", kArrowIconLoadPx);
+    app.folder_search_svg = eh::shell::asset::load_asset_svg("UI", "folder-search.svg", kArrowIconLoadPx);
+    app.mounted_svg       = eh::shell::asset::load_asset_svg("UI", "Mounted.svg", kArrowIconLoadPx);
+  });
   app.icon_desktop_svg    = eh::shell::asset::load_asset_svg("UI", "icon-desktop.svg", 64);
   app.icon_documents_svg  = eh::shell::asset::load_asset_svg("UI", "icon-documents.svg", 64);
   app.icon_downloads_svg  = eh::shell::asset::load_asset_svg("UI", "icon-downloads.svg", 64);
@@ -839,6 +909,8 @@ static bool create_window(AppState& app) {
   app.icon_videos_svg     = eh::shell::asset::load_asset_svg("UI", "icon-videos.svg", 64);
   app.icon_publicshare_svg  = eh::shell::asset::load_asset_svg("UI", "icon-publicshare.svg", 64);
   app.icon_templates_svg    = eh::shell::asset::load_asset_svg("UI", "icon-templates.svg", 64);
+  svg_big.join();
+  startup_mark("svg_assets");
   if (!app.arrow_left_svg || !app.arrow_right_svg || !app.arrow_up_svg || !app.search_svg || !app.folder_search_svg) {
     std::fprintf(stderr, "[horizon-files] WARNING: arrow/search SVGs not loaded (L=%p R=%p U=%p S=%p FS=%p). "
                          "CWD=%s\n",
@@ -857,10 +929,12 @@ static bool create_window(AppState& app) {
     app.icons.prewarm_search_dirs();
   }
 
+  startup_mark("icon_theme");
   // Colors are set by reload_settings_from_config below
 
   // Load file browser settings from config
   reload_settings_from_config(app);
+  startup_mark("settings");
 
   // Start UDisks2 drive service (background D-Bus event loop) — needs
   // to be running before refresh_sidebar() so query_drives() succeeds.
@@ -870,13 +944,17 @@ static bool create_window(AppState& app) {
     app.pendingRedraw = true;
   });
 
+  startup_mark("udisks");
   // Initialize
   refresh_sidebar(app);
+  startup_mark("sidebar");
+  app.startup_loading = true;
   if (!app.initial_navigate_path.empty()) {
     navigate_to(app, app.initial_navigate_path);
   } else {
     reload_dir(app);
   }
+  startup_mark("reload_dir");
 
   // Wire up input event callbacks
   if (app.seat.pointer()) {
@@ -971,8 +1049,16 @@ static bool create_window(AppState& app) {
   std::cout << "Event Horizon File Browser started. Current path: "
             << app.cur_tab().current_path << "\n";
 
-  // Initial draw
+  warm_thr.join();
+  startup_mark("warmup");
+  // Initial draw (fonts warmed above so first paint never stalls)
   draw(app);
+  app.startup_blank_frame = false;
+  startup_mark("first_draw");
+  app.startup_loading = false;
+  // Keep painting briefly so background-resolved sidebar/MIME icons pop in
+  // without waiting for user input or the cursor-blink tick.
+  app.icon_catchup_frames = 30;
 
   // Event loop
   const int dpy_fd = wl_display_get_fd(app.wl.display());
@@ -988,7 +1074,6 @@ static bool create_window(AppState& app) {
 
   eh::file_browser::thumb_pool_start(&app);
   eh::file_browser::dir_stats_start();
-  warmup_text_rendering();
   while (app.running && g_signal == 0) {
     // ── check for external file changes on every iteration ────────
     if (!app.confirm_open && !app.create_dialog_open &&
@@ -1106,7 +1191,13 @@ static bool create_window(AppState& app) {
     bool search_pending = ((app.search_active || app.recursive_search_active) && !app.search_query.empty()) || ((app.r_search_active || app.r_recursive_search_active) && !app.r_search_query.empty());
     bool mount_wake = app.mount_poll_wake.exchange(false, std::memory_order_acq_rel);
     bool op_active = app.op_progress && app.op_progress->active.load();
-    int poll_ms = (!app.thumb_pending_queue.empty() || search_pending || app.key_repeat_sym != 0 || mount_wake || op_active) ? 0 : kPollMs;
+    if (app.icon_catchup_frames > 0) {
+      --app.icon_catchup_frames;
+      app.pendingRedraw = true;
+    }
+    int poll_ms = (!app.thumb_pending_queue.empty() || search_pending || app.key_repeat_sym != 0 || mount_wake || op_active || app.icon_catchup_frames > 0) ? 0 : kPollMs;
+    // A deferred scan apply must never sit on a 200 ms poll nap.
+    if (poll_ms > 5 && app.scan_apply_deferred) poll_ms = 5;
     int pr = poll(&pf, 1, poll_ms);
     if (pr < 0) {
       if (errno == EINTR) {

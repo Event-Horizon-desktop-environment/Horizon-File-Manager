@@ -15,6 +15,10 @@
 #include "app/file_browser/features/recursive_search_worker.hpp"
 #include "app/file_browser/features/tab_history.hpp"
 #include "app/file_browser/features/thumb_pool.hpp"
+
+namespace eh::file_browser {
+static void recompute_item_counts(Tab& tab, bool show_hidden);
+}
 #include "app/file_browser/features/video_worker.hpp"
 #include "app/file_browser/features/svg_preview.hpp"
 #include "app/file_browser/features/pdf_preview.hpp"
@@ -1615,7 +1619,7 @@ static void scan_entries(
         // Dolphin policy (KFileItemModel): show one early partial view,
         // then leave the UI alone for 2 s while metadata lands — repeated
         // full-list rebuilds steal CPU from the statx workers.
-        constexpr double kFirstPostMs = 120.0;
+        constexpr double kFirstPostMs = 50.0;
         constexpr double kLaterPostMs = 2000.0;
         auto last = std::chrono::steady_clock::now();
         bool posted_once = false;
@@ -1798,6 +1802,8 @@ void apply_scan_result(AppState& app, bool is_progress) {
     tab.visible_entries.push_back(i);
   }
 
+  recompute_item_counts(tab, app.show_hidden);  // O(1) status-bar aggregates
+
   if (had_content && !prev_sel_name.empty()) {
     // Refresh of an already-visible folder: keep selection and scroll.
     for (int vi = 0; vi < static_cast<int>(tab.visible_entries.size()); ++vi) {
@@ -1881,6 +1887,18 @@ void apply_scan_result(AppState& app, bool is_progress) {
             tab.entries.size(), tab.visible_entries.size(),
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t_apply0).count());
+}
+
+static void recompute_item_counts(Tab& tab, bool show_hidden) {
+  int files = 0, dirs = 0;
+  for (const auto& e : tab.entries) {
+    if (!show_hidden && e.is_hidden) continue;
+    if (e.is_dir) ++dirs;
+    else ++files;
+  }
+  tab.cached_total_items = files + dirs;
+  tab.cached_total_files = files;
+  tab.cached_total_dirs = dirs;
 }
 
 void thumb_cache_install(AppState& app, const std::string& path, int size,
@@ -2068,6 +2086,15 @@ void reload_dir(AppState& app) {
   // navigation feels identical to the old synchronous load.
   constexpr double kScanFastPathMs = 40.0;
   auto t_launch = std::chrono::steady_clock::now();
+  // Cold start: never block the first frame on a scan that won't beat the
+  // timer anyway — defer straight to the background path.
+  if (app.startup_loading &&
+      !app.scan_ready_flag.load(std::memory_order_acquire)) {
+    app.scan_apply_deferred = true;
+    if (trace::enabled().load(std::memory_order_relaxed))
+      trace::log("reload_dir: startup defer '%s'", scan_path.c_str());
+    return;
+  }
   while (!app.scan_ready_flag.load(std::memory_order_acquire)) {
     double waited_ms = std::chrono::duration<double, std::milli>(
                            std::chrono::steady_clock::now() - t_launch).count();
@@ -2209,7 +2236,27 @@ static void save_dir_props_before_leave(AppState& app) {
 }
 
 void navigate_to(AppState& app, const std::string& path) {
+  const bool startup_nav = app.startup_loading;
+  auto nav_mark = [&](const char* what) {
+    if (!startup_nav ||
+        !trace::enabled().load(std::memory_order_relaxed))
+      return;
+    trace::log("STARTUP nav_%s", what);
+  };
+  struct NavClock {
+    std::chrono::steady_clock::time_point t0;
+    ~NavClock() {
+      if (trace::enabled().load(std::memory_order_relaxed)) {
+        double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0)
+                        .count();
+        trace::log("STARTUP navigate_to_total %.1f ms", ms);
+      }
+    }
+  } nav_clock{std::chrono::steady_clock::now()};
+  (void)nav_mark;
   save_dir_props_before_leave(app);
+  nav_mark("props_saved");
   // Handle virtual "computer://" path
   if (path == "computer://") {
     if (!app.cur_tab().current_path.empty() && app.cur_tab().current_path != path) {
@@ -2254,8 +2301,13 @@ void navigate_to(AppState& app, const std::string& path) {
     app.cur_tab().view_mode = app.last_browser_view_mode;
   }
 
+  nav_mark("pre_scan");
   reload_dir(app);
-  draw(app);
+  nav_mark("post_reload");
+  // During cold start the frame loop paints immediately after us; drawing
+  // here would build the whole glyph cache before the window even maps.
+  if (!startup_nav)
+    draw(app);
 }
 
 void navigate_up(AppState& app) {
@@ -2726,6 +2778,8 @@ void reset_preview(AppState& app) {
   app.preview_path.clear();
   app.preview_text.clear();
   app.preview_hover_start_ns = 0;
+  app.preview_req_path.clear();
+  app.preview_req_px = 0;
   if (app.preview_thumb) {
     cairo_surface_destroy(app.preview_thumb);
     app.preview_thumb = nullptr;
@@ -2777,44 +2831,28 @@ void check_hover_preview(AppState& app) {
           int mx = static_cast<int>(app.pointerX);
           int my = static_cast<int>(app.pointerY);
 
-          // Load thumbnail first so we can size the popup around it
+          // Iron rule: never decode on the paint thread. Open the popup at
+          // default size now; the background pool's result upgrades it when
+          // it lands (see retry section below). Videos already use their own
+          // async worker.
           if (entry.type == FileType::Image) {
-            if (is_svg_extension(entry.path))
-              app.preview_thumb = load_svg_thumbnail(entry.path, 500);
-            else
-              app.preview_thumb = load_image_thumbnail(entry.path, 500);
-            if (app.preview_thumb)
-              cairo_surface_reference(app.preview_thumb);
-            else
-              preview_log("hover_preview: IMAGE thumb FAIL path=%s", entry.path.c_str());
+            app.preview_req_px = 500;
+            app.preview_req_path = entry.path;
+            thumb_pool_enqueue(app, entry.path, app.preview_req_px);
           } else if (entry.type == FileType::Video) {
-            // Pull a full-res frame from the video (async), like image decode;
-            // popup upgrades to it when the extraction lands
             video_worker().enqueue_preview(entry.path, kVideoPreviewFrameMaxPx);
           } else if (entry.type == FileType::Audio) {
-            app.preview_thumb = get_thumbnail(app, entry.path, 256);
-            if (app.preview_thumb)
-              cairo_surface_reference(app.preview_thumb);
-            else
-              preview_log("hover_preview: AUDIO thumb FAIL path=%s", entry.path.c_str());
-          }
-
-          // PDF gets a rendered thumbnail via poppler
-          if (entry.type == FileType::Document && is_pdf_extension(entry.path)) {
-            app.preview_thumb = load_pdf_thumbnail(entry.path, 256);
-            if (app.preview_thumb)
-              cairo_surface_reference(app.preview_thumb);
-            else
-              preview_log("hover_preview: PDF thumb FAIL path=%s", entry.path.c_str());
-          }
-
-          // EPUB gets a cover thumbnail via libarchive + stb_image
-          if (entry.type == FileType::Document && is_epub_extension(entry.path)) {
-            app.preview_thumb = load_epub_thumbnail(entry.path, 256);
-            if (app.preview_thumb)
-              cairo_surface_reference(app.preview_thumb);
-            else
-              preview_log("hover_preview: EPUB thumb FAIL path=%s", entry.path.c_str());
+            app.preview_req_px = 256;
+            app.preview_req_path = entry.path;
+            thumb_pool_enqueue(app, entry.path, app.preview_req_px);
+          } else if (entry.type == FileType::Document && is_pdf_extension(entry.path)) {
+            app.preview_req_px = 256;
+            app.preview_req_path = entry.path;
+            thumb_pool_enqueue(app, entry.path, app.preview_req_px);
+          } else if (entry.type == FileType::Document && is_epub_extension(entry.path)) {
+            app.preview_req_px = 256;
+            app.preview_req_path = entry.path;
+            thumb_pool_enqueue(app, entry.path, app.preview_req_px);
           }
 
           // Read text file content for preview (not for binary Document types like PDF/EPUB)
@@ -2902,26 +2940,32 @@ void check_hover_preview(AppState& app) {
             break;
           }
         } else if (!app.preview_thumb &&
-                   (entry.type == FileType::Image || entry.type == FileType::Audio)) {
-          cairo_surface_t* thumb = get_thumbnail(app, entry.path, 256);
-          if (thumb) {
-            cairo_surface_reference(thumb);
-            app.preview_thumb = thumb;
-            app.pendingRedraw = true;
-          }
-        } else if (entry.type == FileType::Document && is_pdf_extension(entry.path)) {
-          cairo_surface_t* thumb = load_pdf_thumbnail(entry.path, 256);
-          if (thumb) {
-            cairo_surface_reference(thumb);
-            app.preview_thumb = thumb;
-            app.pendingRedraw = true;
-          }
-        } else if (entry.type == FileType::Document && is_epub_extension(entry.path)) {
-          cairo_surface_t* thumb = load_epub_thumbnail(entry.path, 256);
-          if (thumb) {
-            cairo_surface_reference(thumb);
-            app.preview_thumb = thumb;
-            app.pendingRedraw = true;
+                   entry.path == app.preview_req_path) {
+          // Background decode requested at hover start — upgrade as soon as
+          // the pool's result lands in the thumbnail cache.
+          auto it = app.thumb_cache.find(entry.path);
+          if (it != app.thumb_cache.end()) {
+            cairo_surface_t* s2 = it->second;
+            int tw = cairo_image_surface_get_width(s2);
+            int th = cairo_image_surface_get_height(s2);
+            bool big_enough =
+                std::max(tw, th) >= (app.preview_req_px * 3) / 4;
+            if (big_enough) {
+              cairo_surface_reference(s2);
+              app.preview_thumb = s2;
+              if (entry.type == FileType::Image && tw > 0 && th > 0) {
+                int popup_w = 260;
+                int popup_h = 240;
+                size_hover_popup_to_frame(popup_w, popup_h, tw, th);
+                place_hover_popup(app, static_cast<int>(app.pointerX),
+                                  static_cast<int>(app.pointerY),
+                                  popup_w, popup_h);
+                if (create_preview_popup(app))
+                  commit_preview_popup(app);
+              }
+              app.pendingRedraw = true;
+              app.preview_req_path.clear();
+            }
           }
         }
       }
