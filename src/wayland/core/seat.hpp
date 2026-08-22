@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <wayland-client.h>
 #include <xkbcommon/xkbcommon.h>
 
@@ -49,6 +50,15 @@ public:
   [[nodiscard]] wl_surface* pointer_focus_surface() const { return ptrFocusSurface_; }
 
   [[nodiscard]] uint32_t last_pointer_button_serial() const { return lastPointerButtonSerial_; }
+  // Compositor-supplied millisecond timestamp of the most recent pointer
+  // button event (0 until the first event arrives). Immune to UI-thread
+  // stalls, unlike CLOCK_MONOTONIC sampled at processing time.
+  [[nodiscard]] uint32_t last_pointer_button_time_ms() const { return lastPointerButtonTimeMs_; }
+  // Monotonic count of pointer events seen (any type) — used to measure
+  // how many events a single dispatch batch processed.
+  [[nodiscard]] static uint64_t pointer_event_count() {
+    return s_pointerEventCount_.load(std::memory_order_relaxed);
+  }
   [[nodiscard]] wl_keyboard* keyboard() const { return keyboard_; }
   [[nodiscard]] wl_seat* wl_seat_handle() const { return seat_; }
   [[nodiscard]] xkb_context* xkb_ctx() const { return xkbCtx_; }
@@ -119,6 +129,8 @@ private:
   xkb_state* xkbState_ = nullptr;
 
   uint32_t lastPointerButtonSerial_ = 0;
+  uint32_t lastPointerButtonTimeMs_ = 0;
+  static inline std::atomic<uint64_t> s_pointerEventCount_{0};
 
   PointerMotionCb ptrMotionCb_{};
   PointerButtonCb ptrButtonCb_{};

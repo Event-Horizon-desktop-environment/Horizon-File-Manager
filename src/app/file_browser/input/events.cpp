@@ -313,6 +313,47 @@ int settings_hit_test(AppState& app, int x, int y) {
 
 // ── event handling ───────────────────────────────────────────────
 
+// ── Main-view scrollbar dragging ────────────────────────────────────
+//
+// draw_scrollbar() records its interactive rect every frame; clicking inside
+// that strip grabs the thumb (or jumps to the tapped position) and motion
+// maps pointer Y to scroll position, bypassing the smooth-scroll animation.
+static void apply_scrollbar_drag(AppState& app, int y) {
+  const auto& sb = app.scrollbar_drag_rect;
+  double thumb_h = std::max(static_cast<double>(sb.view_h) * sb.view_h /
+                                static_cast<double>(sb.content_h),
+                            20.0);
+  int max_scroll = std::max(0, sb.content_h - sb.view_h);
+  double denom = std::max(1.0, static_cast<double>(sb.h) - thumb_h);
+  double frac = (static_cast<double>(y - sb.y) - app.scrollbar_grab_dy) / denom;
+  frac = std::clamp(frac, 0.0, 1.0);
+  int v = static_cast<int>(std::lround(frac * max_scroll));
+  if (sb.computer) {
+    app.computer_scroll_px = v;
+    app.computer_scroll_smooth_current = static_cast<double>(v);
+    app.computer_scroll_smooth_target = static_cast<double>(v);
+  } else {
+    auto& tab = app.cur_tab();
+    tab.scroll_px = v;
+    tab.scroll_smooth_current = static_cast<double>(v);
+    tab.scroll_smooth_target = static_cast<double>(v);
+  }
+}
+
+// True when a modal surface covers the content area and should swallow the
+// click instead of the scrollbar beneath it.
+static bool modal_blocks_content(const AppState& app) {
+  return app.create_dialog_open || app.select_pattern_open ||
+         app.rename_ui_open || app.batch_rename_open || app.confirm_open ||
+         app.conflict_open || app.password_dialog_open ||
+         app.compress_dialog_open || app.term_chooser_open ||
+         app.open_with_open || app.context_menu_open || app.settings_open ||
+         app.properties.open || app.sort_menu_open || app.r_sort_menu_open ||
+         app.columns_menu_open || app.r_columns_menu_open ||
+         app.filter_dropdown_section > 0 || app.r_filter_dropdown_section > 0 ||
+         app.ops_panel_slide > 0.01;
+}
+
 void handle_click(AppState& app, int x, int y, int button) {
   hide_tooltip(app);
   app.pointerX = static_cast<double>(x);
@@ -331,6 +372,35 @@ void handle_click(AppState& app, int x, int y, int button) {
       return;
     }
     app.active_pane = (x >= div_x + div_w) ? 1 : 0;
+  }
+
+  // ── Main-view scrollbar: grab thumb / jump-to-tap ──
+  if (button == 0x110 && !modal_blocks_content(app)) {
+    for (const auto& sb : app.scrollbar_rects) {
+      // Forgiving strip: a few px on each side of the 6px track.
+      if (x < sb.x - 6 || x >= sb.x + sb.w + 8) continue;
+      if (y < sb.y || y >= sb.y + sb.h) continue;
+
+      double track_h = static_cast<double>(sb.h);
+      double thumb_h = std::max(static_cast<double>(sb.view_h) * sb.view_h /
+                                    static_cast<double>(sb.content_h),
+                                20.0);
+      int max_scroll = std::max(0, sb.content_h - sb.view_h);
+      int cur = sb.computer ? app.computer_scroll_px : app.cur_tab().scroll_px;
+      double thumb_y =
+          max_scroll > 0
+              ? sb.y + static_cast<double>(cur) / max_scroll * (track_h - thumb_h)
+              : sb.y;
+
+      app.scrollbar_dragging = true;
+      app.scrollbar_drag_rect = sb;
+      app.scrollbar_grab_dy = (y >= thumb_y && y <= thumb_y + thumb_h)
+                                  ? static_cast<int>(y - thumb_y)
+                                  : static_cast<int>(thumb_h / 2.0);
+      apply_scrollbar_drag(app, y);
+      draw(app);
+      return;
+    }
   }
 
   // ── Click outside the nav/path field cancels path editing ──
@@ -1419,10 +1489,21 @@ void handle_click(AppState& app, int x, int y, int button) {
       return;
     }
 
-    timespec ts{};
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    auto now_ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
-                  static_cast<uint64_t>(ts.tv_nsec);
+    // Prefer the compositor's event timestamp: UI-thread stalls (e.g. a slow
+    // frame between the two clicks of a double-click) must not inflate the
+    // apparent gap and reject genuine double-clicks.
+    uint64_t now_ns = 0;
+    {
+      uint32_t evt_ms = app.seat.last_pointer_button_time_ms();
+      if (evt_ms != 0) {
+        now_ns = static_cast<uint64_t>(evt_ms) * 1000000ull;
+      } else {
+        timespec ts{};
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        now_ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
+                 static_cast<uint64_t>(ts.tv_nsec);
+      }
+    }
 
     // ── Sort menu item click (handle before top bar, so menu stays on top) ──
     // ── Column chooser popup clicks ──
@@ -2557,6 +2638,13 @@ void handle_pointer_move(AppState& app, int x, int y) {
         0.0, 1.0);
     apply_zoom_pct(app, zoom_pct_for_level(
                             static_cast<int>(std::lround(t * (kZoomLevelCount - 1)))));
+    draw(app);
+    return;
+  }
+
+  // ── Main-view scrollbar drag ──
+  if (app.scrollbar_dragging) {
+    apply_scrollbar_drag(app, y);
     draw(app);
     return;
   }
@@ -5621,6 +5709,11 @@ void handle_pointer_release(AppState& app, int x, int y, int button) {
   (void)x;
   (void)y;
   (void)button;
+  if (app.scrollbar_dragging) {
+    app.scrollbar_dragging = false;
+    draw(app);
+    return;
+  }
   if (app.split_divider_dragging) {
     app.split_divider_dragging = false;
     return;

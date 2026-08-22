@@ -113,13 +113,15 @@ void WaylandSeat::ptr_motion(void* data, wl_pointer*, uint32_t, wl_fixed_t sx, w
    
   auto& self = *static_cast<WaylandSeat*>(data);
   if (!self.ptrMotionCb_) return;
+  s_pointerEventCount_.fetch_add(1, std::memory_order_relaxed);
   self.ptrMotionCb_(self.ptrFocusSurface_, wl_fixed_to_double(sx), wl_fixed_to_double(sy));
 }
 
-void WaylandSeat::ptr_button(void* data, wl_pointer*, uint32_t serial, uint32_t, uint32_t button, uint32_t state) {
+void WaylandSeat::ptr_button(void* data, wl_pointer*, uint32_t serial, uint32_t time_ms, uint32_t button, uint32_t state) {
    
   auto& self = *static_cast<WaylandSeat*>(data);
   self.lastPointerButtonSerial_ = serial;
+  self.lastPointerButtonTimeMs_ = time_ms;
   if (!self.ptrButtonCb_) return;
   self.ptrButtonCb_(button, state);
 }

@@ -2,9 +2,14 @@
 
 #include <cairo/cairo.h>
 
+#include <atomic>
+#include <condition_variable>
+#include <deque>
 #include <list>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -96,6 +101,16 @@ struct GtkThemeDesign {
 
 GtkThemeDesign extract_gtk_theme_design(const std::string& themeDir);
 
+// Performance/debug counters (monotonic since cache creation).
+struct IconCacheStats {
+  std::uint64_t cacheHits = 0;       // served from surface cache
+  std::uint64_t negativeHits = 0;    // previously-missed name, O(1) rejection
+  std::uint64_t indexLookups = 0;    // in-memory index probes
+  std::uint64_t rasters = 0;         // svg/png decodes performed
+  std::uint64_t indexBuilds = 0;     // theme directory scans performed
+  std::uint64_t asyncEnqueued = 0;   // jobs handed to background loader
+};
+
 struct IconEntry {
   cairo_surface_t* surface = nullptr;
   int width = 0;
@@ -117,6 +132,37 @@ struct IconCacheData {
   std::vector<std::string> searchDirs{};
   bool searchDirsBuilt = false;
   std::uint64_t generation = 0;
+
+  // ── performance additions ────────────────────────────────────────
+  // Per-theme-directory index: icon name -> file path. Built once per
+  // directory so lookups never touch the filesystem.
+  std::vector<std::unordered_map<std::string, std::string>> dirIndexes;
+  bool indexesBuilt = false;
+
+  // Keys that fully failed resolution — rejected in O(1) afterwards.
+  std::unordered_set<std::string> negativeKeys{};
+
+  // Async loading state (guarded by mtx unless noted).
+  std::mutex mtx;
+  struct PendingLoad {
+    std::string key;
+    std::string name;
+    int px = 0;
+  };
+  std::deque<PendingLoad> queue{};
+  std::unordered_set<std::string> queuedKeys{};
+  std::unique_ptr<std::thread> worker{};
+  std::condition_variable cv{};
+  std::atomic<bool> quit{false};
+  std::atomic<bool> workerRunning{false};
+
+  // Stats are atomic so bench/tests can read them lock-free.
+  std::atomic<std::uint64_t> stCacheHits{0};
+  std::atomic<std::uint64_t> stNegativeHits{0};
+  std::atomic<std::uint64_t> stIndexLookups{0};
+  std::atomic<std::uint64_t> stRasters{0};
+  std::atomic<std::uint64_t> stIndexBuilds{0};
+  std::atomic<std::uint64_t> stAsyncEnqueued{0};
 };
 
 class IconCache {
@@ -134,6 +180,11 @@ public:
 
   const IconEntry* tray_icon(const std::string& iconName);
 
+  // Size-aware variant used by hot paths (file listings). Returns nullptr
+  // while the icon rasterizes on the background thread; the caller draws its
+  // placeholder and simply retries next frame.
+  const IconEntry* tray_icon(const std::string& iconName, int pixelSize);
+
   const IconEntry* app_icon_from_exec_basename(const std::string& execBasename);
 
   void set_icon_theme(std::string themeId);
@@ -142,14 +193,25 @@ public:
   bool refresh_auto_theme_if_needed();
   void prewarm_search_dirs();
 
+  // ── test/bench hooks ─────────────────────────────────────────────
+  IconCacheStats stats() const;
+  bool is_negative_cached(const std::string& key) const;
+  std::size_t pending_count() const;
+  // Block until the background queue drains (tests/bench only).
+  void wait_for_pending();
+  // Resolve synchronously bypassing the background queue.
+  const IconEntry* tray_icon_sync(const std::string& iconName, int pixelSize);
+  // Drop cached rasters/negatives; indexes rebuild lazily on next lookup.
+  void clear();
+
 private:
   std::shared_ptr<IconCacheData> d_;
   const IconEntry* resolve_and_cache(const std::string& key, const std::string& iconName, bool isTray);
-  void clear();
   void rebuild_search_dirs_if_needed();
-  void touch_lru_key(const std::string& key);
-  void evict_excess_icon_cache_entries();
-  void ensureFresh();
+  void build_indexes_if_needed();
+  void enqueue_async(const std::string& key, const std::string& name, int px);
+  void ensure_worker_started();
+  void stop_worker();
 };
 
 }

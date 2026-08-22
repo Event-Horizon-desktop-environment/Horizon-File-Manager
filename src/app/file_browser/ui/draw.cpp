@@ -1,5 +1,7 @@
 #include "../app.hpp"
 #include "../features/view_zoom.hpp"
+#include "app/file_browser/features/thumb_pool.hpp"
+#include "app/file_browser/features/dir_stats.hpp"
 
 #include <cairo/cairo.h>
 #include <pango/pangocairo.h>
@@ -110,9 +112,13 @@ void draw_rounded_rect(cairo_t* cr, double x, double y, double w, double h,
   cairo_close_path(cr);
 }
 
-void draw_scrollbar(cairo_t* cr, int x, int y, int h, int content_h,
-                    int view_h, int scroll_px, double r, double g, double b) {
+void draw_scrollbar(AppState& app, cairo_t* cr, int x, int y, int h,
+                    int content_h, int view_h, int scroll_px, double r,
+                    double g, double b, bool computer_view) {
   if (content_h <= view_h) return;
+
+  // Record the interactive region so input can hit-test/drag this thumb.
+  app.scrollbar_rects.push_back({x, y, 6, h, content_h, view_h, computer_view});
 
   double thumb_h = static_cast<double>(view_h) * static_cast<double>(view_h) /
                    static_cast<double>(content_h);
@@ -132,6 +138,9 @@ void draw_scrollbar(cairo_t* cr, int x, int y, int h, int content_h,
 }
 
 // ── thumbnail cache ──────────────────────────────────────────────
+
+cairo_surface_t* eh_thumb_decode(const std::string& path, int size,
+                                 bool* used_video);
 
 cairo_surface_t* get_thumbnail(AppState& app, const std::string& path,
                                         int size) {
@@ -153,31 +162,12 @@ cairo_surface_t* get_thumbnail(AppState& app, const std::string& path,
     return s;
   }
 
-  cairo_surface_t* s;
-
-  bool is_svg = is_svg_extension(path);
-  bool is_pdf = is_pdf_extension(path);
-  bool is_epub = is_epub_extension(path);
-  bool is_vid = is_video_extension(path);
-  bool is_img = is_image_extension(path);
-  s = is_svg
-    ? load_svg_thumbnail(path, size)
-    : is_pdf
-    ? load_pdf_thumbnail(path, size)
-    : is_epub
-    ? load_epub_thumbnail(path, size)
-    : is_vid
-    ? load_video_thumbnail(path, size)
-    : is_img
-    ? load_image_thumbnail(path, size)
-    : nullptr;
+  bool used_video = false;
+  cairo_surface_t* s =
+      eh::file_browser::thumb_decode_sync(path, size, &used_video);
   if (!s) {
-    if      (is_svg) preview_log("get_thumbnail: SVG  FAIL path=%s size=%d", path.c_str(), size);
-    else if (is_pdf) preview_log("get_thumbnail: PDF  FAIL path=%s size=%d", path.c_str(), size);
-    else if (is_epub) preview_log("get_thumbnail: EPUB FAIL path=%s size=%d", path.c_str(), size);
-    else if (is_vid) preview_log("get_thumbnail: VIDEO FAIL path=%s size=%d", path.c_str(), size);
-    else if (is_img) preview_log("get_thumbnail: IMAGE FAIL path=%s size=%d", path.c_str(), size);
-    else             preview_log("get_thumbnail: UNKNOWN type path=%s size=%d", path.c_str(), size);
+    preview_log("get_thumbnail: FAIL path=%s size=%d video=%d", path.c_str(),
+                size, (int)used_video);
     return nullptr;
   }
 
@@ -201,11 +191,33 @@ cairo_surface_t* get_thumbnail(AppState& app, const std::string& path,
   app.thumb_cache[path] = s;
   app.thumb_lru.push_front(path);
   // Save to disk cache for next time (skip video — already handled by ffmpegthumbnailer)
-  if (!is_video_extension(path))
+  if (!used_video)
     save_thumbnail_cache(path, size, s);
   return s;
 }
 
+// Pure thumbnail decode: disk cache first, then type-specific loader;
+// saves back to disk cache (except video). No shared state touched — safe
+// on any thread.
+cairo_surface_t* thumb_decode_sync(const std::string& path, int size,
+                                   bool* used_video) {
+  *used_video = is_video_extension(path);
+  if (cairo_surface_t* cached = load_cached_thumbnail(path, size)) return cached;
+
+  cairo_surface_t* s = nullptr;
+  if      (*used_video)            s = load_video_thumbnail(path, size);
+  else if (is_svg_extension(path)) s = load_svg_thumbnail(path, size);
+  else if (is_pdf_extension(path)) s = load_pdf_thumbnail(path, size);
+  else if (is_epub_extension(path)) s = load_epub_thumbnail(path, size);
+  else if (is_image_extension(path)) s = load_image_thumbnail(path, size);
+
+  if (s && !*used_video) save_thumbnail_cache(path, size, s);
+  return s;
+}
+
+// Paint-path rule (Dolphin/Nemo): NEVER decode here. Cache hit returns the
+// surface; a miss queues background decoding and draws the generic icon
+// this frame. The frame loop installs finished surfaces between paints.
 static cairo_surface_t* get_thumbnail_lazy(AppState& app, int vi,
                                             const std::string& path,
                                             int size) {
@@ -215,12 +227,7 @@ static cairo_surface_t* get_thumbnail_lazy(AppState& app, int vi,
     app.thumb_lru.push_front(path);
     return it->second;
   }
-  if (app.thumb_decodes_this_frame < AppState::kThumbDecodesPerFrame) {
-    ++app.thumb_decodes_this_frame;
-    return get_thumbnail(app, path, size);
-  }
-  app.thumb_pending_queue.push_back({vi, size});
-  preview_log("get_thumbnail_lazy: QUEUED path=%s size=%d (budget exhausted)", path.c_str(), size);
+  thumb_pool_enqueue(app, path, size);
   return nullptr;
 }
 
@@ -362,7 +369,7 @@ static void draw_file_icon_body(AppState& app, cairo_t* cr, int x, int y,
 
   // Fallback to per-entry icon name (MIME-type-derived) if set
   if (!icon_name.empty()) {
-    const auto* ic = app.icons.tray_icon(icon_name);
+    const auto* ic = app.icons.tray_icon(icon_name, size);
     if (ic && ic->surface) {
       double iw = static_cast<double>(ic->width);
       double ih = static_cast<double>(ic->height);
@@ -382,7 +389,7 @@ static void draw_file_icon_body(AppState& app, cairo_t* cr, int x, int y,
   }
 
   const char* icon_name_resolved = icon_name_for_file_type(ft, file_path);
-  const auto* ic = app.icons.tray_icon(icon_name_resolved);
+  const auto* ic = app.icons.tray_icon(icon_name_resolved, size);
   if (ic && ic->surface) {
     double iw = static_cast<double>(ic->width);
     double ih = static_cast<double>(ic->height);
@@ -1927,6 +1934,50 @@ void draw_tooltip_card(AppState& app, cairo_t* cr) {
   }
 }
 
+// One-time warm-up of the cairo "toy" font stack (fontconfig init + font
+// load for the families popups/tooltips use) and Pango, which otherwise
+// cost 500-700ms on their first real use and stall the frame that happens
+// to trigger them. Call once at startup.
+void warmup_text_rendering() {
+  cairo_surface_t* s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 16, 16);
+  cairo_t* cr = cairo_create(s);
+  const char* fams[] = {"Sans", "monospace"};
+  for (const char* fam : fams) {
+    for (int weight : {CAIRO_FONT_WEIGHT_NORMAL, CAIRO_FONT_WEIGHT_BOLD}) {
+      cairo_select_font_face(cr, fam, CAIRO_FONT_SLANT_NORMAL,
+                             static_cast<cairo_font_weight_t>(weight));
+      cairo_set_font_size(cr, 12);
+      cairo_text_extents_t te;
+      cairo_text_extents(cr, "Ag", &te);
+      cairo_move_to(cr, 2, 10);
+      cairo_show_text(cr, "Ag");
+    }
+  }
+  cairo_surface_flush(s);
+  cairo_destroy(cr);
+  cairo_surface_destroy(s);
+
+#if defined(HAVE_PANGO)
+  cairo_surface_t* ps = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 16, 16);
+  cairo_t* pcr = cairo_create(ps);
+  if (PangoLayout* pl = pango_cairo_create_layout(pcr)) {
+    PangoFontDescription* d = pango_font_description_new();
+    pango_font_description_set_family(d, "Sans");
+    pango_font_description_set_absolute_size(d, 13 * PANGO_SCALE);
+    pango_layout_set_font_description(pl, d);
+    pango_layout_set_text(pl, "Ag", -1);
+    int w = 0, h = 0;
+    pango_layout_get_pixel_size(pl, &w, &h);
+    pango_cairo_show_layout(pcr, pl);
+    pango_font_description_free(d);
+    g_object_unref(pl);
+  }
+  cairo_surface_flush(ps);
+  cairo_destroy(pcr);
+  cairo_surface_destroy(ps);
+#endif
+}
+
 void draw_hover_preview(AppState& app, cairo_t* cr) {
   int px = app.preview_x;
   int py = app.preview_y;
@@ -3147,22 +3198,28 @@ void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
     if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size())) {
       auto& entry = app.cur_tab().entries[real_idx];
       if (entry.is_dir) {
-        std::error_code ec;
-        int item_count = 0;
-        uint64_t total_size = 0;
-        for (auto& de : fs::recursive_directory_iterator(entry.path, ec)) {
-          ++item_count;
-          std::error_code fec;
-          if (de.is_regular_file(fec))
-            total_size += static_cast<uint64_t>(de.file_size(fec));
-        }
-        if (ec)
+        // Never walk trees on the paint thread: consult the background
+        // dir-stats cache and request a refresh when stale/missing.
+        struct ::stat dst{};
+        int64_t dmtime = (::stat(entry.path.c_str(), &dst) == 0)
+                             ? static_cast<int64_t>(dst.st_mtime) : 0;
+        eh::file_browser::dir_stats_request(app, entry.path, dmtime);
+        auto ds = app.dir_stat_cache.find(entry.path);
+        if (ds != app.dir_stat_cache.end() && ds->second.mtime_sec == dmtime &&
+            !ds->second.truncated) {
+          std::snprintf(status_buf, sizeof(status_buf),
+                        "%s/ \u2014 %llu items (%s)", entry.name.c_str(),
+                        (unsigned long long)ds->second.count,
+                        format_size(ds->second.bytes).c_str());
+        } else if (ds != app.dir_stat_cache.end() &&
+                   ds->second.mtime_sec == dmtime && ds->second.truncated) {
+          std::snprintf(status_buf, sizeof(status_buf),
+                        "%s/ \u2014 %llu+ items", entry.name.c_str(),
+                        (unsigned long long)ds->second.count);
+        } else {
           std::snprintf(status_buf, sizeof(status_buf), "%s/",
                         entry.name.c_str());
-        else
-          std::snprintf(status_buf, sizeof(status_buf),
-                        "%s/ \u2014 %d items (%s)", entry.name.c_str(),
-                        item_count, format_size(total_size).c_str());
+        }
       } else {
         std::snprintf(status_buf, sizeof(status_buf), "%s (%s)",
                       entry.name.c_str(), format_size(entry.size).c_str());

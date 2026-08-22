@@ -1,5 +1,6 @@
 #include "app/file_browser/app.hpp"
 #include "app/file_browser/features/selection.hpp"
+#include "app/file_browser/trace.hpp"
 
 #include <cairo/cairo.h>
 
@@ -24,7 +25,24 @@ namespace eh::file_browser {
 
 // ── paint (extracted draw logic, no buffer/surface dependency) ────
 
+namespace {
+struct PaintPhase {
+  const char* name;
+  std::chrono::steady_clock::time_point t0;
+  std::vector<std::pair<const char*, double>>* log;
+  ~PaintPhase() {
+    double ms = std::chrono::duration<double, std::milli>(
+                    std::chrono::steady_clock::now() - t0).count();
+    if (ms >= 50.0) log->emplace_back(name, ms);
+  }
+};
+}  // namespace
+
 void paint(AppState& app, cairo_t* cr) {
+  std::vector<std::pair<const char*, double>> slow_phases;
+  auto phase = [&slow_phases](const char* n) {
+    return PaintPhase{n, std::chrono::steady_clock::now(), &slow_phases};
+  };
   // Check if settings TOMLs changed and re-apply settings if so
   {
     static timespec s_last_settings_mtime{};
@@ -60,6 +78,9 @@ void paint(AppState& app, cairo_t* cr) {
   // Reset thumbnail decode budget for this frame
   app.thumb_decodes_this_frame = 0;
   app.thumb_pending_queue.clear();
+
+  // Scrollbar hit rects are rebuilt by draw_scrollbar() during this frame
+  app.scrollbar_rects.clear();
 
   // Smooth scroll (tab content)
   auto smooth_scroll_tab = [&](Tab& tab) {
@@ -244,7 +265,7 @@ void paint(AppState& app, cairo_t* cr) {
   cairo_set_source_rgba(cr, app.surface_r * 2, app.surface_g * 2, app.surface_b * 2, sidebar_alpha);
   cairo_rectangle(cr, 0, 0, sidebar_w, sidebar_h);
   cairo_fill(cr);
-  draw_sidebar(app, cr, sidebar_w, 0, view_h);
+  { auto ph = phase("sidebar"); draw_sidebar(app, cr, sidebar_w, 0, view_h); }
   cairo_restore(cr);
 
   // Sidebar separator (and resize handle)
@@ -285,21 +306,21 @@ void paint(AppState& app, cairo_t* cr) {
       cairo_restore(cr);
       int sb_lx = right_x - 10;
       if (app.cur_tab().view_mode == ViewMode::List) {
-        draw_scrollbar(cr, sb_lx, list_y, list_h, app.cur_tab().content_h, list_h,
+        draw_scrollbar(app, cr, sb_lx, list_y, list_h, app.cur_tab().content_h, list_h,
                        app.cur_tab().scroll_px, app.outline_r, app.outline_g, app.outline_b);
         draw_list_view(app, cr, content_x, list_y, left_w, list_h);
       } else if (app.cur_tab().view_mode == ViewMode::Grid) {
-        draw_scrollbar(cr, sb_lx, list_y, list_h, app.cur_tab().content_h, list_h,
+        draw_scrollbar(app, cr, sb_lx, list_y, list_h, app.cur_tab().content_h, list_h,
                        app.cur_tab().scroll_px, app.outline_r, app.outline_g, app.outline_b);
         draw_grid_view(app, cr, content_x, list_y, left_w, list_h);
       } else if (app.cur_tab().view_mode == ViewMode::Computer) {
         draw_computer_view(app, cr, content_x, list_y, left_w, list_h);
       } else if (app.cur_tab().view_mode == ViewMode::Tree) {
-        draw_scrollbar(cr, sb_lx, list_y, list_h, app.cur_tab().content_h, list_h,
+        draw_scrollbar(app, cr, sb_lx, list_y, list_h, app.cur_tab().content_h, list_h,
                        app.cur_tab().scroll_px, app.outline_r, app.outline_g, app.outline_b);
         draw_tree_view(app, cr, content_x, list_y, left_w, list_h);
       } else if (app.cur_tab().view_mode == ViewMode::Compact) {
-        draw_scrollbar(cr, sb_lx, list_y, list_h, app.cur_tab().content_h, list_h,
+        draw_scrollbar(app, cr, sb_lx, list_y, list_h, app.cur_tab().content_h, list_h,
                        app.cur_tab().scroll_px, app.outline_r, app.outline_g, app.outline_b);
         draw_compact_view(app, cr, content_x, list_y, left_w, list_h);
       }
@@ -330,21 +351,21 @@ void paint(AppState& app, cairo_t* cr) {
       cairo_restore(cr);
       int sb_rx = content_x + content_w - 10;
       if (app.cur_tab().view_mode == ViewMode::List) {
-        draw_scrollbar(cr, sb_rx, list_y, list_h, app.cur_tab().content_h, list_h,
+        draw_scrollbar(app, cr, sb_rx, list_y, list_h, app.cur_tab().content_h, list_h,
                        app.cur_tab().scroll_px, app.outline_r, app.outline_g, app.outline_b);
         draw_list_view(app, cr, right_x, list_y, right_w, list_h);
       } else if (app.cur_tab().view_mode == ViewMode::Grid) {
-        draw_scrollbar(cr, sb_rx, list_y, list_h, app.cur_tab().content_h, list_h,
+        draw_scrollbar(app, cr, sb_rx, list_y, list_h, app.cur_tab().content_h, list_h,
                        app.cur_tab().scroll_px, app.outline_r, app.outline_g, app.outline_b);
         draw_grid_view(app, cr, right_x, list_y, right_w, list_h);
       } else if (app.cur_tab().view_mode == ViewMode::Computer) {
         draw_computer_view(app, cr, right_x, list_y, right_w, list_h);
       } else if (app.cur_tab().view_mode == ViewMode::Tree) {
-        draw_scrollbar(cr, sb_rx, list_y, list_h, app.cur_tab().content_h, list_h,
+        draw_scrollbar(app, cr, sb_rx, list_y, list_h, app.cur_tab().content_h, list_h,
                        app.cur_tab().scroll_px, app.outline_r, app.outline_g, app.outline_b);
         draw_tree_view(app, cr, right_x, list_y, right_w, list_h);
       } else if (app.cur_tab().view_mode == ViewMode::Compact) {
-        draw_scrollbar(cr, sb_rx, list_y, list_h, app.cur_tab().content_h, list_h,
+        draw_scrollbar(app, cr, sb_rx, list_y, list_h, app.cur_tab().content_h, list_h,
                        app.cur_tab().scroll_px, app.outline_r, app.outline_g, app.outline_b);
         draw_compact_view(app, cr, right_x, list_y, right_w, list_h);
       }
@@ -354,12 +375,20 @@ void paint(AppState& app, cairo_t* cr) {
     // Single pane
     int sb_x = w - info_panel_w - 10;
     if (app.cur_tab().view_mode == ViewMode::Computer) {
-      draw_scrollbar(cr, sb_x, content_y, view_h, app.computer_content_h, view_h,
-                     app.computer_scroll_px, app.outline_r, app.outline_g, app.outline_b);
+      draw_scrollbar(app, cr, sb_x, content_y, view_h, app.computer_content_h, view_h,
+                     app.computer_scroll_px, app.outline_r, app.outline_g, app.outline_b, true);
     } else {
-      draw_scrollbar(cr, sb_x, content_y, view_h, app.cur_tab().content_h, view_h,
+      draw_scrollbar(app, cr, sb_x, content_y, view_h, app.cur_tab().content_h, view_h,
                      app.cur_tab().scroll_px, app.outline_r, app.outline_g, app.outline_b);
     }
+    const char* view_name =
+        app.cur_tab().view_mode == ViewMode::List    ? "listview"
+      : app.cur_tab().view_mode == ViewMode::Grid    ? "gridview"
+      : app.cur_tab().view_mode == ViewMode::Computer? "computerview"
+      : app.cur_tab().view_mode == ViewMode::Tree    ? "treeview"
+      : app.cur_tab().view_mode == ViewMode::Compact ? "compactview"
+                                                     : "content";
+    auto ph = phase(view_name);
     if (app.cur_tab().view_mode == ViewMode::List) {
       draw_list_view(app, cr, content_x, content_y, content_w, view_h);
     } else if (app.cur_tab().view_mode == ViewMode::Grid) {
@@ -382,7 +411,7 @@ void paint(AppState& app, cairo_t* cr) {
 
   // Top bar
   if (top_h > 0)
-    draw_top_bar(app, cr, w, top_h);
+    { auto ph = phase("topbar"); draw_top_bar(app, cr, w, top_h); }
 
   // Search results banner (under top bar, above content)
   if (search_banner_on)
@@ -393,11 +422,11 @@ void paint(AppState& app, cairo_t* cr) {
   cairo_translate(cr, 0, top_h);
   cairo_rectangle(cr, 0, 0, w, tab_h);
   cairo_clip(cr);
-  draw_tab_bar(app, cr, w, tab_h);
+  { auto ph = phase("tabbar"); draw_tab_bar(app, cr, w, tab_h); }
   cairo_restore(cr);
 
   // Status bar
-  draw_status_bar(app, cr, w, h, status_h);
+  { auto ph = phase("statusbar"); draw_status_bar(app, cr, w, h, status_h); }
 
   // Directory/file picker bar
   if (app.select_dir_mode || app.select_file_mode)
@@ -442,16 +471,31 @@ void paint(AppState& app, cairo_t* cr) {
     draw_hover_preview(app, cr);
 
   // Info panel (F11)
-  draw_info_panel(app, cr);
+  { auto ph = phase("infopanel"); draw_info_panel(app, cr); }
 
   // Operations panel (right sidebar)
-  draw_operations_panel(app, cr);
+  { auto ph = phase("opspanel"); draw_operations_panel(app, cr); }
+
+  if (!slow_phases.empty() && trace::enabled().load(std::memory_order_relaxed)) {
+    for (auto& [n, ms] : slow_phases)
+      trace::log("PAINT SLOW %s %.1f ms", n, ms);
+  }
 }
 
 // ── main draw ────────────────────────────────────────────────────
 
 void draw(AppState& app) {
   if (!app.surface) return;
+  auto draw_t0 = std::chrono::steady_clock::now();
+  struct DrawTimer {
+    std::chrono::steady_clock::time_point t0;
+    ~DrawTimer() {
+      double ms = std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - t0).count();
+      if (ms >= 50.0 && trace::enabled().load(std::memory_order_relaxed))
+        trace::log("DRAW SLOW %.1f ms", ms);
+    }
+  } draw_timer{draw_t0};
 
   // Pick buffer
   int paint_bi = -1;

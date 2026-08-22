@@ -1,4 +1,5 @@
 #include "app/file_browser/embed/embed.hpp"
+#include "../trace.hpp"
 #include "../app.hpp"
 
 #include <algorithm>
@@ -18,6 +19,8 @@
 #include "config/shell_config.hpp"
 #include "services/udisks2/udisks2_drive_service.hpp"
 #include "app/file_browser/features/drag.hpp"
+#include "app/file_browser/features/thumb_pool.hpp"
+#include "app/file_browser/features/dir_stats.hpp"
 #include "base/thread/thread_dispatch.hpp"
 #include "platform/common/asset/asset_loader.hpp"
 #include "platform/common/bench/startup_trace.hpp"
@@ -980,7 +983,12 @@ static bool create_window(AppState& app) {
   int64_t ini_mtime = 0;
   int64_t fb_toml_mtime = 0;
   int64_t dev_disk_mtime = 0;
+  auto last_progress_apply = std::chrono::steady_clock::now() -
+                             std::chrono::milliseconds(1000);
 
+  eh::file_browser::thumb_pool_start(&app);
+  eh::file_browser::dir_stats_start();
+  warmup_text_rendering();
   while (app.running && g_signal == 0) {
     // ── check for external file changes on every iteration ────────
     if (!app.confirm_open && !app.create_dialog_open &&
@@ -1023,6 +1031,30 @@ static bool create_window(AppState& app) {
             need_redraw = true;
           }
         }
+      }
+
+      // Apply finished background directory scans
+      if (app.scan_ready_flag.load(std::memory_order_acquire)) {
+        apply_scan_result(app);
+        need_redraw = true;
+      } else if (app.scan_progress_flag.load(std::memory_order_acquire) &&
+                 std::chrono::duration<double, std::milli>(
+                     std::chrono::steady_clock::now() - last_progress_apply)
+                         .count() >= 150.0) {
+        apply_scan_result(app, /*is_progress=*/true);
+        last_progress_apply = std::chrono::steady_clock::now();
+        need_redraw = true;
+      }
+
+      // Install finished background thumbnails (UI thread owns the cache).
+      {
+        std::vector<eh::file_browser::ThumbBgResult> thumbs;
+        eh::file_browser::thumb_pool_drain(app, thumbs);
+        for (auto& t : thumbs)
+          eh::file_browser::thumb_cache_install(app, t.path, t.size,
+                                                t.surface);
+        if (!thumbs.empty()) need_redraw = true;
+        if (eh::file_browser::dir_stats_drain(app)) need_redraw = true;
       }
 
       // Directory content refresh
@@ -1087,10 +1119,42 @@ static bool create_window(AppState& app) {
     if (pf.revents & (POLLERR | POLLHUP)) break;
 
     if (pf.revents & POLLIN) {
+      auto disp_t0 = std::chrono::steady_clock::now();
+      uint64_t ev0 = eh::wayland::WaylandSeat::pointer_event_count();
       if (wl_display_dispatch(app.wl.display()) < 0) break;
+      double disp_ms = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - disp_t0)
+                           .count();
+      // Click handling runs inside dispatch, so long stalls here directly
+      // hurt input latency — make them visible.
+      if (disp_ms >= 100.0 && trace::enabled().load(std::memory_order_relaxed))
+        trace::log("DISPATCH SLOW %.1f ms events=%llu", disp_ms,
+                   (unsigned long long)(eh::wayland::WaylandSeat::pointer_event_count() -
+                                        ev0));
     } else {
       wl_display_flush(app.wl.display());
     }
+
+    // Measure only the WORK portion of this iteration (poll wait excluded).
+    auto work_t0 = std::chrono::steady_clock::now();
+    struct WorkTimer {
+      std::chrono::steady_clock::time_point t0;
+      const AppState* app;
+      ~WorkTimer() {
+        double ms = std::chrono::duration<double, std::milli>(
+                        std::chrono::steady_clock::now() - t0).count();
+        if (ms >= 25.0 && trace::enabled().load(std::memory_order_relaxed)) {
+          trace::log("WORK SLOW %.1f ms entries=%zu visible=%zu mode=%d "
+                     "thumbs_q=%zu precache=%zu/%zu status='%s'",
+                     ms, app->cur_tab().entries.size(),
+                     app->cur_tab().visible_entries.size(),
+                     (int)app->cur_tab().view_mode,
+                     app->thumb_pending_queue.size(),
+                     app->precache_idx, app->precache_paths.size(),
+                     app->operation_status.c_str());
+        }
+      }
+    } work_timer{work_t0, &app};
 
     // ── process pending drive mount results ──────────────────────
     {
@@ -1278,6 +1342,9 @@ static bool create_window(AppState& app) {
   }
 
   // Cleanup (destroy dialog windows first, then shm-buffers BEFORE disconnecting the display)
+  join_scan(app);  // reap background directory scanner before teardown
+  eh::file_browser::thumb_pool_stop();
+  eh::file_browser::dir_stats_stop();
   destroy_settings_window(app);
   destroy_props_window(app);
   for (auto& b : app.buf) b.destroy();
@@ -1456,6 +1523,9 @@ static bool create_window(AppState& app) {
   const int dpy_fd = wl_display_get_fd(app.wl.display());
   constexpr int kPollMs = 200;
 
+  eh::file_browser::thumb_pool_start(&app);
+  eh::file_browser::dir_stats_start();
+  warmup_text_rendering();
   while (app.running && g_signal == 0) {
     struct pollfd pf{};
     pf.fd = dpy_fd;
@@ -1473,7 +1543,18 @@ static bool create_window(AppState& app) {
     if (pf.revents & (POLLERR | POLLHUP)) break;
 
     if (pf.revents & POLLIN) {
+      auto disp_t0 = std::chrono::steady_clock::now();
+      uint64_t ev0 = eh::wayland::WaylandSeat::pointer_event_count();
       if (wl_display_dispatch(app.wl.display()) < 0) break;
+      double disp_ms = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - disp_t0)
+                           .count();
+      // Click handling runs inside dispatch, so long stalls here directly
+      // hurt input latency — make them visible.
+      if (disp_ms >= 100.0 && trace::enabled().load(std::memory_order_relaxed))
+        trace::log("DISPATCH SLOW %.1f ms events=%llu", disp_ms,
+                   (unsigned long long)(eh::wayland::WaylandSeat::pointer_event_count() -
+                                        ev0));
     } else {
       wl_display_flush(app.wl.display());
     }
@@ -1670,6 +1751,9 @@ static bool create_window(AppState& app) {
   const int dpy_fd = wl_display_get_fd(app.wl.display());
   constexpr int kPollMs = 200;
 
+  eh::file_browser::thumb_pool_start(&app);
+  eh::file_browser::dir_stats_start();
+  warmup_text_rendering();
   while (app.running && g_signal == 0) {
     struct pollfd pf{};
     pf.fd = dpy_fd;
@@ -1687,7 +1771,18 @@ static bool create_window(AppState& app) {
     if (pf.revents & (POLLERR | POLLHUP)) break;
 
     if (pf.revents & POLLIN) {
+      auto disp_t0 = std::chrono::steady_clock::now();
+      uint64_t ev0 = eh::wayland::WaylandSeat::pointer_event_count();
       if (wl_display_dispatch(app.wl.display()) < 0) break;
+      double disp_ms = std::chrono::duration<double, std::milli>(
+                           std::chrono::steady_clock::now() - disp_t0)
+                           .count();
+      // Click handling runs inside dispatch, so long stalls here directly
+      // hurt input latency — make them visible.
+      if (disp_ms >= 100.0 && trace::enabled().load(std::memory_order_relaxed))
+        trace::log("DISPATCH SLOW %.1f ms events=%llu", disp_ms,
+                   (unsigned long long)(eh::wayland::WaylandSeat::pointer_event_count() -
+                                        ev0));
     } else {
       wl_display_flush(app.wl.display());
     }

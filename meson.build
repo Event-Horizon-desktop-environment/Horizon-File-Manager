@@ -33,13 +33,17 @@ dep_openssl    = dependency('libcrypto')
 dep_sdbus      = dependency('sdbus-c++')
 dep_fontconfig = dependency('fontconfig')
 
-# Optional: poppler (PDF preview), libarchive, librsvg
+# Optional: poppler (PDF preview), libarchive, librsvg, io_uring
 dep_poppler   = dependency('poppler-glib', required: false)
 dep_archive   = dependency('libarchive', required: false)
 dep_librsvg   = dependency('librsvg-2.0', required: false)
+dep_uring     = dependency('liburing', required: false)
 
 if dep_poppler.found()
   cpp_args += ['-DEH_HAVE_POPPLER']
+endif
+if dep_uring.found()
+  cpp_args += ['-DEH_HAVE_IO_URING']
 endif
 if dep_archive.found()
   cpp_args += ['-DEH_HAVE_LIBARCHIVE']
@@ -83,6 +87,8 @@ sources = files(
   'src/app/file_browser/features/thumbnail_cache.cpp',
   'src/app/file_browser/features/video_preview.cpp',
   'src/app/file_browser/features/video_worker.cpp',
+  'src/app/file_browser/features/thumb_pool.cpp',
+  'src/app/file_browser/features/dir_stats.cpp',
   'src/app/file_browser/features/terminal.cpp',
   'src/app/file_browser/ui/computer_view.cpp',
   'src/app/file_browser/ui/rename_ui.cpp',
@@ -188,6 +194,7 @@ executable(
     dep_librsvg,
     dep_sdbus,
     dep_fontconfig,
+    dep_uring,
   ],
   install: true,
 )
@@ -203,3 +210,17 @@ install_data(
   rename: 'horizon-filesv2.svg',
 )
 
+
+# ── Tests ─────────────────────────────────────────────────────────────
+test_cpp_args = cpp_args
+
+icon_cache_test = executable(
+  'test_icon_cache',
+  'tests/test_icon_cache.cpp',
+  'src/platform/common/icon_cache/icon_cache.cpp',
+  include_directories: inc,
+  cpp_args: test_cpp_args,
+  dependencies: [dep_cairo, dependency('threads')],
+)
+
+test('icon_cache', icon_cache_test)

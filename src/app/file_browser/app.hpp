@@ -49,6 +49,8 @@ void navigate_forward(AppState& app);
 
 /// Reload the current directory listing.
 void reload_dir(AppState& app);
+void join_scan(AppState& app);
+void apply_scan_result(AppState& app, bool is_progress = false);
 std::string group_label_for(const AppState& app, const FileEntry& e);
 std::string format_mode(uint32_t mode);
 
@@ -143,10 +145,14 @@ void open_context_menu(AppState& app, int item_idx, int x, int y);
 
 // ── drawing helpers (file_browser_draw.cpp) ──────────────────────
 
+/// Pre-initialise fontconfig/Pango so the first popup/tooltip doesn't stall.
+void warmup_text_rendering();
+
 void draw_rounded_rect(cairo_t* cr, double x, double y, double w, double h,
                        double r);
-void draw_scrollbar(cairo_t* cr, int x, int y, int h, int content_h,
-                    int view_h, int scroll_px, double r, double g, double b);
+void draw_scrollbar(AppState& app, cairo_t* cr, int x, int y, int h,
+                    int content_h, int view_h, int scroll_px, double r,
+                    double g, double b, bool computer_view = false);
 cairo_surface_t* get_thumbnail(AppState& app, const std::string& path,
                                 int size);
 void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,

@@ -62,6 +62,13 @@ private:
   std::queue<VideoThumbResult> m_prev_out;
 
   std::atomic<bool> m_running{true};
+
+  // Circuit breaker: after this many consecutive spawn failures the worker
+  // stops trying for the rest of the session (e.g. ffmpegthumbnailer
+  // missing or a folder of zero-byte videos). Any success resets it.
+  static constexpr int kMaxConsecutiveFails = 8;
+  std::atomic<int> m_consecutive_fails{0};
+  std::atomic<bool> m_disabled{false};
 };
 
 VideoThumbWorker& video_worker();

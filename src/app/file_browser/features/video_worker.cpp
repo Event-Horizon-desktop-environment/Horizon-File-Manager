@@ -215,6 +215,18 @@ void VideoThumbWorker::thread_main(int /*thread_id*/) {
       cmd += item.cache_path;
       cmd += "\" 2>/dev/null";
 
+      if (m_disabled.load(std::memory_order_relaxed)) continue;
+      if (m_consecutive_fails.load(std::memory_order_relaxed) >=
+          kMaxConsecutiveFails) {
+        m_disabled.store(true, std::memory_order_relaxed);
+        std::fprintf(
+            stderr,
+            "[video-worker] %d consecutive failures — disabling video "
+            "thumbnails for this session\n",
+            kMaxConsecutiveFails);
+        continue;
+      }
+
       FILE* fp = popen(cmd.c_str(), "r");
       if (!fp) continue;
       std::array<char, 4096> buf{};
@@ -223,11 +235,16 @@ void VideoThumbWorker::thread_main(int /*thread_id*/) {
       int rc = pclose(fp);
 
       if (rc != 0 || access(item.cache_path.c_str(), R_OK) != 0) {
-        std::fprintf(stderr,
-                     "[video-worker] ffmpegthumbnailer rc=%d for \"%s\"\n",
-                     rc, item.path.c_str());
+        static std::mutex log_mtx;
+        int fails = m_consecutive_fails.fetch_add(1,
+                                                  std::memory_order_relaxed);
+        if (fails < kMaxConsecutiveFails)
+          std::fprintf(stderr, "[video-worker] fail #%d rc=%d \"%s\"\n",
+                       fails + 1, rc, item.path.c_str());
+        (void)log_mtx;
         continue;
       }
+      m_consecutive_fails.store(0, std::memory_order_relaxed);
 
       // Set mtime to match source
       struct stat src_st{};

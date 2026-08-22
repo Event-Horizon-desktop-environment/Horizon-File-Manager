@@ -1,5 +1,6 @@
 #pragma once
 
+#include <map>
 #include <cairo/cairo.h>
 
 #include <array>
@@ -9,6 +10,7 @@
 #include <functional>
 #include <list>
 #include <memory>
+#include <thread>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -184,6 +186,11 @@ struct Tab {
   double scroll_smooth_current = 0.0;
   double scroll_smooth_target = 0.0;
   int content_h = 0;
+  // Cached "N items (M files, K dirs)" aggregates — O(1) per frame instead
+  // of scanning every entry on each repaint. Recomputed when entries change.
+  int cached_total_items = -1;
+  int cached_total_files = 0;
+  int cached_total_dirs = 0;
 
   // Selection
   int hover_idx = -1;
@@ -200,6 +207,26 @@ struct Tab {
 
   // Dynamic view: media-heavy folders auto-switch to icon view (one-shot)
   bool dynamic_view_done = false;
+};
+
+// Snapshot of sort/group settings so a full listing can be built on a
+// background thread without touching AppState while it runs.
+struct ScanParams {
+  bool folders_first = false;
+  bool hidden_last = false;
+  bool natural = true;
+  bool case_sensitive = false;
+  int group_field = 0;
+  int sort_field = 0;   // SortField as int
+  bool descending = false;
+
+  bool operator==(const ScanParams& o) const {
+    return folders_first == o.folders_first && hidden_last == o.hidden_last &&
+           natural == o.natural && case_sensitive == o.case_sensitive &&
+           group_field == o.group_field && sort_field == o.sort_field &&
+           descending == o.descending;
+  }
+  bool operator!=(const ScanParams& o) const { return !(*this == o); }
 };
 
 struct AppState {
@@ -290,6 +317,38 @@ struct AppState {
   bool split_divider_hover = false;
   bool split_divider_dragging = false;
   Tab right_pane;
+
+  // ── Main-view scrollbar (click/drag) ──
+  struct ScrollbarRect {
+    int x = 0, y = 0, w = 0, h = 0;
+    int content_h = 0, view_h = 0;
+    bool computer = false;
+  };
+  std::vector<ScrollbarRect> scrollbar_rects;  // rebuilt every frame by paint()
+  bool scrollbar_dragging = false;
+  int scrollbar_grab_dy = 0;                   // grab offset inside thumb
+  ScrollbarRect scrollbar_drag_rect{};         // snapshot taken at grab time
+
+  // ── Background directory scan ──
+  struct DirScanResult {
+    uint64_t generation = 0;
+    std::string path;
+    std::vector<FileEntry> entries;
+  };
+  std::mutex scan_mtx;
+  DirScanResult scan_result;                 // guarded by scan_mtx
+  uint64_t scan_generation = 0;              // bumped per launch (UI thread only)
+  std::atomic<bool> scan_ready_flag{false};
+  // Progressive partial results (Dolphin-style): skeletons built straight
+  // from readdir while statx is still running. Payload rides in
+  // scan_result.entries; guarded by scan_mtx.
+  std::atomic<bool> scan_progress_flag{false};
+  std::atomic<bool> scan_cancel{false};
+  bool scan_apply_deferred = false;
+  std::thread scan_thread;
+  // Identity of the in-flight scan (written/read on UI thread only).
+  std::string scan_active_path;
+  ScanParams scan_active_params;
 
   bool show_hidden = false;
 
@@ -633,6 +692,16 @@ struct AppState {
   std::list<std::string> thumb_lru;
   std::size_t thumb_cache_bytes = 0;
   static constexpr std::size_t kThumbCacheMaxBytes = 64 * 1024 * 1024; // 64 MB
+
+  // ── Background directory stats (status bar "N items (size)") ──
+  // UI-thread-owned cache; filled by dir_stats_drain() from the worker.
+  struct DirStatEntry {
+    uint64_t count = 0;
+    uint64_t bytes = 0;
+    bool truncated = false;
+    int64_t mtime_sec = 0;   // dir mtime when measured (staleness check)
+  };
+  std::map<std::string, DirStatEntry> dir_stat_cache;
 
   // ── Desktop file icon cache ──
   std::string last_reload_path;
