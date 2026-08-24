@@ -5,6 +5,7 @@
 #include "app/file_browser/features/progress.hpp"
 #include "app/file_browser/features/selection.hpp"
 #include "app/file_browser/features/tab_history.hpp"
+#include "app/file_browser/features/tags.hpp"
 #include "app/file_browser/features/view_zoom.hpp"
 
 #include <algorithm>
@@ -22,6 +23,9 @@
 #include <grp.h>
 #include <pwd.h>
 #include <sys/stat.h>
+#include <sys/statvfs.h>
+#include <sys/types.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "config/shell_config.hpp"
@@ -55,6 +59,296 @@ static std::vector<std::string> selected_entry_paths(eh::file_browser::AppState&
 }
 
 namespace eh::file_browser {
+
+// ── ~/Templates discovery (XDG_TEMPLATES_DIR aware) ──────────────
+
+static std::string expand_home_path(std::string p) {
+  const char* home = std::getenv("HOME");
+  if (!home || !home[0]) return p;
+  const std::string h = home;
+  if (p.compare(0, 2, "~/") == 0) p = h + p.substr(1);
+  for (std::size_t pos = p.find("$HOME"); pos != std::string::npos;
+       pos = p.find("$HOME", pos + h.size()))
+    p.replace(pos, 5, h);
+  return p;
+}
+
+static std::string templates_dir() {
+  const char* home = std::getenv("HOME");
+  if (!home || !home[0]) return {};
+  std::ifstream in(std::string(home) + "/.config/user-dirs.dirs");
+  if (in) {
+    std::string line;
+    while (std::getline(in, line)) {
+      auto hash = line.find('#');
+      if (hash != std::string::npos) line.resize(hash);
+      const std::string key = "XDG_TEMPLATES_DIR";
+      auto kpos = line.find(key);
+      if (kpos == std::string::npos) continue;
+      auto eq = line.find('=', kpos + key.size());
+      if (eq == std::string::npos) continue;
+      std::string val = line.substr(eq + 1);
+      auto notsp = [](unsigned char c) { return !std::isspace(c); };
+      val.erase(val.begin(), std::find_if(val.begin(), val.end(), notsp));
+      val.erase(std::find_if(val.rbegin(), val.rend(), notsp).base(), val.end());
+      if (val.size() >= 2 && val.front() == '"' && val.back() == '"')
+        val = val.substr(1, val.size() - 2);
+      if (!val.empty()) return expand_home_path(val);
+    }
+  }
+  return std::string(home) + "/Templates";
+}
+
+// Depth-limited recursive scan; directories become nested submenu items.
+static void collect_templates(const fs::path& dir, int depth,
+                              std::vector<AppState::ContextMenuItem>& out) {
+  std::error_code ec;
+  fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
+  if (ec) return;
+  std::vector<fs::directory_entry> entries;
+  for (; it != end && !ec; it.increment(ec))
+    entries.push_back(*it);
+  std::sort(entries.begin(), entries.end(),
+            [](const fs::directory_entry& a, const fs::directory_entry& b) {
+              return a.path().filename().string() < b.path().filename().string();
+            });
+  for (const auto& e : entries) {
+    std::string name = e.path().filename().string();
+    if (name.empty() || name[0] == '.') continue;
+    std::error_code ec2;
+    bool is_dir = e.is_directory(ec2);
+    if (is_dir) {
+      if (depth >= 3) continue;
+      std::vector<AppState::ContextMenuItem> sub;
+      collect_templates(e.path(), depth + 1, sub);
+      if (sub.empty()) continue;
+      AppState::ContextMenuItem hdr =
+          AppState::menu_item(AppState::ContextMenuAction::Separator, name);
+      hdr.sub_items = std::move(sub);
+      out.push_back(std::move(hdr));
+    } else if (!ec2) {
+      out.push_back(AppState::menu_item(AppState::ContextMenuAction::NewFromTemplate,
+                                        name, e.path().string()));
+    }
+  }
+}
+
+// Builds a "New From Template" submenu item; returns false when no templates.
+static bool build_template_submenu(AppState::ContextMenuItem& out_item) {
+  std::vector<AppState::ContextMenuItem> items;
+  collect_templates(fs::path(templates_dir()), 0, items);
+  if (items.empty()) return false;
+  out_item.action = AppState::ContextMenuAction::Separator;
+  out_item.label = "New From Template";
+  out_item.sub_items = std::move(items);
+  return true;
+}
+
+void insert_template_submenu(AppState& app, std::size_t pos) {
+  AppState::ContextMenuItem item;
+  if (!build_template_submenu(item)) return;
+  if (pos > app.context_menu_items.size())
+    pos = app.context_menu_items.size();
+  app.context_menu_items.insert(app.context_menu_items.begin() + pos,
+                                std::move(item));
+}
+
+// ── Nemo-compatible scripts (~/.local/share/nemo/scripts) ────────
+
+static std::string scripts_dir() {
+  const char* xdg = std::getenv("XDG_DATA_HOME");
+  std::string base;
+  if (xdg && xdg[0]) {
+    base = xdg;
+  } else {
+    const char* home = std::getenv("HOME");
+    if (!home || !home[0]) return {};
+    base = std::string(home) + "/.local/share";
+  }
+  return base + "/nemo/scripts";
+}
+
+static void collect_scripts(const fs::path& dir, int depth,
+                            std::vector<AppState::ContextMenuItem>& out) {
+  std::error_code ec;
+  fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
+  if (ec) return;
+  std::vector<fs::directory_entry> entries;
+  for (; it != end && !ec; it.increment(ec))
+    entries.push_back(*it);
+  std::sort(entries.begin(), entries.end(),
+            [](const fs::directory_entry& a, const fs::directory_entry& b) {
+              return a.path().filename().string() < b.path().filename().string();
+            });
+  for (const auto& e : entries) {
+    std::string name = e.path().filename().string();
+    if (name.empty() || name[0] == '.') continue;
+    std::error_code ec2;
+    bool is_dir = e.is_directory(ec2);
+    if (is_dir) {
+      if (depth >= 3) continue;
+      std::vector<AppState::ContextMenuItem> sub;
+      collect_scripts(e.path(), depth + 1, sub);
+      if (sub.empty()) continue;
+      AppState::ContextMenuItem hdr =
+          AppState::menu_item(AppState::ContextMenuAction::Separator, name);
+      hdr.sub_items = std::move(sub);
+      out.push_back(std::move(hdr));
+    } else if (!ec2 && ::access(e.path().c_str(), X_OK) == 0) {
+      out.push_back(AppState::menu_item(AppState::ContextMenuAction::RunScript,
+                                        name, e.path().string()));
+    }
+  }
+}
+
+void insert_scripts_submenu(AppState& app, std::size_t pos) {
+  std::vector<AppState::ContextMenuItem> items;
+  collect_scripts(fs::path(scripts_dir()), 0, items);
+  if (items.empty()) return;
+  AppState::ContextMenuItem item;
+  item.action = AppState::ContextMenuAction::Separator;
+  item.label = "Scripts";
+  item.sub_items = std::move(items);
+  if (pos > app.context_menu_items.size())
+    pos = app.context_menu_items.size();
+  app.context_menu_items.insert(app.context_menu_items.begin() + pos,
+                                std::move(item));
+}
+
+
+// Percent-encoding file URI (mirrors ClipboardService/drag encoders).
+static std::string menu_file_uri(const std::string& abs_path) {
+  std::string out = "file://";
+  char buf[8];
+  for (unsigned char c : abs_path) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+        (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '_' ||
+        c == '.' || c == '~')
+      out += static_cast<char>(c);
+    else if (c == ' ')
+      out += "%20";
+    else {
+      std::snprintf(buf, sizeof(buf), "%%%02X", c);
+      out += buf;
+    }
+  }
+  return out;
+}
+
+// Launches `script` detached (double-fork, no zombie) with the documented
+// NEMO_SCRIPT_* environment contract; selection is also passed as argv and
+// the working directory is set to the current folder.
+static void run_nemo_script(AppState& app, const std::string& script_path) {
+  const auto sel = selected_entry_paths(app);
+  const std::string cwd = app.cur_tab().current_path;
+
+  std::string paths_nl, uris_nl;
+  for (std::size_t i = 0; i < sel.size(); ++i) {
+    if (!paths_nl.empty()) {
+      paths_nl += '\n';
+      uris_nl += '\n';
+    }
+    paths_nl += sel[i];
+    uris_nl += menu_file_uri(sel[i]);
+  }
+
+  std::vector<std::string> extra;
+  extra.push_back("NEMO_SCRIPT_SELECTED_FILE_PATHS=" + paths_nl);
+  extra.push_back("NEMO_SCRIPT_SELECTED_URIS=" + uris_nl);
+  extra.push_back("NEMO_SCRIPT_CURRENT_URI=" +
+                  menu_file_uri(cwd));
+  extra.push_back("NEMO_SCRIPT_WINDOW_GEOMETRY=0 0 " +
+                  std::to_string(app.width) + " " + std::to_string(app.height));
+  if (app.split_view) {
+    const Tab& other = app.active_pane == 1 ? app.tabs[app.active_tab]
+                                            : app.right_pane;
+    std::string opaths, ouris;
+    for (int vi : other.multi_selected) {
+      if (vi < 0 || vi >= static_cast<int>(other.visible_entries.size())) continue;
+      int r = other.visible_entries[vi];
+      if (r < 0 || r >= static_cast<int>(other.entries.size())) continue;
+      if (!opaths.empty()) {
+        opaths += '\n';
+        ouris += '\n';
+      }
+      opaths += other.entries[r].path;
+      ouris += menu_file_uri(other.entries[r].path);
+    }
+    extra.push_back("NEMO_SCRIPT_NEXT_PANE_SELECTED_FILE_PATHS=" + opaths);
+    extra.push_back("NEMO_SCRIPT_NEXT_PANE_SELECTED_URIS=" + ouris);
+    extra.push_back("NEMO_SCRIPT_NEXT_PANE_CURRENT_URI=" +
+                    menu_file_uri(other.current_path));
+  }
+
+  // envp = current environ with any stale NEMO_SCRIPT_* stripped + extras
+  std::vector<char*> envp;
+  for (char** e = environ; e && *e; ++e)
+    if (!std::string_view(*e).starts_with("NEMO_SCRIPT_"))
+      envp.push_back(*e);
+  for (const auto& s : extra) envp.push_back(const_cast<char*>(s.c_str()));
+  envp.push_back(nullptr);
+
+  std::vector<char*> argv;
+  argv.push_back(const_cast<char*>(script_path.c_str()));
+  for (const auto& p : sel) argv.push_back(const_cast<char*>(p.c_str()));
+  argv.push_back(nullptr);
+
+  pid_t mid = ::fork();
+  if (mid < 0) return;
+  if (mid == 0) {
+    pid_t pid2 = ::fork();
+    if (pid2 == 0) {
+      ::chdir(cwd.c_str());
+      ::execve(script_path.c_str(), argv.data(), envp.data());
+      _exit(127);
+    }
+    _exit(pid2 > 0 ? 0 : 127);
+  }
+  int st = 0;
+  ::waitpid(mid, &st, 0);
+}
+
+// ── Open as Administrator ────────────────────────────────────────
+
+// Re-launches the browser as root over pkexec pointed at `target_dir`.
+// pkexec scrubs the environment, so the Wayland session variables the
+// elevated instance needs are re-exported explicitly.
+//
+// Spawned with a plain single fork and NOT waited on: pkexec refuses to
+// run ("Refusing to render service to dead parents") when its parent is
+// gone or exits immediately, so daemonizing via double-fork is not an
+// option — this process stays alive as its parent instead.
+static void open_as_admin(const std::string& target_dir) {
+  const char* wd = std::getenv("WAYLAND_DISPLAY");
+  if (!wd || !wd[0]) wd = "wayland-0";
+  const char* xrd = std::getenv("XDG_RUNTIME_DIR");
+  if (!xrd || !xrd[0]) return;
+
+  char exe_buf[4096];
+  ssize_t n = ::readlink("/proc/self/exe", exe_buf, sizeof(exe_buf) - 1);
+  if (n <= 0) return;
+  exe_buf[static_cast<std::size_t>(n)] = '\0';
+
+  std::string wd_env = "WAYLAND_DISPLAY=" + std::string(wd);
+  std::string xrd_env = "XDG_RUNTIME_DIR=" + std::string(xrd);
+
+  std::vector<char*> argv;
+  argv.push_back(const_cast<char*>("pkexec"));
+  argv.push_back(const_cast<char*>("env"));
+  argv.push_back(wd_env.data());
+  argv.push_back(xrd_env.data());
+  argv.push_back(exe_buf);
+  argv.push_back(const_cast<char*>(target_dir.c_str()));
+  argv.push_back(nullptr);
+
+  pid_t pid = ::fork();
+  if (pid < 0) return;
+  if (pid == 0) {
+    ::unsetenv("WAYLAND_SOCKET");
+    ::execvp(argv[0], argv.data());
+    _exit(127);
+  }
+}
 
 // ── Overwrite/merge conflict resolution (Dolphin-style) ──────────
 
@@ -356,6 +650,9 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
         AppState::menu_item(AppState::ContextMenuAction::OpenInNewWindow, "Open in new window"));
       app.context_menu_items.push_back(
         AppState::menu_item(AppState::ContextMenuAction::OpenInTerminal, term_label));
+      if (::geteuid() != 0)
+        app.context_menu_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::OpenAsAdmin, "Open as Administrator"));
       app.context_menu_items.push_back(
         AppState::menu_item(AppState::ContextMenuAction::AddToFavorites, "Add to Favorites"));
     }
@@ -485,8 +782,13 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
   } else {
     app.context_menu_items = {
       AppState::menu_item(AppState::ContextMenuAction::NewFolder, "New Folder"),
+      AppState::menu_item(AppState::ContextMenuAction::NewDocument, "New Document"),
       AppState::menu_separator(),
       AppState::menu_item(AppState::ContextMenuAction::OpenInTerminal, term_label),
+      (::geteuid() != 0
+           ? AppState::menu_item(AppState::ContextMenuAction::OpenAsAdmin,
+                                 "Open as Administrator")
+           : AppState::menu_separator()),
       AppState::menu_separator(),
       AppState::menu_item(AppState::ContextMenuAction::Paste, "Paste"),
       AppState::menu_item(AppState::ContextMenuAction::SelectAll, "Select All"),
@@ -495,6 +797,8 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
       AppState::menu_separator(),
       AppState::menu_item(AppState::ContextMenuAction::Properties, "Properties"),
     };
+    insert_template_submenu(app, 2);
+    insert_scripts_submenu(app, app.context_menu_items.size() - 2);
   }
 
 }
@@ -622,6 +926,29 @@ void execute_context_menu_action(AppState& app, int item_idx) {
     app.create_is_folder = false;
     app.create_buf = "New Document";
     app.create_cursor_pos = static_cast<int>(app.create_buf.size());
+    draw(app);
+    return;
+  }
+
+  if (action == AppState::ContextMenuAction::NewFromTemplate) {
+    const auto& item = app.context_menu_items[item_idx];
+    app.create_dialog_open = true;
+    app.create_is_folder = false;
+    app.create_template_src = item.data;
+    fs::path src(item.data);
+    std::string stem = src.filename().string();
+    std::string ext = src.extension().string();
+    if (!ext.empty() && stem.size() > ext.size())
+      stem.resize(stem.size() - ext.size());
+    if (stem.empty()) stem = "New Document";
+    app.create_buf = stem;
+    app.create_cursor_pos = static_cast<int>(app.create_buf.size());
+    draw(app);
+    return;
+  }
+
+  if (action == AppState::ContextMenuAction::RunScript) {
+    run_nemo_script(app, app.context_menu_items[item_idx].data);
     draw(app);
     return;
   }
@@ -914,6 +1241,22 @@ void execute_context_menu_action(AppState& app, int item_idx) {
         _exit(1);
       }
     }
+    draw(app);
+    return;
+  }
+
+  // ── Open as Administrator ──
+  if (action == AppState::ContextMenuAction::OpenAsAdmin) {
+    std::string target_dir = app.cur_tab().current_path;
+    if (app.context_menu_file_idx >= 0 &&
+        app.context_menu_file_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+      int real_idx = app.cur_tab().visible_entries[app.context_menu_file_idx];
+      if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
+          app.cur_tab().entries[real_idx].is_dir) {
+        target_dir = app.cur_tab().entries[real_idx].path;
+      }
+    }
+    open_as_admin(target_dir);
     draw(app);
     return;
   }
@@ -1974,8 +2317,7 @@ void reload_settings_from_config(AppState& app) {
   eh::config::FileBrowserSettings fbs = eh::config::read_file_browser_toml();
   const auto& sc = eh::config::shell_config_snapshot_skip_matugen();
   app.settings_matugen_theming = sc.appearance.matugenThemingEnabled;
-  app.zoom_pct = fbs.zoom_pct;
-  app.settings_zoom_pct = app.zoom_pct;
+  apply_zoom_pct(app, fbs.zoom_pct);
   app.folders_before_files = fbs.folders_before_files;
   app.surface_opacity_pct = fbs.surface_opacity_pct;
   app.sidebar_opacity_pct = fbs.sidebar_opacity_pct;
@@ -2040,19 +2382,40 @@ void show_properties(AppState& app, const std::string& path, const std::string& 
   p.is_dir = S_ISDIR(st.st_mode);
   if (p.is_dir) {
     uint64_t total = 0;
+    p.contained_files = 0;
+    p.contained_dirs = 0;
     std::error_code ec;
     for (auto& entry : fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied, ec)) {
       if (ec) break;
-      if (entry.is_regular_file(ec)) {
+      std::error_code ec2;
+      if (entry.is_regular_file(ec2) && !ec2) {
+        ++p.contained_files;
         struct stat fst;
         if (stat(entry.path().c_str(), &fst) == 0)
           total += static_cast<uint64_t>(fst.st_size);
+      } else if (entry.is_directory(ec2) && !ec2) {
+        ++p.contained_dirs;
       }
     }
     p.size = total;
   } else {
     p.size = static_cast<uint64_t>(st.st_size);
   }
+
+  // Volume usage for the filesystem holding this item (donut in Basic tab)
+  {
+    struct statvfs vfs;
+    if (statvfs(path.c_str(), &vfs) == 0 && vfs.f_frsize > 0) {
+      p.vol_total_bytes =
+          static_cast<uint64_t>(vfs.f_blocks) * static_cast<uint64_t>(vfs.f_frsize);
+      p.vol_free_bytes =
+          static_cast<uint64_t>(vfs.f_bavail) * static_cast<uint64_t>(vfs.f_frsize);
+    }
+  }
+
+  // Tags (freedesktop user.xdg.tags xattr)
+  p.tags_value = read_xdg_tags(path);
+
   p.modified_sec = st.st_mtime;
   p.accessed_sec = st.st_atime;
   p.created_sec = st.st_ctime;

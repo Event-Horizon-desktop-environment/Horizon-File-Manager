@@ -157,6 +157,7 @@ cairo_surface_t* get_thumbnail(AppState& app, const std::string& path,
                                 int size);
 void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
                   int view_h);
+void size_sidebar_to_content(AppState& app, cairo_t* cr);
 void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x = 0, int pane_w = 0);
 void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int pane_x = 0, int pane_w = 0);
 void draw_list_view(AppState& app, cairo_t* cr, int content_x, int content_y,
@@ -201,6 +202,14 @@ void hit_test_marquee(AppState& app);
 // ── context menu logic (file_browser_menu.cpp) ───────────────────
 
 void execute_context_menu_action(AppState& app, int item_idx);
+
+/// Inserts a "New From Template" submenu (from ~/Templates) at the given
+/// position of the current context menu; no-op when no templates exist.
+void insert_template_submenu(AppState& app, std::size_t pos);
+
+/// Inserts a "Scripts" submenu (from ~/.local/share/nemo/scripts) at the
+/// given position; no-op when no executable scripts exist.
+void insert_scripts_submenu(AppState& app, std::size_t pos);
 
 // ── Open With dialog (file_browser_menu.cpp + draw.cpp) ──────────
 

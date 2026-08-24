@@ -512,6 +512,33 @@ static std::string format_size(uint64_t bytes) {
 
 // ── sidebar ──────────────────────────────────────────────────────
 
+void size_sidebar_to_content(AppState& app, cairo_t* cr) {
+  if (!app.sidebar_expanded || app.sidebar_locations.empty()) return;
+  constexpr double kSbZf = 1.2; // must match draw_sidebar's pinned scale
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                         CAIRO_FONT_WEIGHT_NORMAL);
+  cairo_set_font_size(cr, 13.0 * kSbZf);
+  double label_x = (16 + 20 + 12) * kSbZf;
+  double widest = 0;
+  for (const auto& loc : app.sidebar_locations) {
+    cairo_text_extents_t te;
+    cairo_text_extents(cr, loc.label.c_str(), &te);
+    widest = std::max(widest, static_cast<double>(te.x_advance));
+  }
+  // icon + gap + widest label + mount-indicator/usage reserve + edge padding
+  int needed = static_cast<int>(label_x + widest + 40.0 * kSbZf + 16.0 * kSbZf);
+  // Leave room for the info/ops panels and a usable content column so the
+  // three can never combine into an overlap on narrow windows.
+  int reserve = (app.info_panel_open ? app.info_panel_width : 0) +
+                (app.ops_panel_slide > 0.01
+                     ? static_cast<int>(app.ops_panel_width * app.ops_panel_slide)
+                     : 0);
+  int cap = std::max(160, std::min(std::max(340, app.width * 3 / 5),
+                                   app.width - reserve - 240));
+  int want = std::max(app.sidebar_width, needed);
+  app.sidebar_width = std::min(want, cap);
+}
+
 void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
                   int) {
   // One-shot: log first-paint sub-phases to find cold-start hot spots.
@@ -701,27 +728,28 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
     // gap-3 = 12px between icon and label
     int label_x = icon_x + icon_sz + static_cast<int>(12.0 * zf);
 
-    if (loc.kind == SidebarLocation::Kind::Drive || loc.kind == SidebarLocation::Kind::Root) {
-      int max_label_w = sidebar_w - label_x - static_cast<int>(40.0 * zf);
+    bool is_drive_kind =
+        loc.kind == SidebarLocation::Kind::Drive ||
+        loc.kind == SidebarLocation::Kind::Root;
+    // Drives leave room for the mount indicator; other rows a small margin.
+    int max_label_w = sidebar_w - label_x -
+                      static_cast<int>((is_drive_kind ? 40.0 : 14.0) * zf);
+    std::string shown = loc.label;
+    {
       cairo_text_extents_t te;
-      cairo_text_extents(cr, loc.label.c_str(), &te);
+      cairo_text_extents(cr, shown.c_str(), &te);
       if (te.x_advance > max_label_w) {
-        std::string short_label = loc.label;
-        while (!short_label.empty()) {
-          cairo_text_extents(cr, (short_label + "...").c_str(), &te);
+        while (!shown.empty()) {
+          cairo_text_extents(cr, (shown + "...").c_str(), &te);
           if (te.x_advance <= max_label_w) break;
-          short_label.pop_back();
+          shown.pop_back();
         }
-        cairo_move_to(cr, label_x, y + main_row_h / 2 + static_cast<int>(4.0 * zf));
-        cairo_show_text(cr, (short_label + "...").c_str());
-      } else {
-        cairo_move_to(cr, label_x, y + main_row_h / 2 + static_cast<int>(4.0 * zf));
-        cairo_show_text(cr, loc.label.c_str());
+        shown += "...";
       }
-    } else {
-      cairo_move_to(cr, label_x, y + item_h / 2 + static_cast<int>(4.0 * zf));
-      cairo_show_text(cr, loc.label.c_str());
     }
+    cairo_move_to(cr, label_x,
+                  y + main_row_h / 2 + static_cast<int>(4.0 * zf));
+    cairo_show_text(cr, shown.c_str());
 
     // Mount indicator for drives
     if (loc.kind == SidebarLocation::Kind::Drive) {
@@ -762,9 +790,21 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
       int bar_h = static_cast<int>(4.0 * zf);
       int bar_y = usage_y + static_cast<int>(10.0 * zf);
 
-      // Usage text
+      // Usage text (elided to the bar width)
       uint64_t used = loc.total_bytes - loc.free_bytes;
       std::string usage_text = format_size(used) + " / " + format_size(loc.total_bytes);
+      {
+        cairo_text_extents_t ute;
+        cairo_text_extents(cr, usage_text.c_str(), &ute);
+        if (ute.x_advance > bar_w) {
+          while (!usage_text.empty()) {
+            cairo_text_extents(cr, (usage_text + "...").c_str(), &ute);
+            if (ute.x_advance <= bar_w) break;
+            usage_text.pop_back();
+          }
+          usage_text += "...";
+        }
+      }
       cairo_set_font_size(cr, 10.0 * zf);
       cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                              app.text_secondary_b, 0.8);
@@ -2598,26 +2638,63 @@ void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int pane_x, int 
   bool dragging = app.tab_dragging;
   int drag_sb_idx = dragging ? app.tab_drag_from : -1;
 
+  // ── Pass 1: measure every tab so overflow can be distributed fairly ──
+  int close_w = close_icon_sz + pad;
+  int min_tab_w = static_cast<int>(100.0 * zf);
+  std::vector<std::string> tab_labels(tab_count);
+  std::vector<int> tab_final_w(tab_count, min_tab_w);
+  {
+    std::vector<int> want_w(tab_count, min_tab_w);
+    long total_w = 0;
+    for (int i = 0; i < tab_count; ++i) {
+      std::string label = app.tabs[i].current_path;
+      auto pos = label.rfind('/');
+      if (pos != std::string::npos) label = label.substr(pos + 1);
+      if (label.empty()) label = "/";
+      tab_labels[i] = label;
+      cairo_text_extents_t te;
+      cairo_text_extents(cr, label.c_str(), &te);
+      want_w[i] = std::max(pad + static_cast<int>(te.x_advance) + pad +
+                               close_w + pad,
+                           min_tab_w);
+      total_w += want_w[i];
+    }
+    int avail_total = w - x;
+    if (total_w <= avail_total || tab_count == 0) {
+      for (int i = 0; i < tab_count; ++i)
+        tab_final_w[i] = want_w[i];
+    } else {
+      // Proportional shrink with a floor so every tab stays clickable.
+      double scale =
+          static_cast<double>(avail_total) / static_cast<double>(total_w);
+      int floor_w = std::max(static_cast<int>(56.0 * zf),
+                             std::min(min_tab_w,
+                                      avail_total / std::max(1, tab_count)));
+      for (int i = 0; i < tab_count; ++i)
+        tab_final_w[i] =
+            std::max(floor_w, static_cast<int>(want_w[i] * scale));
+    }
+  }
+
   for (int i = 0; i < tab_count; ++i) {
-    // Compute label from path basename
-    std::string label = app.tabs[i].current_path;
-    auto pos = label.rfind('/');
-    if (pos != std::string::npos) label = label.substr(pos + 1);
-    if (label.empty()) label = "/";
+    int tab_w = tab_final_w[i];
 
-    // Measure text width
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, label.c_str(), &te);
-
-    int close_w = close_icon_sz + pad;
-    int label_w = static_cast<int>(te.x_advance);
-    int tab_w = pad + label_w + pad + close_w + pad;
-    int min_tab_w = static_cast<int>(100.0 * zf);
-    if (tab_w < min_tab_w) tab_w = min_tab_w;
-
-    // Clamp to available width
-    int avail = w - x;
-    if (tab_w > avail) tab_w = avail;
+    // Elide the label into its allotted share of the bar
+    {
+      int budget = tab_w - pad * 3 - close_w;
+      cairo_text_extents_t te;
+      cairo_text_extents(cr, tab_labels[i].c_str(), &te);
+      if (static_cast<int>(te.x_advance) > budget && budget > 20) {
+        std::string s = tab_labels[i];
+        while (!s.empty()) {
+          cairo_text_extents(cr, (s + "...").c_str(), &te);
+          if (static_cast<int>(te.x_advance) <= budget) break;
+          s.pop_back();
+        }
+        s += "...";
+        tab_labels[i] = s;
+      }
+    }
 
     bool active = (i == app.active_tab);
 
@@ -2676,7 +2753,7 @@ void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int pane_x, int 
     }
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, active ? 1.0 : 0.7);
     cairo_move_to(cr, x + pad, tab_h / 2 + static_cast<int>(5.0 * zf));
-    cairo_show_text(cr, label.c_str());
+    cairo_show_text(cr, tab_labels[i].c_str());
 
     // Close button
     int close_x = x + tab_w - pad - close_icon_sz;
@@ -3309,22 +3386,35 @@ void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
   }
 
   if (!app.operation_status.empty()) {
-    // Show operation status centered, overriding selection info
+    // Show operation status centered between the left text and the right
+    // cluster, elided so it can never collide with either.
+    constexpr int kCtlWOp = 24 + 12 + 220 + 12 + 24;
+    const double right_reserve = kCtlWOp + 24 + 80; // ctl + gap + free text
     cairo_text_extents_t te;
-    cairo_text_extents(cr, app.operation_status.c_str(), &te);
-    double sw = te.width;
+    cairo_text_extents(cr, status_buf, &te);
+    double left_w = te.x_advance;
+    double zone_l = pad + left_w + static_cast<int>(16.0 * zf);
+    double zone_r = static_cast<double>(w) - pad - right_reserve;
+    double op_budget = zone_r - zone_l;
+    std::string shown_op = app.operation_status;
+    cairo_text_extents(cr, shown_op.c_str(), &te);
+    if (te.x_advance > op_budget && op_budget > 60) {
+      while (!shown_op.empty()) {
+        cairo_text_extents(cr, (shown_op + "...").c_str(), &te);
+        if (te.x_advance <= op_budget) break;
+        shown_op.pop_back();
+      }
+      shown_op += "...";
+    }
+    double sw = te.x_advance;
     cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 1.0);
-    cairo_move_to(cr, (w - sw) / 2, y + status_h / 2 + 4);
-    cairo_show_text(cr, app.operation_status.c_str());
+    cairo_move_to(cr, zone_l + (op_budget - sw) / 2, y + status_h / 2 + 4);
+    cairo_show_text(cr, shown_op.c_str());
   }
 
-  cairo_move_to(cr, pad, y + status_h / 2 + 4);
-  cairo_show_text(cr, status_buf);
-
+  // ── Free-space readout (cached statvfs, 2 s) ──
   std::string free_str;
   {
-    // statvfs can block for hundreds of ms on slow/network mounts — never
-    // call it more than once per 2 s per path.
     static std::string s_path;
     static uint64_t s_free = 0;
     static bool s_valid = false;
@@ -3339,11 +3429,48 @@ void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
       s_at = now;
     }
     if (s_valid) free_str = format_size(s_free) + " free";
+    // Don't refresh while the user is on the zoom control — a changing
+    // string would shift the slider/buttons under the cursor.
+    bool over_zoom_ctl =
+        app.status_zoom_minus[2] > 0 &&
+        app.pointerY >= y && app.pointerY < y + status_h &&
+        app.pointerX >= app.status_zoom_minus[0] - 8 &&
+        app.pointerX < app.status_zoom_plus[0] + app.status_zoom_plus[2] + 8;
+    if (over_zoom_ctl)
+      s_at = now; // hold the cache while hovering
   }
 
   cairo_text_extents_t te;
+  cairo_text_extents(cr, status_buf, &te);
+  double status_w = te.x_advance;
+
   cairo_text_extents(cr, free_str.c_str(), &te);
   double free_w = te.width;
+
+  // Zoom control footprint (fixed geometry): minus+gap+track+gap+plus
+  constexpr int kCtlW = 24 + 12 + 220 + 12 + 24;
+  // Right cluster reserved to the right of the status text: zoom ctl +
+  // gap + free text (+ margin). Conservative lower bound keeps the centered
+  // operation status honest before free_str is measured.
+  const double right_cluster =
+      free_w + 24.0 + static_cast<double>(kCtlW);
+
+  // Elide the left status text so it can never run under the right cluster
+  double status_budget = static_cast<double>(w) - 2 * pad - right_cluster -
+                         static_cast<int>(16.0 * zf);
+  std::string shown_status = status_buf;
+  if (status_w > status_budget && status_budget > 40) {
+    while (!shown_status.empty()) {
+      cairo_text_extents(cr, (shown_status + "...").c_str(), &te);
+      if (te.x_advance <= status_budget) break;
+      shown_status.pop_back();
+    }
+    shown_status += "...";
+  }
+  cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                        app.text_secondary_b, 1.0);
+  cairo_move_to(cr, pad, y + status_h / 2 + 4);
+  cairo_show_text(cr, shown_status.c_str());
 
   if (!free_str.empty()) {
     cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
@@ -3352,30 +3479,78 @@ void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
     cairo_show_text(cr, free_str.c_str());
   }
 
-  // ── Zoom slider (levels 0..16) ──
+  // ── Zoom slider (discrete levels) + −/+ buttons ──
   {
-    int track_w = std::min(140, static_cast<int>(140.0 * zf));
-    int btn_sz = 18;
+    // Fixed geometry (NOT zoom-scaled): stepping +/- must never move the
+    // control out from under the cursor.
+    constexpr int kTrackW = 220;
+    constexpr int kRightGap = 24;
+    int track_w = kTrackW;
     int cy = y + status_h / 2;
-    int track_x = w - pad - free_w - static_cast<int>(24.0 * zf) - btn_sz * 2 - 12 - track_w;
-    if (track_x > pad + 200 * zf) {
+    int btn_w = 24, btn_h = 18;
+    int right_edge = w - pad - free_w - kRightGap;
+    int minus_x = right_edge - (btn_w + 12 + track_w + 12 + btn_w);
+    int track_x = minus_x + btn_w + 12;
+    int plus_x = track_x + track_w + 12;
+    int btn_y = cy - btn_h / 2;
+    if (minus_x > pad + status_w + static_cast<int>(16.0 * zf)) {
       auto dim = [&](bool hov) {
         cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
-                              app.text_secondary_b, hov ? 0.9 : 0.55);
+                              app.text_secondary_b, hov ? 1.0 : 0.65);
       };
-      // minus glyph
-      dim(false);
+      app.status_zoom_minus[0] = minus_x;
+      app.status_zoom_minus[1] = btn_y;
+      app.status_zoom_minus[2] = btn_w;
+      app.status_zoom_minus[3] = btn_h;
+      app.status_zoom_plus[0] = plus_x;
+      app.status_zoom_plus[1] = btn_y;
+      app.status_zoom_plus[2] = btn_w;
+      app.status_zoom_plus[3] = btn_h;
+      app.status_zoom_slider_x = track_x;
+      app.status_zoom_slider_w = track_w;
+
+      auto in_rect = [&](const int* r) {
+        return app.pointerX >= r[0] && app.pointerX < r[0] + r[2] &&
+               app.pointerY >= r[1] && app.pointerY < r[1] + r[3];
+      };
+      auto pill = [&](const int* r, bool hover) {
+        cairo_set_source_rgba(cr, app.surface_r, app.surface_g,
+                              app.surface_b, hover ? 0.95 : 0.55);
+        draw_rounded_rect(cr, static_cast<double>(r[0]),
+                          static_cast<double>(r[1]),
+                          static_cast<double>(r[2]),
+                          static_cast<double>(r[3]), 9);
+        cairo_fill(cr);
+        if (hover) {
+          cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.55);
+          cairo_set_line_width(cr, 1.2);
+          draw_rounded_rect(cr, static_cast<double>(r[0]) + 0.5,
+                            static_cast<double>(r[1]) + 0.5,
+                            static_cast<double>(r[2]) - 1,
+                            static_cast<double>(r[3]) - 1, 9);
+          cairo_stroke(cr);
+        }
+      };
+      // minus button
+      bool m_hov = in_rect(app.status_zoom_minus);
+      pill(app.status_zoom_minus, m_hov);
+      dim(m_hov ? 1.0 : 0.7);
       cairo_set_line_width(cr, 1.6);
-      cairo_move_to(cr, track_x - 14, cy + 0.5);
-      cairo_line_to(cr, track_x - 14 + btn_sz - 4, cy + 0.5);
+      double mcx = minus_x + btn_w / 2.0;
+      cairo_move_to(cr, mcx - 5, cy + 0.5);
+      cairo_line_to(cr, mcx + 5, cy + 0.5);
       cairo_stroke(cr);
-      // plus glyph
-      int px = track_x + track_w + 10;
-      cairo_move_to(cr, px, cy + 0.5);
-      cairo_line_to(cr, px + btn_sz - 4, cy + 0.5);
+      // plus button
+      bool p_hov = in_rect(app.status_zoom_plus);
+      pill(app.status_zoom_plus, p_hov);
+      dim(p_hov ? 1.0 : 0.7);
+      cairo_set_line_width(cr, 1.6);
+      double pcx = plus_x + btn_w / 2.0;
+      cairo_move_to(cr, pcx - 5, cy + 0.5);
+      cairo_line_to(cr, pcx + 5, cy + 0.5);
       cairo_stroke(cr);
-      cairo_move_to(cr, px + (btn_sz - 4) / 2.0, cy - (btn_sz - 4) / 2.0 + 0.5);
-      cairo_line_to(cr, px + (btn_sz - 4) / 2.0, cy + (btn_sz - 4) / 2.0 + 0.5);
+      cairo_move_to(cr, pcx, cy - 5 + 0.5);
+      cairo_line_to(cr, pcx, cy + 5 + 0.5);
       cairo_stroke(cr);
       // track
       cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.45);
@@ -3385,16 +3560,24 @@ void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
       double t = static_cast<double>(zoom_level_for_pct(app.settings_zoom_pct)) /
                  (kZoomLevelCount - 1);
       double hx = track_x + t * (track_w - 10);
-      bool hov = app.status_zoom_dragging;
+      bool hov = app.status_zoom_dragging ||
+                 (app.pointerY >= cy - 12 && app.pointerY < cy + 12 &&
+                  app.pointerX >= track_x && app.pointerX < track_x + track_w);
       cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
                             hov ? 1.0 : 0.9);
       cairo_arc(cr, hx + 5, cy, 5, 0, 2 * M_PI);
       cairo_fill(cr);
-      app.status_zoom_slider_x = track_x;
-      app.status_zoom_slider_w = track_w;
+      if (hov) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.3);
+        cairo_set_line_width(cr, 1.4);
+        cairo_arc(cr, hx + 5, cy, 8, 0, 2 * M_PI);
+        cairo_stroke(cr);
+      }
     } else {
       app.status_zoom_slider_x = 0;
       app.status_zoom_slider_w = 0;
+      app.status_zoom_minus[2] = 0;
+      app.status_zoom_plus[2] = 0;
     }
   }
 }
@@ -6331,11 +6514,22 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
     draw_info_row("Name", p.name);
     if (!p.mime_type.empty()) draw_info_row("Type", p.mime_type);
     if (p.is_dir) {
-      uint64_t item_count = 0;
-      std::error_code ec;
-      for ([[maybe_unused]] auto& de : fs::directory_iterator(p.path, ec))
-        if (!ec) ++item_count;
-      draw_info_row("Contents", std::to_string(item_count) + " items");
+      std::string items_str;
+      if (p.contained_files == 0 && p.contained_dirs == 0) {
+        items_str = "Empty";
+      } else if (p.contained_files > 0 && p.contained_dirs > 0) {
+        items_str = std::to_string(p.contained_files) +
+                    (p.contained_files == 1 ? " file, " : " files, ") +
+                    std::to_string(p.contained_dirs) +
+                    (p.contained_dirs == 1 ? " folder" : " folders");
+      } else if (p.contained_files > 0) {
+        items_str = std::to_string(p.contained_files) +
+                    (p.contained_files == 1 ? " file" : " files");
+      } else {
+        items_str = std::to_string(p.contained_dirs) +
+                    (p.contained_dirs == 1 ? " folder" : " folders");
+      }
+      draw_info_row("Contents", items_str);
     } else {
       char sz[64];
       double sz_val = static_cast<double>(p.size);
@@ -6379,9 +6573,146 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
     }
     if (!p.location.empty()) draw_info_row("Location", p.location);
 
+    // ── Tags row (freedesktop user.xdg.tags) — click to edit ──
+    {
+      bool tags_hover =
+          !p.multi &&
+          app.pointerX >= p.hit_tags_row[0] &&
+          app.pointerX < p.hit_tags_row[0] + p.hit_tags_row[2] &&
+          app.pointerY >= p.hit_tags_row[1] &&
+          app.pointerY < p.hit_tags_row[1] + p.hit_tags_row[3];
+      double tag_pill_r = (app.surface_r + app.bg_r) * 0.5 + 0.12;
+      double tag_pill_g = (app.surface_g + app.bg_g) * 0.5 + 0.12;
+      double tag_pill_b = (app.surface_b + app.bg_b) * 0.5 + 0.12;
+      cairo_set_source_rgba(cr, tag_pill_r, tag_pill_g, tag_pill_b,
+                            p.tags_edit ? 0.95 : 0.75);
+      draw_rounded_rect(cr, col1_x - 14, ly + 2, row_w + 28, 28, 14);
+      cairo_fill(cr);
+      if ((tags_hover || p.tags_edit) && !p.multi) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
+                              p.tags_edit ? 0.45 : 0.25);
+        cairo_set_line_width(cr, 1.2);
+        draw_rounded_rect(cr, col1_x - 14, ly + 2, row_w + 28, 28, 14);
+        cairo_stroke(cr);
+        p.hit_tags_row[0] = col1_x - 14;
+        p.hit_tags_row[1] = ly + 2;
+        p.hit_tags_row[2] = row_w + 28;
+        p.hit_tags_row[3] = 28;
+      } else if (!p.multi) {
+        p.hit_tags_row[0] = col1_x - 14;
+        p.hit_tags_row[1] = ly + 2;
+        p.hit_tags_row[2] = row_w + 28;
+        p.hit_tags_row[3] = 28;
+      }
+
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                            app.text_secondary_b, 1.0);
+      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                             CAIRO_FONT_WEIGHT_NORMAL);
+      cairo_set_font_size(cr, 12);
+      cairo_move_to(cr, col1_x + 2, ly + 18);
+      cairo_show_text(cr, "Tags");
+
+      std::string tags_disp =
+          p.tags_edit ? p.tags_buf
+                      : (p.tags_value.empty() ? "\u2014" : p.tags_value);
+      double tags_max_w = row_w - 64;
+      cairo_text_extents(cr, tags_disp.c_str(), &te);
+      if (!p.tags_edit) {
+        while (!tags_disp.empty() && te.x_advance > tags_max_w) {
+          tags_disp.pop_back();
+          cairo_text_extents(cr, (tags_disp + "\u2026").c_str(), &te);
+        }
+        if (tags_disp.empty()) tags_disp = "\u2026";
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+        cairo_text_extents(cr, tags_disp.c_str(), &te);
+        double tx = col2_x - te.x_advance + 2;
+        if (tx < col1_x + 70) tx = col1_x + 70;
+        cairo_move_to(cr, tx, ly + 18);
+        cairo_show_text(cr, tags_disp.c_str());
+      } else {
+        // Edit mode: left-aligned text with caret, accent underline
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+        cairo_move_to(cr, col1_x + 70, ly + 18);
+        cairo_show_text(cr, tags_disp.c_str());
+        cairo_text_extents(cr, tags_disp.c_str(), &te);
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.8);
+        cairo_set_line_width(cr, 1.2);
+        cairo_move_to(cr, col1_x + 72 + te.x_advance, ly + 7);
+        cairo_line_to(cr, col1_x + 72 + te.x_advance, ly + 21);
+        cairo_stroke(cr);
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.7);
+        cairo_set_line_width(cr, 1.5);
+        cairo_move_to(cr, col1_x + 68, ly + 26);
+        cairo_line_to(cr, col2_x, ly + 26);
+        cairo_stroke(cr);
+      }
+      ly += 32;
+    }
+
     draw_section("Ownership");
     draw_info_row("Owner", p.owner_name);
     draw_info_row("Group", p.group_name);
+
+    // ── Volume usage donut (filesystem holding this item) ──
+    if (!p.multi && p.vol_total_bytes > 0) {
+      draw_section("Volume");
+      auto fmt_vol = [](uint64_t bytes) {
+        char buf[48];
+        double v = static_cast<double>(bytes);
+        const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+        int ui = 0;
+        while (v >= 1024.0 && ui < 4) { v /= 1024.0; ++ui; }
+        snprintf(buf, sizeof(buf), "%.1f %s", v, units[ui]);
+        return std::string(buf);
+      };
+      const uint64_t used_bytes =
+          p.vol_total_bytes - std::min(p.vol_free_bytes, p.vol_total_bytes);
+      double frac = static_cast<double>(used_bytes) /
+                    static_cast<double>(p.vol_total_bytes);
+      frac = std::clamp(frac, 0.0, 1.0);
+
+      const double dcx = col1_x + 20;
+      const double dcy = ly + 24;
+      const double rad = 15.0;
+      cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.35);
+      cairo_set_line_width(cr, 6);
+      cairo_arc(cr, dcx, dcy, rad, 0, 2 * M_PI);
+      cairo_stroke(cr);
+      if (frac > 0.001) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.9);
+        cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+        cairo_arc(cr, dcx, dcy, rad, -M_PI / 2, -M_PI / 2 + frac * 2 * M_PI);
+        cairo_stroke(cr);
+        cairo_set_line_cap(cr, CAIRO_LINE_CAP_BUTT);
+      }
+      char pct_buf[16];
+      snprintf(pct_buf, sizeof(pct_buf), "%.0f%%", frac * 100.0);
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                            app.text_secondary_b, 1.0);
+      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                             CAIRO_FONT_WEIGHT_BOLD);
+      cairo_set_font_size(cr, 9);
+      cairo_text_extents(cr, pct_buf, &te);
+      cairo_move_to(cr, dcx - te.x_advance / 2, dcy + te.height / 2);
+      cairo_show_text(cr, pct_buf);
+
+      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                             CAIRO_FONT_WEIGHT_NORMAL);
+      cairo_set_font_size(cr, 12);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+      std::string used_line = "Used " + fmt_vol(used_bytes) +
+                              " of " + fmt_vol(p.vol_total_bytes);
+      cairo_move_to(cr, col1_x + 48, ly + 18);
+      cairo_show_text(cr, used_line.c_str());
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                            app.text_secondary_b, 0.85);
+      cairo_set_font_size(cr, 11);
+      std::string free_line = fmt_vol(p.vol_free_bytes) + " free";
+      cairo_move_to(cr, col1_x + 48, ly + 36);
+      cairo_show_text(cr, free_line.c_str());
+      ly += 52;
+    }
   }
 
     if (p.can_be_executable) {
@@ -6506,6 +6837,82 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
           cairo_move_to(cr, combo_x + 10, item_y + 17);
           cairo_show_text(cr, combo_items[ci]);
         }
+      }
+      ly += combo_h + 8;
+    }
+
+    // ── Numeric (octal) mode editor — click to type, Enter applies chmod ──
+    if (!p.multi) {
+      draw_section("Numeric mode");
+      auto rwx_string = [](mode_t m) {
+        char s[10];
+        const char* rwx[] = {"---", "--x", "-w-", "-wx", "r--", "r-x", "rw-", "rwx"};
+        snprintf(s, sizeof(s), "%s%s%s", rwx[(m >> 6) & 7], rwx[(m >> 3) & 7],
+                 rwx[m & 7]);
+        return std::string(s);
+      };
+      bool oct_hover =
+          app.pointerX >= p.hit_octal[0] && app.pointerX < p.hit_octal[0] + p.hit_octal[2] &&
+          app.pointerY >= p.hit_octal[1] && app.pointerY < p.hit_octal[1] + p.hit_octal[3];
+      double oct_pill_r = (app.surface_r + app.bg_r) * 0.5 + 0.12;
+      double oct_pill_g = (app.surface_g + app.bg_g) * 0.5 + 0.12;
+      double oct_pill_b = (app.surface_b + app.bg_b) * 0.5 + 0.12;
+      cairo_set_source_rgba(cr, oct_pill_r, oct_pill_g, oct_pill_b,
+                            p.octal_edit ? 0.95 : 0.75);
+      draw_rounded_rect(cr, col1_x - 14, ly + 2, row_w + 28, 28, 14);
+      cairo_fill(cr);
+      p.hit_octal[0] = col1_x - 14;
+      p.hit_octal[1] = ly + 2;
+      p.hit_octal[2] = row_w + 28;
+      p.hit_octal[3] = 28;
+      if (oct_hover || p.octal_edit) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
+                              p.octal_edit ? 0.45 : 0.25);
+        cairo_set_line_width(cr, 1.2);
+        draw_rounded_rect(cr, col1_x - 14, ly + 2, row_w + 28, 28, 14);
+        cairo_stroke(cr);
+      }
+
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                            app.text_secondary_b, 1.0);
+      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                             CAIRO_FONT_WEIGHT_NORMAL);
+      cairo_set_font_size(cr, 12);
+      cairo_move_to(cr, col1_x + 2, ly + 18);
+      cairo_show_text(cr, "Octal");
+
+      if (!p.octal_edit) {
+        std::string val = rwx_string(p.current_mode & 07777);
+        char ob[16];
+        snprintf(ob, sizeof(ob), "%lo", static_cast<unsigned long>(p.current_mode & 07777));
+        val += "   (" + std::string(ob) + ")";
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+        cairo_text_extents(cr, val.c_str(), &te);
+        cairo_move_to(cr, col2_x - te.x_advance + 2, ly + 18);
+        cairo_show_text(cr, val.c_str());
+      } else {
+        // Edit mode: typed digits with caret + hint
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+        cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                               CAIRO_FONT_WEIGHT_BOLD);
+        cairo_set_font_size(cr, 13);
+        cairo_move_to(cr, col1_x + 70, ly + 19);
+        cairo_show_text(cr, p.octal_buf.c_str());
+        cairo_text_extents(cr, p.octal_buf.c_str(), &te);
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.8);
+        cairo_set_line_width(cr, 1.2);
+        cairo_move_to(cr, col1_x + 72 + te.x_advance, ly + 7);
+        cairo_line_to(cr, col1_x + 72 + te.x_advance, ly + 21);
+        cairo_stroke(cr);
+        cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                               CAIRO_FONT_WEIGHT_NORMAL);
+        cairo_set_font_size(cr, 11);
+        cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                              app.text_secondary_b, 0.7);
+        const char* hint = "Enter applies \u00b7 Esc cancels";
+        cairo_text_extents(cr, hint, &te);
+        cairo_move_to(cr, col2_x - te.x_advance + 2, ly + 18);
+        cairo_show_text(cr, hint);
       }
       ly += combo_h + 8;
     }
@@ -6736,7 +7143,7 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
         int tw = cairo_image_surface_get_width(thumb);
         int th = cairo_image_surface_get_height(thumb);
         if (tw > 0 && th > 0) {
-          int avail_h = content_h - 50;
+          int avail_h = content_h - 96;
           double s = std::min(1.0, std::min(static_cast<double>(thumb_px) / tw,
                                             static_cast<double>(avail_h) / th));
           int dw = static_cast<int>(tw * s);
@@ -6771,6 +7178,50 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
       cairo_move_to(cr, px + (pw - te.x_advance) / 2.0,
                     py + ph - 14);
       cairo_show_text(cr, name.c_str());
+
+      // ── Metadata rows beneath the preview ──
+      auto meta_font = [&](double px_size) {
+        cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                               CAIRO_FONT_WEIGHT_NORMAL);
+        cairo_set_font_size(cr, px_size * zf);
+      };
+      // Line 1: type
+      std::string meta_type = app.info_panel_mime_type;
+      if (meta_type.size() > 30) meta_type = meta_type.substr(0, 29) + "\u2026";
+      if (!meta_type.empty()) {
+        meta_font(10);
+        cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                              app.text_secondary_b, 0.75);
+        cairo_text_extents(cr, meta_type.c_str(), &te);
+        cairo_move_to(cr, px + (pw - te.x_advance) / 2.0, py + ph - 50);
+        cairo_show_text(cr, meta_type.c_str());
+      }
+      // Line 2: size · modified
+      auto fmt_meta_size = [](uint64_t bytes) {
+        char buf[32];
+        double v = static_cast<double>(bytes);
+        const char* units[] = {"B", "KB", "MB", "GB", "TB"};
+        int ui = 0;
+        while (v >= 1024.0 && ui < 4) { v /= 1024.0; ++ui; }
+        if (ui == 0) snprintf(buf, sizeof(buf), "%llu B",
+                              static_cast<unsigned long long>(bytes));
+        else snprintf(buf, sizeof(buf), "%.1f %s", v, units[ui]);
+        return std::string(buf);
+      };
+      char meta_time[32];
+      {
+        time_t mt = static_cast<time_t>(app.info_panel_modified_sec);
+        struct tm* tm_local = localtime(&mt);
+        strftime(meta_time, sizeof(meta_time), "%Y-%m-%d %H:%M", tm_local);
+      }
+      std::string meta_line =
+          fmt_meta_size(app.info_panel_size) + " \u00b7 " + meta_time;
+      meta_font(10);
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                            app.text_secondary_b, 0.75);
+      cairo_text_extents(cr, meta_line.c_str(), &te);
+      cairo_move_to(cr, px + (pw - te.x_advance) / 2.0, py + ph - 33);
+      cairo_show_text(cr, meta_line.c_str());
     }
   }
 

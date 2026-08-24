@@ -28,13 +28,23 @@ int zoom_level_for_pct(double pct) {
 void apply_zoom_pct(AppState& app, double pct) {
   app.settings_zoom_pct = std::clamp(pct, 50.0, 200.0);
   app.zoom_pct = app.settings_zoom_pct;
+  // Rounded (not truncated) so adjacent levels map to distinct sizes
   app.entry_height =
-      std::max(20, static_cast<int>(36.0 * app.zoom_pct / 100.0));
-  int icon_sz = static_cast<int>(48.0 * app.zoom_pct / 100.0);
+      std::max(20, static_cast<int>(std::lround(36.0 * app.zoom_pct / 100.0)));
+  int icon_sz =
+      static_cast<int>(std::lround(48.0 * app.zoom_pct / 100.0));
   app.grid_cell_size =
-      std::max(40, icon_sz + static_cast<int>(8.0 * app.zoom_pct / 100.0));
+      std::max(40, icon_sz + static_cast<int>(std::lround(8.0 * app.zoom_pct / 100.0)));
   app.sidebar_width = std::max(
       120, static_cast<int>(app.sidebar_width_base * app.zoom_pct / 100.0));
+  // Chrome must scale with its (zoom-scaled) contents so nothing overflows
+  // and every hit zone stays aligned with what was drawn.
+  app.top_bar_height =
+      std::max(40, static_cast<int>(std::lround(56.0 * app.zoom_pct / 100.0)));
+  app.status_bar_height =
+      std::max(30, static_cast<int>(std::lround(44.0 * app.zoom_pct / 100.0)));
+  app.select_bar_h =
+      std::max(36, static_cast<int>(std::lround(48.0 * app.zoom_pct / 100.0)));
 }
 
 void step_zoom(AppState& app, int delta) {

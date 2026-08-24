@@ -1,8 +1,11 @@
 #include "app/file_browser/embed/embed.hpp"
 #include "../trace.hpp"
 #include "../app.hpp"
+#include "app/file_browser/features/view_zoom.hpp"
 
 #include <algorithm>
+#include <array>
+#include <map>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -80,6 +83,8 @@ static constexpr xdg_wm_base_listener kXdgWmBaseListener{
   .ping = xdg_wm_base_ping,
 };
 
+void resize_session_dump(AppState& app);
+
 static void xdg_surface_configure(void* data, xdg_surface* surface,
                                    uint32_t serial) {
   auto& app = *static_cast<AppState*>(data);
@@ -100,18 +105,41 @@ static void xdg_surface_configure(void* data, xdg_surface* surface,
 
   if (app.width <= 0 || app.height <= 0) return;
 
-  bool needs_resize = (app.last_paint_w != app.width ||
-                       app.last_paint_h != app.height);
-
-  if (needs_resize && app.shm) {
-    app.buf[0].ensure(app.shm, "eh-fb-a", app.width, app.height);
-    app.buf[1].ensure(app.shm, "eh-fb-b", app.width, app.height);
-  }
-
-  if (!needs_resize && app.last_paint_w > 0) {
+  // Resize coalescing: NEVER paint inside dispatch. Record the new size and
+  // let the main loop produce at most one paced frame per vsync.
+  if ((app.last_paint_w != app.width || app.last_paint_h != app.height) &&
+      app.shm) {
+    app.resize_buffers_dirty = true;
+    app.pendingRedraw = true;
+    app.resize_last_size_change = std::chrono::steady_clock::now();
     return;
   }
-  draw(app);
+  return;
+}
+
+void resize_session_dump(AppState& app) {
+  trace::log(
+      "RESIZE SESSION end: %d ticks, %d dropped frames | tick avg %.1f max "
+      "%.1f ms | buffer realloc max %.2f ms | draw max %.2f ms",
+      app.resize_ticks, app.resize_drops,
+      app.resize_ticks ? app.resize_tick_ms_sum / app.resize_ticks : 0.0,
+      app.resize_tick_ms_max, app.resize_buf_ms_max, app.resize_draw_ms_max);
+  // Aggregate paint phases by name: count / sum / max
+  std::map<std::string, std::array<double, 3>> agg; // n, sum, max
+  for (auto& [name, ms] : app.resize_phase_samples) {
+    auto& a = agg[name];
+    a[0] += 1;
+    a[1] += ms;
+    a[2] = std::max(a[2], ms);
+  }
+  std::vector<std::pair<std::string, std::array<double, 3>>> rows(agg.begin(),
+                                                                  agg.end());
+  std::sort(rows.begin(), rows.end(),
+            [](auto& l, auto& r) { return l.second[2] > r.second[2]; });
+  for (auto& [name, a] : rows)
+    trace::log("RESIZE PHASE %-14s n=%-4.0f sum=%8.1f max=%7.2f ms", name.c_str(),
+               a[0], a[1], a[2]);
+  app.resize_session_active = false;
 }
 
 static void toplevel_configure(void* data, xdg_toplevel*, int32_t w, int32_t h,
@@ -412,9 +440,41 @@ void handle_props_click(AppState& app, int x, int y, int button) {
     return;
   }
 
-  // Clicked elsewhere inside dialog — close any open combo
-  if (app.properties.combo_open >= 0) {
+  // Numeric octal mode editor — begin editing
+  if (hit == 16) {
     app.properties.combo_open = -1;
+    app.properties.tags_edit = false;
+    app.properties.octal_edit = true;
+    if (app.properties.octal_buf.empty()) {
+      char ob[16];
+      snprintf(ob, sizeof(ob), "%lo",
+               static_cast<unsigned long>(app.properties.current_mode & 07777));
+      app.properties.octal_buf = ob;
+    }
+    app.props_pendingRedraw = true;
+    return;
+  }
+
+  // Tags row — begin editing
+  if (hit == 17 && !app.properties.tags_edit) {
+    app.properties.combo_open = -1;
+    app.properties.octal_edit = false;
+    app.properties.tags_edit = true;
+    app.properties.tags_buf = app.properties.tags_value;
+    app.props_pendingRedraw = true;
+    return;
+  }
+  if (hit == 17) {
+    app.props_pendingRedraw = true;
+    return;
+  }
+
+  // Clicked elsewhere inside dialog — close any open combo / cancel edits
+  if (app.properties.combo_open >= 0 || app.properties.octal_edit ||
+      app.properties.tags_edit) {
+    app.properties.combo_open = -1;
+    app.properties.octal_edit = false;
+    app.properties.tags_edit = false;
     app.props_pendingRedraw = true;
     return;
   }
@@ -643,22 +703,14 @@ void handle_settings_click(AppState& app, int x, int y, int button) {
     return;
   }
   if (hit == -8) {
-    app.settings_zoom_pct = std::clamp(app.settings_zoom_pct - 10.0, 50.0, 200.0);
-    app.zoom_pct = app.settings_zoom_pct;
-    app.entry_height = std::max(20, static_cast<int>(36.0 * app.zoom_pct / 100.0));
-    int icon_sz = static_cast<int>(48.0 * app.zoom_pct / 100.0);
-    app.grid_cell_size = std::max(40, icon_sz + static_cast<int>(8.0 * app.zoom_pct / 100.0));
-    app.sidebar_width = std::max(120, static_cast<int>(app.sidebar_width_base * app.zoom_pct / 100.0));
+    apply_zoom_pct(app, std::clamp(app.settings_zoom_pct - 10.0, 50.0, 200.0));
+    app.pendingRedraw = true;
     app.settings_pendingRedraw = true;
     return;
   }
   if (hit == -9) {
-    app.settings_zoom_pct = std::clamp(app.settings_zoom_pct + 10.0, 50.0, 200.0);
-    app.zoom_pct = app.settings_zoom_pct;
-    app.entry_height = std::max(20, static_cast<int>(36.0 * app.zoom_pct / 100.0));
-    int icon_sz = static_cast<int>(48.0 * app.zoom_pct / 100.0);
-    app.grid_cell_size = std::max(40, icon_sz + static_cast<int>(8.0 * app.zoom_pct / 100.0));
-    app.sidebar_width = std::max(120, static_cast<int>(app.sidebar_width_base * app.zoom_pct / 100.0));
+    apply_zoom_pct(app, std::clamp(app.settings_zoom_pct + 10.0, 50.0, 200.0));
+    app.pendingRedraw = true;
     app.settings_pendingRedraw = true;
     return;
   }
@@ -807,6 +859,9 @@ static bool create_window(AppState& app) {
   xdg_toplevel_add_listener(app.toplevel, &kToplevelListener, &app);
   xdg_toplevel_set_title(app.toplevel, "Files");
   xdg_toplevel_set_app_id(app.toplevel, "horizon-files");
+  // Below ~700px the top bar's right cluster would start crowding the nav
+  // field; keep the window large enough for the chrome to stay unoverlapped.
+  xdg_toplevel_set_min_size(app.toplevel, 680, 320);
 
   // Initialize SHM buffers
   app.buf[0].ensure(wg.shm, "eh-fb-a", app.width, app.height);
@@ -1418,7 +1473,59 @@ static bool create_window(AppState& app) {
 
     if (app.pendingRedraw) {
       app.pendingRedraw = false;
-      if (app.surface) draw(app);
+      if (app.surface) {
+        if (app.resize_buffers_dirty && app.shm) {
+          // Paced resize paint: at most one per loop iteration, timed.
+          const bool tr =
+              eh::trace::enabled().load(std::memory_order_relaxed);
+          auto tick_t0 = std::chrono::steady_clock::now();
+          auto buf_t0 = tick_t0;
+          app.buf[0].ensure(app.shm, "eh-fb-a", app.width, app.height);
+          app.buf[1].ensure(app.shm, "eh-fb-b", app.width, app.height);
+          double buf_ms = std::chrono::duration<double, std::milli>(
+                              std::chrono::steady_clock::now() - buf_t0)
+                              .count();
+          // Buffers now match the configured size — clear BEFORE drawing so
+          // draw()'s stale-buffer guard lets this paint through.
+          app.resize_buffers_dirty = false;
+          app.last_paint_w = app.width;
+          app.last_paint_h = app.height;
+          auto draw_t0 = std::chrono::steady_clock::now();
+          draw(app);
+          double draw_ms = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - draw_t0)
+                               .count();
+          double tick_ms = std::chrono::duration<double, std::milli>(
+                               std::chrono::steady_clock::now() - tick_t0)
+                               .count();
+          if (tr) {
+            trace::log("RESIZE TICK %dx%d buf %.2f ms | draw %.2f ms | "
+                       "tick %.2f ms",
+                       app.width, app.height, buf_ms, draw_ms, tick_ms);
+            if (!app.resize_session_active) {
+              app.resize_session_active = true;
+              app.resize_ticks = 0;
+              app.resize_drops = 0;
+              app.resize_tick_ms_sum = 0.0;
+              app.resize_tick_ms_max = 0.0;
+              app.resize_buf_ms_max = 0.0;
+              app.resize_draw_ms_max = 0.0;
+              app.resize_phase_samples.clear();
+              trace::log("RESIZE SESSION begin");
+            }
+            ++app.resize_ticks;
+            app.resize_tick_ms_sum += tick_ms;
+            app.resize_tick_ms_max =
+                std::max(app.resize_tick_ms_max, tick_ms);
+            app.resize_buf_ms_max =
+                std::max(app.resize_buf_ms_max, buf_ms);
+            app.resize_draw_ms_max =
+                std::max(app.resize_draw_ms_max, draw_ms);
+          }
+        } else {
+          draw(app);
+        }
+      }
     }
 
     if (app.props_pendingRedraw) {
@@ -1429,6 +1536,13 @@ static bool create_window(AppState& app) {
     if (app.settings_pendingRedraw) {
       app.settings_pendingRedraw = false;
       if (app.settings_surface) draw_settings_window(app);
+    }
+
+    // Resize session wound down: dump the perf map once things settle.
+    if (app.resize_session_active &&
+        std::chrono::steady_clock::now() - app.resize_last_size_change >
+            std::chrono::milliseconds(250)) {
+      resize_session_dump(app);
     }
   }
 

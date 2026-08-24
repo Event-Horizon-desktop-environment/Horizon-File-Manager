@@ -80,31 +80,10 @@ static std::vector<std::string> icon_base_dirs() {
   return dirs;
 }
 
-static cairo_surface_t* ensure_min_size(cairo_surface_t* surf, int min_px) {
-  if (!surf) return nullptr;
-  int w = cairo_image_surface_get_width(surf);
-  int h = cairo_image_surface_get_height(surf);
-  if (w >= min_px && h >= min_px) return surf;
-  double sc = static_cast<double>(min_px) / std::max(w, h);
-  int dw = std::max(1, static_cast<int>(std::round(w * sc)));
-  int dh = std::max(1, static_cast<int>(std::round(h * sc)));
-  cairo_surface_t* dst = cairo_surface_create_similar_image(surf, CAIRO_FORMAT_ARGB32, dw, dh);
-  if (!dst || cairo_surface_status(dst) != CAIRO_STATUS_SUCCESS) {
-    cairo_surface_destroy(dst);
-    return surf;
-  }
-  cairo_t* cr = cairo_create(dst);
-  cairo_scale(cr, sc, sc);
-  cairo_set_source_surface(cr, surf, 0, 0);
-  cairo_pattern_set_filter(cairo_get_source(cr), CAIRO_FILTER_BEST);
-  cairo_paint(cr);
-  cairo_destroy(cr);
-  cairo_surface_flush(dst);
-  cairo_surface_destroy(surf);
-  return dst;
-}
-
 static cairo_surface_t* load_png(const std::string& path, int min_px) {
+  (void)min_px; // never upscale rasters — the size-aware index picks a
+                // source at (or above) the requested size, and cairo
+                // downscales smoothly from native resolution.
   int w, h, n;
   unsigned char* data = stbi_load(path.c_str(), &w, &h, &n, 4);
   if (!data) return nullptr;
@@ -122,7 +101,7 @@ static cairo_surface_t* load_png(const std::string& path, int min_px) {
       data, CAIRO_FORMAT_ARGB32, w, h, w * 4);
   cairo_surface_set_user_data(surf, &kPngKey, data,
       [](void* d) { stbi_image_free(d); });
-  return ensure_min_size(surf, min_px);
+  return surf;
 }
 
 static cairo_surface_t* load_svg(const std::string& path, int size) {
@@ -557,44 +536,54 @@ void IconCache::clear() {
 
 // ── theme directory index ────────────────────────────────────────────
 //
-// One readdir pass per icon category directory builds an in-memory
-// name -> path map. After that every icon lookup is pure hash probing —
-// zero filesystem syscalls on the draw path.
+// One readdir pass per theme builds an in-memory name -> candidates map.
+// After that every icon lookup is pure hash probing — zero filesystem
+// syscalls on the draw path. The scan walks the whole theme tree to depth
+// 2 so every known layout works: scalable/<category>, <category>/scalable,
+// <size>x<size>/<category>, mimes/16, ...
 
-static const char* const kIndexSubdirs[] = {
-    // mime icons first (the hot path for file managers)
-    "mimes/scalable",
-    "scalable/mimetypes",
-    "mimetypes/scalable",
-    "mimes/symbolic",
-    "mimetypes/symbolic",
-    "mimes/16", "mimes/22", "mimes/24", "mimes/32", "mimes/48",
-    "mimes/64", "mimes/96", "mimes/128", "mimes/256",
-    "mimetypes/16x16", "mimetypes/22x22", "mimetypes/24x24",
-    "mimetypes/32x32", "mimetypes/48x48", "mimetypes/64x64",
-    "mimetypes/96x96", "mimetypes/128x128", "mimetypes/256x256",
-    // then app/places/device/action icons
-    "apps/scalable", "places/scalable", "devices/scalable",
-    "actions/scalable", "status/scalable", "emblems/scalable",
-    "categories/scalable",
-    "apps/symbolic", "places/symbolic", "devices/symbolic",
-    "actions/symbolic", "status/symbolic",
-    "16x16/apps", "16x16/places", "16x16/devices", "16x16/categories",
-    "16x16/status", "16x16/emblems", "16x16/actions", "16x16/mimetypes",
-    "22x22/apps", "22x22/places", "22x22/devices", "22x22/actions",
-    "32x32/apps", "32x32/places", "32x32/devices", "32x32/actions",
-    "48x48/apps", "48x48/places", "48x48/devices", "48x48/actions",
-    "64x64/apps", "64x64/places", "64x64/devices",
-    "128x128/apps", "128x128/places", "128x128/devices",
-    "256x256/apps", "256x256/places", "256x256/devices",
-};
-
-static bool stem_is_symbolic(const std::string& stem) {
-  return stem.size() > 9 && stem.compare(stem.size() - 9, 9, "-symbolic") == 0;
+// Nominal size of a themed icon directory. Two layout conventions exist:
+//   GNOME:  <size>x<size>/<category>   e.g. hicolor/48x48/apps
+//   KDE:    <category>/<size>          e.g. MacTahoe/places/16
+// Any component shaped "NNNxNNN" or a bare number "NNN" (nearest to the
+// icon files wins) sets the size; anything else (scalable/, symbolic/,
+// plain categories) means resolution independent.
+static unsigned short icon_dir_size(const fs::path& dir) {
+  auto parse_num = [](const std::string& s) -> int {
+    if (s.empty()) return -1;
+    int v = 0;
+    for (char c : s) {
+      if (c < '0' || c > '9') return -1;
+      v = v * 10 + (c - '0');
+    }
+    return v;
+  };
+  std::vector<std::string> parts;
+  for (const auto& part : dir) {
+    auto s = part.string();
+    if (!s.empty() && s != "/") parts.push_back(std::move(s));
+  }
+  for (auto it = parts.rbegin(); it != parts.rend(); ++it) {
+    const std::string& leaf = *it;
+    auto sep = leaf.find('x');
+    if (sep != std::string::npos) {
+      if (sep == 0 || sep + 1 >= leaf.size()) continue; // "x…", "…x", "@2x"
+      int a = parse_num(leaf.substr(0, sep));
+      if (a < 0) continue; // not "NNNxNNN" (e.g. "apps@2x")
+      int b = parse_num(leaf.substr(sep + 1));
+      if (b >= 0 && a > 0 && a <= 4096) return static_cast<unsigned short>(a);
+      continue;
+    }
+    int v = parse_num(leaf); // bare number: "16", "22", …
+    if (v > 0 && v <= 4096) return static_cast<unsigned short>(v);
+  }
+  return 0;
 }
 
-static void scan_index_subdir(const fs::path& dir,
-                              std::unordered_map<std::string, std::string>& idx) {
+static void scan_index_subdir(
+    const fs::path& dir,
+    std::unordered_map<std::string, std::vector<IconCacheData::IconCandidate>>& idx) {
+  const unsigned short dsize = icon_dir_size(dir);
   DIR* dp = opendir(dir.c_str());
   if (!dp) return;
   while (struct dirent* de = readdir(dp)) {
@@ -605,18 +594,46 @@ static void scan_index_subdir(const fs::path& dir,
     std::string_view ext = fn.substr(dot + 1);
     if (ext != "svg" && ext != "png" && ext != "xpm") continue;
     std::string stem(fn.substr(0, dot));
+    IconCacheData::IconCandidate c;
+    c.path = (dir / de->d_name).string();
+    c.dirSize = dsize;
+    c.svg = (ext == "svg");
     auto it = idx.find(stem);
     if (it == idx.end()) {
-      idx.emplace(std::move(stem), (dir / de->d_name).string());
-    } else if (stem_is_symbolic(it->first) && !stem_is_symbolic(stem)) {
-      // prefer the full-color icon over the symbolic one
-      it->second = (dir / de->d_name).string();
+      idx.emplace(std::move(stem),
+                  std::vector<IconCacheData::IconCandidate>{std::move(c)});
+    } else {
+      // Same stem in the same dir with a second extension (foo.svg + foo.png).
+      auto& vec = it->second;
+      bool dup = false;
+      for (const auto& e : vec)
+        if (e.path == c.path) { dup = true; break; }
+      if (!dup) vec.push_back(std::move(c));
     }
   }
   closedir(dp);
 }
 
 // Locked-domain helpers: callers must hold IconCacheData::mtx.
+// Scan a whole theme directory to depth 2 (root, category dirs, size dirs).
+static void scan_theme_tree(
+    const fs::path& root,
+    std::unordered_map<std::string, std::vector<IconCacheData::IconCandidate>>& idx) {
+  scan_index_subdir(root, idx);
+  std::error_code ec;
+  fs::directory_iterator it1(root, ec), end1;
+  for (; !ec && it1 != end1; it1.increment(ec)) {
+    if (!it1->is_directory(ec)) continue;
+    scan_index_subdir(it1->path(), idx);
+    std::error_code ec2;
+    fs::directory_iterator it2(it1->path(), ec2), end2;
+    for (; !ec2 && it2 != end2; it2.increment(ec2)) {
+      if (!it2->is_directory(ec2)) continue;
+      scan_index_subdir(it2->path(), idx);
+    }
+  }
+}
+
 static void iconcache_rebuild_search_dirs_locked(IconCacheData& d) {
   if (d.searchDirsBuilt) return;
   d.searchDirs.clear();
@@ -666,10 +683,7 @@ static void iconcache_build_indexes_locked(IconCacheData& d) {
   iconcache_rebuild_search_dirs_locked(d);
   d.dirIndexes.assign(d.searchDirs.size(), {});
   for (std::size_t i = 0; i < d.searchDirs.size(); ++i) {
-    auto& idx = d.dirIndexes[i];
-    for (const char* sub : kIndexSubdirs) {
-      scan_index_subdir(fs::path(d.searchDirs[i]) / sub, idx);
-    }
+    scan_theme_tree(fs::path(d.searchDirs[i]), d.dirIndexes[i]);
   }
   d.indexesBuilt = true;
   d.stIndexBuilds.fetch_add(1, std::memory_order_relaxed);
@@ -681,14 +695,48 @@ void IconCache::build_indexes_if_needed() {
   iconcache_build_indexes_locked(*d_);
 }
 
-// Probe one theme index for a candidate name. Returns the stored path or {}.
-static std::string index_lookup(IconCacheData& d, std::size_t dir_idx,
-                                const std::string& name) {
+// Probe one theme index for a candidate name. Returns {path, base-rank}
+// where a lower rank means better quality for the requested px:
+//   0 ..            SVG / scalable
+//   1'000'000+      raster >= px, ranked by smallest overshoot
+//   2'000'000+      raster < px, ranked by largest undershoot
+// Theme priority is applied by the caller so quality wins across the whole
+// inheritance chain (a 16px PNG in the active theme must not beat a 256px
+// one in an inherited/fallback theme).
+static const long kSvgRank = 0;
+static const long kOvershootBase = 1000000L;
+static const long kUndershootBase = 2000000L;
+
+static std::pair<std::string, long> index_lookup(
+    IconCacheData& d, std::size_t dir_idx, const std::string& name, int px) {
   d.stIndexLookups.fetch_add(1, std::memory_order_relaxed);
   auto& idx = d.dirIndexes[dir_idx];
-  if (auto it = idx.find(name); it != idx.end()) return it->second;
-  if (auto it = idx.find(name + "-symbolic"); it != idx.end()) return it->second;
-  return {};
+  const IconCacheData::IconCandidate* best = nullptr;
+  long best_rank = kUndershootBase + 4096;
+  auto rank_of = [&](const IconCacheData::IconCandidate& c) -> long {
+    // Only SVGs in resolution-independent dirs (scalable/, symbolic/, plain
+    // categories) get the vector rank. KDE-style themes (MacTahoe, breeze…)
+    // also ship SVGs inside fixed-size dirs like places/16 — those are
+    // usually monochrome current-color-scheme placeholders that must not
+    // outrank the real artwork in scalable/. Rank them by nominal size so
+    // they are still chosen when they are the closest/largest source.
+    if (c.dirSize == 0)
+      return c.svg ? kSvgRank : kUndershootBase + static_cast<long>(px);
+    if (c.dirSize >= px)
+      return kOvershootBase + static_cast<long>(c.dirSize - px);
+    return kUndershootBase + static_cast<long>(px - c.dirSize);
+  };
+  auto consider = [&](const std::vector<IconCacheData::IconCandidate>& vec) {
+    for (const auto& c : vec) {
+      long r = rank_of(c);
+      if (!best || r < best_rank) { best = &c; best_rank = r; }
+    }
+  };
+  if (auto it = idx.find(name); it != idx.end()) consider(it->second);
+  else if (auto sit = idx.find(name + "-symbolic"); sit != idx.end())
+    consider(sit->second);
+  return best ? std::make_pair(best->path, best_rank)
+              : std::make_pair(std::string{}, best_rank);
 }
 
 void IconCache::rebuild_search_dirs_if_needed() {
@@ -762,16 +810,16 @@ static void resolve_and_insert(IconCacheData& d, const std::string& key,
     if (need) {
       bool expected = false;
       if (d.indexesBeingBuilt.compare_exchange_strong(expected, true)) {
-        std::vector<std::unordered_map<std::string, std::string>> local;
+        std::vector<std::unordered_map<
+            std::string, std::vector<IconCacheData::IconCandidate>>>
+            local;
         {
           std::lock_guard<std::mutex> lk(d.mtx);
           iconcache_rebuild_search_dirs_locked(d);
           local.assign(d.searchDirs.size(), {});
         }
         for (std::size_t i = 0; i < local.size(); ++i) {
-          for (const char* sub : kIndexSubdirs) {
-            scan_index_subdir(fs::path(d.searchDirs[i]) / sub, local[i]);
-          }
+          scan_theme_tree(fs::path(d.searchDirs[i]), local[i]);
         }
         std::lock_guard<std::mutex> lk(d.mtx);
         d.dirIndexes = std::move(local);
@@ -796,12 +844,20 @@ static void resolve_and_insert(IconCacheData& d, const std::string& key,
   {
     std::lock_guard<std::mutex> lk(d.mtx);
     if (!d.indexesBuilt) iconcache_build_indexes_locked(d);
+    // Quality-first selection across the whole search path: SVG beats any
+    // raster, an oversized raster beats an undersized one; earlier theme
+    // dirs (higher priority) win only within the same quality class.
+    static constexpr long kPrioSpan = 20000000L;
+    long best_total = kUndershootBase + 4096 +
+                      static_cast<long>(d.searchDirs.size()) * 4L * kPrioSpan;
     for (const auto& cand : icon_name_candidates(icon_name)) {
       for (std::size_t i = 0; i < d.searchDirs.size(); ++i) {
-        path = index_lookup(d, i, cand);
-        if (!path.empty()) break;
+        auto [p, base] = index_lookup(d, i, cand, load_size);
+        if (p.empty()) continue;
+        long total = static_cast<long>(i) * kPrioSpan + base;
+        if (total < best_total) { best_total = total; path = std::move(p); }
       }
-      if (!path.empty()) break;
+      if (!path.empty()) break; // first candidate name that matched anywhere
     }
   }
 

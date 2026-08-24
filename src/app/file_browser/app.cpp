@@ -30,6 +30,7 @@ struct PaintPhase {
   const char* name;
   std::chrono::steady_clock::time_point t0;
   std::vector<std::pair<const char*, double>>* log;
+  std::vector<std::pair<const char*, double>>* sink; // resize-trace sink
   ~PaintPhase() {
     double ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
@@ -38,14 +39,19 @@ struct PaintPhase {
     static std::atomic<int> first_paint{0};
     bool first = first_paint.fetch_add(1, std::memory_order_relaxed) < 40;
     if (ms >= 50.0 || (first && ms >= 0.5)) log->emplace_back(name, ms);
+    if (sink && ms >= 1.0) sink->emplace_back(name, ms);
   }
 };
 }  // namespace
 
 void paint(AppState& app, cairo_t* cr) {
   std::vector<std::pair<const char*, double>> slow_phases;
-  auto phase = [&slow_phases](const char* n) {
-    return PaintPhase{n, std::chrono::steady_clock::now(), &slow_phases};
+  auto phase = [&app, &slow_phases](const char* n) {
+    return PaintPhase{n, std::chrono::steady_clock::now(), &slow_phases,
+                      (app.resize_session_active &&
+                       eh::trace::enabled().load(std::memory_order_relaxed))
+                          ? &app.resize_phase_samples
+                          : nullptr};
   };
   // Check if settings TOMLs changed and re-apply settings if so
   {
@@ -167,7 +173,9 @@ void paint(AppState& app, cairo_t* cr) {
   int w = app.width;
   int h = app.height;
   int top_h = app.top_bar_height;
-  app.tab_bar_height = (app.tabs.size() > 1) ? 44 : 0;
+  app.tab_bar_height = (app.tabs.size() > 1)
+      ? std::max(30, static_cast<int>(std::lround(44.0 * app.zoom_pct / 100.0)))
+      : 0;
   int tab_h = app.tab_bar_height;
   int status_h = app.status_bar_height;
 
@@ -202,7 +210,16 @@ void paint(AppState& app, cairo_t* cr) {
     app.ops_panel_width = std::max(240, static_cast<int>(320 * app.zoom_pct / 100.0));
     ops_panel_w = static_cast<int>(app.ops_panel_width * app.ops_panel_slide);
   }
+  size_sidebar_to_content(app, cr);
   int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
+  // Info panel must never squeeze the content column to nothing.
+  if (info_panel_w > 0) {
+    int max_info = std::max(160, w - sidebar_w - ops_panel_w - 240);
+    if (info_panel_w > max_info) {
+      app.info_panel_width = max_info;
+      info_panel_w = max_info;
+    }
+  }
   int content_x = sidebar_w;
   int content_w = w - sidebar_w - info_panel_w - ops_panel_w;
   int selector_h = (app.select_dir_mode || app.select_file_mode) ? app.select_bar_h : 0;
@@ -511,6 +528,23 @@ void draw(AppState& app) {
     }
   } draw_timer{draw_t0};
 
+  // Resize pacing: while a resize session is active and a frame callback is
+  // still outstanding, don't start another repaint — the callback will.
+  // Safety valve: proceed anyway if the compositor stalls >120 ms.
+  if (app.resize_session_active && app.frame_cb &&
+      std::chrono::steady_clock::now() - app.frame_cb_armed_at <
+          std::chrono::milliseconds(120)) {
+    app.pendingRedraw = true;
+    return;
+  }
+
+  // Buffers don't match the configured size yet: only the main-loop path may
+  // realloc + paint (frame callbacks can fire between configure and realloc).
+  if (app.resize_buffers_dirty && app.shm) {
+    app.pendingRedraw = true;
+    return;
+  }
+
   // Pick buffer
   int paint_bi = -1;
   for (int i = 0; i < 2; ++i) {
@@ -518,6 +552,7 @@ void draw(AppState& app) {
   }
   if (paint_bi < 0) {
     app.pendingRedraw = true;
+    if (app.resize_session_active) ++app.resize_drops;
     return;
   }
 
@@ -564,7 +599,10 @@ void schedule_frame(AppState& app) {
     need_anim = std::abs(app.ops_panel_slide - ops_target) > 0.01;
   }
 
-  if (!need_anim && !app.scroll_needs_redraw) return;
+  // Resize sessions are paced to the compositor: one frame per callback.
+  bool need_resize_pace = app.resize_session_active || app.resize_buffers_dirty;
+
+  if (!need_anim && !app.scroll_needs_redraw && !need_resize_pace) return;
 
   if (app.frame_cb) return;
 
@@ -579,6 +617,7 @@ void schedule_frame(AppState& app) {
 
   app.frame_cb = wl_surface_frame(app.surface);
   wl_callback_add_listener(app.frame_cb, &kListener, &app);
+  app.frame_cb_armed_at = std::chrono::steady_clock::now();
 }
 
 } // namespace eh::file_browser

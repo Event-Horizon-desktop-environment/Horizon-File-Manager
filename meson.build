@@ -83,6 +83,7 @@ sources = files(
   'src/app/file_browser/features/selection.cpp',
   'src/app/file_browser/features/svg_preview.cpp',
   'src/app/file_browser/features/tab_history.cpp',
+  'src/app/file_browser/features/tags.cpp',
   'src/app/file_browser/features/view_zoom.cpp',
   'src/app/file_browser/features/thumbnail_cache.cpp',
   'src/app/file_browser/features/video_preview.cpp',

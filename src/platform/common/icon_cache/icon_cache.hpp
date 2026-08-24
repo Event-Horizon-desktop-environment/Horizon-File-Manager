@@ -134,9 +134,15 @@ struct IconCacheData {
   std::uint64_t generation = 0;
 
   // ── performance additions ────────────────────────────────────────
-  // Per-theme-directory index: icon name -> file path. Built once per
-  // directory so lookups never touch the filesystem.
-  std::vector<std::unordered_map<std::string, std::string>> dirIndexes;
+  // Per-theme-directory index: icon name -> candidates across size dirs.
+  // Built once per directory so lookups never touch the filesystem.
+  struct IconCandidate {
+    std::string path;
+    unsigned short dirSize = 0; // nominal dir size, 0 = scalable/symbolic
+    bool svg = false;
+  };
+  std::vector<std::unordered_map<std::string, std::vector<IconCandidate>>>
+      dirIndexes;
   bool indexesBuilt = false;
   // Set while a worker scans theme dirs; paint threads must never block on
   // the index build, so the scan itself runs outside mtx.

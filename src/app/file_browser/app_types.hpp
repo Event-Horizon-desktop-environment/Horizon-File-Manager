@@ -5,6 +5,7 @@
 
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -412,9 +413,14 @@ struct AppState {
   bool search_banner_clear_hover = false;
   bool filter_bar_open_by_default = false; // persisted preference
   bool filter_bar_default_applied = false; // one-shot startup activation
-  // Status-bar zoom slider (levels 0..16)
+  // Status-bar zoom slider (discrete levels)
   int status_zoom_slider_x = 0, status_zoom_slider_w = 0;
   bool status_zoom_dragging = false;
+  int status_zoom_minus[4] = {0, 0, 0, 0};
+  int status_zoom_plus[4] = {0, 0, 0, 0};
+  int status_zoom_last_level = -1; // suppresses redundant relayouts while dragging
+  int status_zoom_press_x = 0;     // relative-drag anchor
+  int status_zoom_press_level = 0; // level at drag start
   // Rich tooltip (metadata card, anti-churn timer)
   std::string tooltip_path;
   long long tooltip_show_ms = 0;   // steady-clock deadline
@@ -485,6 +491,16 @@ struct AppState {
   std::uint64_t operation_status_expires_ms = 0;
   std::shared_ptr<OperationProgress> op_progress;
 
+  // ── Resize performance tracing (EH_TRACE=1) ──
+  bool resize_session_active = false;
+  bool resize_buffers_dirty = false; // configure saw a new size, not yet painted
+  std::chrono::steady_clock::time_point resize_last_size_change{};
+  int resize_ticks = 0;
+  int resize_drops = 0;            // frames skipped: both buffers busy
+  double resize_tick_ms_sum = 0.0, resize_tick_ms_max = 0.0;
+  double resize_buf_ms_max = 0.0, resize_draw_ms_max = 0.0;
+  std::vector<std::pair<const char*, double>> resize_phase_samples;
+
   // ── Operations panel (right sidebar) ──
   bool ops_panel_open = false;
   double ops_panel_slide = 0.0;
@@ -498,6 +514,7 @@ struct AppState {
   enum class ContextMenuAction {
     Open,
     OpenWith,
+    OpenAsAdmin,
     OpenInTerminal,
     Cut,
     Copy,
@@ -510,6 +527,8 @@ struct AppState {
     PermanentDelete,
     NewFolder,
     NewDocument,
+    NewFromTemplate,
+    RunScript,
     Reload,
     CopyLocation,
     SelectAll,
@@ -556,12 +575,18 @@ struct AppState {
     std::string label;
     std::vector<ContextMenuItem> sub_items; // non-empty = submenu header
     bool submenu_open = false;             // whether submenu is currently shown
+    std::string data;                      // payload (e.g. template source path)
   };
-  static ContextMenuItem menu_item(ContextMenuAction a, const std::string& l) {
-    return {a, l, {}, false};
+  static ContextMenuItem menu_item(ContextMenuAction a, const std::string& l,
+                                   const std::string& d = {}) {
+    ContextMenuItem it;
+    it.action = a;
+    it.label = l;
+    it.data = d;
+    return it;
   }
   static ContextMenuItem menu_separator() {
-    return {ContextMenuAction::Separator, "", {}, false};
+    return {ContextMenuAction::Separator, "", {}, false, {}};
   }
   bool context_menu_open = false;
   int context_menu_x = 0;
@@ -588,6 +613,7 @@ struct AppState {
   // ── New folder/file dialog ──
   bool create_dialog_open = false;
   bool create_is_folder = true;
+  std::string create_template_src; // non-empty: copy this template on commit
   std::string create_buf;
   int create_cursor_pos = 0;
   int create_sel_start = -1;
@@ -927,6 +953,20 @@ struct AppState {
     double hit_combo[3][4]{};      // 3 combo boxes: owner, group, other
     double hit_combo_items[3][4][4]{}; // up to 4 items per combo
     double hit_exec_toggle[4]{};   // executable toggle switch
+    // Numeric octal mode editor (Permissions tab, single selection only)
+    bool octal_edit = false;
+    std::string octal_buf;
+    double hit_octal[4]{};
+    // Tags editor backed by the freedesktop `user.xdg.tags` xattr
+    std::string tags_value;        // stored value ("" = none)
+    bool tags_edit = false;
+    std::string tags_buf;          // in-progress edit text
+    double hit_tags_row[4]{};
+    // Volume usage for the mount holding `path` + recursive contained counts
+    uint64_t vol_total_bytes = 0;
+    uint64_t vol_free_bytes = 0;
+    uint64_t contained_files = 0;
+    uint64_t contained_dirs = 0;
   };
   PropertiesState properties;
 
@@ -1096,6 +1136,7 @@ struct AppState {
 
   // ── Frame callback ──
   wl_callback* frame_cb = nullptr;
+  std::chrono::steady_clock::time_point frame_cb_armed_at{};
   int last_paint_w = -1;
   int last_paint_h = -1;
 

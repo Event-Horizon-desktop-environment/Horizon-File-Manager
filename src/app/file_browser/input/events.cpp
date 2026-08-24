@@ -6,6 +6,7 @@
 #include "../features/recursive_search_worker.hpp"
 #include "../features/selection.hpp"
 #include "../features/tab_history.hpp"
+#include "../features/tags.hpp"
 #include "../features/view_zoom.hpp"
 
 #include <algorithm>
@@ -94,6 +95,20 @@ int properties_hit_test(AppState& app, int x, int y) {
     if (x >= p.hit_exec_toggle[0] && x < p.hit_exec_toggle[0] + p.hit_exec_toggle[2] &&
         y >= p.hit_exec_toggle[1] && y < p.hit_exec_toggle[1] + p.hit_exec_toggle[3])
       return 15;
+  }
+
+  // Numeric octal mode editor row (Permissions tab, single selection)
+  if (!p.multi && p.hit_octal[2] > 0) {
+    if (x >= p.hit_octal[0] && x < p.hit_octal[0] + p.hit_octal[2] &&
+        y >= p.hit_octal[1] && y < p.hit_octal[1] + p.hit_octal[3])
+      return 16;
+  }
+
+  // Tags row (Basic tab, single selection)
+  if (!p.multi && p.hit_tags_row[2] > 0) {
+    if (x >= p.hit_tags_row[0] && x < p.hit_tags_row[0] + p.hit_tags_row[2] &&
+        y >= p.hit_tags_row[1] && y < p.hit_tags_row[1] + p.hit_tags_row[3])
+      return 17;
   }
 
   return 0; // inside dialog but no specific widget
@@ -434,17 +449,36 @@ void handle_click(AppState& app, int x, int y, int button) {
     }
   }
 
-  // ── Status-bar zoom slider ──
-  if (app.status_zoom_slider_w > 0 &&
+  // ── Status-bar zoom controls (− / track / +) ──
+  if ((app.status_zoom_slider_w > 0 || app.status_zoom_minus[2] > 0 ||
+       app.status_zoom_plus[2] > 0) &&
       y >= app.height - app.status_bar_height) {
-    if (button == 0x110 && x >= app.status_zoom_slider_x &&
-        x < app.status_zoom_slider_x + app.status_zoom_slider_w) {
-      double t = static_cast<double>(x - app.status_zoom_slider_x) /
-                 std::max(1, app.status_zoom_slider_w);
-      apply_zoom_pct(app, zoom_pct_for_level(
-                              static_cast<int>(std::lround(t * (kZoomLevelCount - 1)))));
-      app.status_zoom_dragging = true;
-      draw(app);
+    if (button == 0x110) {
+      auto in_rect = [&](const int* r) {
+        return x >= r[0] && x < r[0] + r[2] && y >= r[1] && y < r[1] + r[3];
+      };
+      if (app.status_zoom_minus[2] > 0 && in_rect(app.status_zoom_minus)) {
+        step_zoom(app, -1);
+        save_file_browser_settings(app);
+        draw(app);
+        return;
+      }
+      if (app.status_zoom_plus[2] > 0 && in_rect(app.status_zoom_plus)) {
+        step_zoom(app, +1);
+        save_file_browser_settings(app);
+        draw(app);
+        return;
+      }
+      if (x >= app.status_zoom_slider_x &&
+          x < app.status_zoom_slider_x + app.status_zoom_slider_w) {
+        // Relative drag: anchor at press point, no jump-to-position.
+        app.status_zoom_press_x = x;
+        app.status_zoom_press_level =
+            zoom_level_for_pct(app.settings_zoom_pct);
+        app.status_zoom_last_level = app.status_zoom_press_level;
+        app.status_zoom_dragging = true;
+        draw(app);
+      }
     }
     return;
   }
@@ -907,17 +941,28 @@ void handle_click(AppState& app, int x, int y, int button) {
     if (button == 0x110 && x >= create_x && x < create_x + btn_w &&
         y >= btn_y && y < btn_y + btn_h) {
       if (!app.create_buf.empty()) {
-        fs::path new_path = fs::path(app.cur_tab().current_path) / app.create_buf;
+        fs::path dir(app.cur_tab().current_path);
+        fs::path new_path = dir / app.create_buf;
         std::error_code ec;
-        if (app.create_is_folder)
+        if (!app.create_template_src.empty()) {
+          std::error_code eq;
+          int n = 2;
+          while (fs::exists(new_path, eq))
+            new_path = dir / (new_path.stem().string() + " (" +
+                              std::to_string(n++) + ")" +
+                              new_path.extension().string());
+          fs::copy_file(app.create_template_src, new_path,
+                        fs::copy_options::none, ec);
+        } else if (app.create_is_folder) {
           fs::create_directory(new_path, ec);
-        else {
+        } else {
           FILE* f = std::fopen(new_path.c_str(), "w");
           if (f) std::fclose(f);
         }
         reload_dir(app);
       }
       app.create_dialog_open = false;
+      app.create_template_src.clear();
       draw(app);
       return;
     }
@@ -925,6 +970,7 @@ void handle_click(AppState& app, int x, int y, int button) {
     if (button == 0x110 && x >= cancel_x && x < cancel_x + btn_w &&
         y >= btn_y && y < btn_y + btn_h) {
       app.create_dialog_open = false;
+      app.create_template_src.clear();
       draw(app);
       return;
     }
@@ -956,6 +1002,7 @@ void handle_click(AppState& app, int x, int y, int button) {
     if (button == 0x110 && (x < dlg_x || x > dlg_x + dlg_w ||
         y < dlg_y || y > dlg_y + dlg_h)) {
       app.create_dialog_open = false;
+      app.create_template_src.clear();
       draw(app);
       return;
     }
@@ -1766,6 +1813,7 @@ void handle_click(AppState& app, int x, int y, int button) {
           AppState::menu_item(AppState::ContextMenuAction::Separator, ""),
           AppState::menu_item(AppState::ContextMenuAction::Properties, "Properties"),
         };
+        insert_template_submenu(app, 2);
         draw(app);
         return;
       }
@@ -2630,15 +2678,20 @@ void handle_pointer_move(AppState& app, int x, int y) {
   app.pointerX = static_cast<double>(x);
   app.pointerY = static_cast<double>(y);
 
-  // ── Status-bar zoom slider drag ──
+  // ── Status-bar zoom slider drag (relative: 1 level per ~7px) ──
   if (app.status_zoom_dragging && app.status_zoom_slider_w > 0) {
-    double t = std::clamp(
-        static_cast<double>(x - app.status_zoom_slider_x) /
-            std::max(1, app.status_zoom_slider_w),
-        0.0, 1.0);
-    apply_zoom_pct(app, zoom_pct_for_level(
-                            static_cast<int>(std::lround(t * (kZoomLevelCount - 1)))));
-    draw(app);
+    double px_per_lvl = std::max(
+        1.0, static_cast<double>(app.status_zoom_slider_w) / (kZoomLevelCount - 1));
+    int lvl = std::clamp(
+        app.status_zoom_press_level +
+            static_cast<int>(std::lround(
+                static_cast<double>(x - app.status_zoom_press_x) / px_per_lvl)),
+        0, kZoomLevelCount - 1);
+    if (lvl != app.status_zoom_last_level) {
+      app.status_zoom_last_level = lvl;
+      apply_zoom_pct(app, zoom_pct_for_level(lvl));
+      draw(app);
+    }
     return;
   }
 
@@ -3704,6 +3757,17 @@ void handle_scroll(AppState& app, int x, int, double, double dy) {
     return;
   }
 
+  // ── Wheel over the zoom control: one discrete level per tick ──
+  if (app.status_zoom_slider_w > 0 &&
+      app.pointerY >= app.height - app.status_bar_height &&
+      x >= app.status_zoom_slider_x - 40 &&
+      x < app.status_zoom_slider_x + app.status_zoom_slider_w + 40) {
+    step_zoom(app, dy > 0 ? +1 : -1);
+    save_file_browser_settings(app);
+    draw(app);
+    return;
+  }
+
   if (x < (app.sidebar_expanded ? app.sidebar_width : 0)) {
     int panel_h = (app.op_progress && app.op_progress->active) ? 100 : 0;
     int available = app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height - panel_h;
@@ -3761,6 +3825,107 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   bool alt = xkb && xkb_state_mod_name_is_active(xkb, XKB_MOD_NAME_ALT,
                                                   XKB_STATE_MODS_EFFECTIVE) != 0;
 
+  // ── Properties window keyboard (octal editor / tags editor / Escape) ──
+  if (app.properties.open && app.focused_surface == app.props_surface) {
+    auto& pr = app.properties;
+    if (pr.octal_edit) {
+      if (sym == XKB_KEY_Escape) {
+        pr.octal_edit = false;
+        app.props_pendingRedraw = true;
+        draw(app);
+        return true;
+      }
+      if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+        char* end = nullptr;
+        const unsigned long parsed =
+            std::strtoul(pr.octal_buf.c_str(), &end, 8);
+        if (end && *end == '\0' && !pr.octal_buf.empty() && parsed <= 07777ul) {
+          const mode_t mode = static_cast<mode_t>(parsed);
+          if (pr.multi) {
+            for (const auto& t : pr.paths) ::chmod(t.c_str(), mode);
+          } else {
+            ::chmod(pr.path.c_str(), mode);
+          }
+          pr.current_mode = mode;
+          // Resync the coarse permission combos with the new mode
+          auto perm_level = [](mode_t bits) {
+            const bool r = bits & 4, w = bits & 2, x = bits & 1;
+            if (!r) return 0;
+            if (!w) return 1;
+            if (!x) return 2;
+            return 3;
+          };
+          pr.perm_owner = perm_level((mode & 0700) >> 6);
+          pr.perm_group = perm_level((mode & 0070) >> 3);
+          pr.perm_other = perm_level(mode & 0007);
+          pr.executable = (mode & 0111) != 0;
+          pr.octal_edit = false;
+        }
+        app.props_pendingRedraw = true;
+        draw(app);
+        return true;
+      }
+      if (sym == XKB_KEY_BackSpace) {
+        if (!pr.octal_buf.empty()) pr.octal_buf.pop_back();
+        app.props_pendingRedraw = true;
+        draw(app);
+        return true;
+      }
+      if (utf8_len > 0) {
+        const char c = utf8[0];
+        if (c >= '0' && c <= '7' && pr.octal_buf.size() < 4) {
+          pr.octal_buf += c;
+          app.props_pendingRedraw = true;
+          draw(app);
+        }
+        return true;
+      }
+      return true; // swallow everything else while editing
+    }
+    if (pr.tags_edit) {
+      if (sym == XKB_KEY_Escape) {
+        pr.tags_edit = false;
+        app.props_pendingRedraw = true;
+        draw(app);
+        return true;
+      }
+      if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+        write_xdg_tags(pr.path, pr.tags_buf);
+        pr.tags_value = read_xdg_tags(pr.path);
+        pr.tags_edit = false;
+        app.props_pendingRedraw = true;
+        draw(app);
+        return true;
+      }
+      if (sym == XKB_KEY_BackSpace) {
+        // UTF-8 aware: pop continuation bytes then the lead byte
+        while (!pr.tags_buf.empty() &&
+               (static_cast<unsigned char>(pr.tags_buf.back()) & 0xC0) == 0x80)
+          pr.tags_buf.pop_back();
+        if (!pr.tags_buf.empty()) pr.tags_buf.pop_back();
+        app.props_pendingRedraw = true;
+        draw(app);
+        return true;
+      }
+      if (utf8_len > 0 && utf8_len <= 4) {
+        const unsigned char c0 = static_cast<unsigned char>(utf8[0]);
+        if (c0 >= 0x20 && c0 != 0x7f && pr.tags_buf.size() + static_cast<size_t>(utf8_len) < 1024) {
+          pr.tags_buf.append(utf8, static_cast<size_t>(utf8_len));
+          app.props_pendingRedraw = true;
+          draw(app);
+        }
+        return true;
+      }
+      return true; // swallow everything else while editing
+    }
+    if (sym == XKB_KEY_Escape) {
+      destroy_props_window(app);
+      draw(app);
+      return true;
+    }
+    return true; // properties window focused: don't leak keys to the view
+  }
+
   // In split view, determine which pane has keyboard focus
   if (app.split_view) {
     if (app.r_path_editing || app.r_search_active || app.r_recursive_search_active)
@@ -3810,12 +3975,8 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
         double val = std::atof(app.settings_zoom_buf.c_str());
         if (val >= 50.0 && val <= 200.0) {
-          app.settings_zoom_pct = val;
-          app.zoom_pct = val;
-          app.entry_height = std::max(20, static_cast<int>(36.0 * app.zoom_pct / 100.0));
-          int icon_sz = static_cast<int>(48.0 * app.zoom_pct / 100.0);
-          app.grid_cell_size = std::max(40, icon_sz + static_cast<int>(8.0 * app.zoom_pct / 100.0));
-          app.sidebar_width = std::max(120, static_cast<int>(app.sidebar_width_base * app.zoom_pct / 100.0));
+          apply_zoom_pct(app, val);
+          app.pendingRedraw = true;
         }
         app.settings_zoom_editing = false;
         app.settings_pendingRedraw = true;
@@ -3887,10 +4048,21 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   if (app.create_dialog_open) {
     if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
       if (!app.create_buf.empty()) {
-        fs::path new_path = fs::path(app.cur_tab().current_path) / app.create_buf;
+        fs::path dir(app.cur_tab().current_path);
+        fs::path new_path = dir / app.create_buf;
         std::error_code ec;
         bool ok = false;
-        if (app.create_is_folder) {
+        if (!app.create_template_src.empty()) {
+          // Templates never overwrite — uniquify like Duplicate does.
+          std::error_code eq;
+          int n = 2;
+          while (fs::exists(new_path, eq))
+            new_path = dir / (new_path.stem().string() + " (" +
+                              std::to_string(n++) + ")" +
+                              new_path.extension().string());
+          ok = fs::copy_file(app.create_template_src, new_path,
+                             fs::copy_options::none, ec);
+        } else if (app.create_is_folder) {
           ok = fs::create_directory(new_path, ec);
         } else {
           FILE* f = std::fopen(new_path.c_str(), "w");
@@ -3909,11 +4081,13 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
         reload_dir(app);
       }
       app.create_dialog_open = false;
+      app.create_template_src.clear();
       draw(app);
       return true;
     }
     if (sym == XKB_KEY_Escape) {
       app.create_dialog_open = false;
+      app.create_template_src.clear();
       draw(app);
       return true;
     }
@@ -5720,6 +5894,7 @@ void handle_pointer_release(AppState& app, int x, int y, int button) {
   }
   if (app.status_zoom_dragging) {
     app.status_zoom_dragging = false;
+    app.status_zoom_last_level = -1;
     save_file_browser_settings(app);
     draw(app);
     return;
