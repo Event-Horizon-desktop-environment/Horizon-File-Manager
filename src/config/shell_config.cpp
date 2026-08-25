@@ -2,6 +2,7 @@
 #include "config/shell_config.hpp"
 #include <toml++/toml.hpp>
 
+#include <cctype>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -58,6 +59,22 @@ const ShellConfig& shell_config_snapshot() {
 }
 
 void shell_config_reload_from_disk_now() {
+  // "primary_fixed_dim" -> "matugenPrimaryFixedDimR" style TOML keys
+  static auto matugen_toml_key = [](std::string_view role, char comp) {
+    std::string k = "matugen";
+    bool cap = true;
+    for (char c : role) {
+      if (c == '_') {
+        cap = true;
+        continue;
+      }
+      k.push_back(cap ? static_cast<char>(std::toupper(static_cast<unsigned char>(c))) : c);
+      cap = false;
+    }
+    k.push_back(comp);
+    return k;
+  };
+
   // Read state-settings.toml into g_snapshot
   std::string path = state_settings_toml_path();
   std::ifstream f(path);
@@ -70,7 +87,11 @@ void shell_config_reload_from_disk_now() {
     if (auto* ap = tbl["appearance"].as_table()) {
       auto& a = g_snapshot.appearance;
       if (auto* v = ap->get("matugenThemingEnabled")) a.matugenThemingEnabled = v->value_or(false);
+      if (auto* v = ap->get("colorEngineEnabled")) a.colorEngineEnabled = v->value_or(true);
+      if (auto* v = ap->get("horizonColorsNative")) a.horizonColorsNative = v->value_or(true);
       if (auto* v = ap->get("matugenPaletteOk")) a.matugenPaletteOk = v->value_or(false);
+      if (auto* v = ap->get("matugenScheme")) a.matugenScheme = v->value_or("scheme-content");
+      if (auto* v = ap->get("matugenMode")) a.matugenMode = v->value_or("dark");
       if (auto* v = ap->get("colorBrightness")) a.colorBrightness = v->value_or(1.0f);
       if (auto* v = ap->get("colorContrast")) a.colorContrast = v->value_or(1.0f);
       if (auto* v = ap->get("colorVibrance")) a.colorVibrance = v->value_or(1.0f);
@@ -99,6 +120,21 @@ void shell_config_reload_from_disk_now() {
       if (auto* v = ap->get("matugenNotifCriticalOutlineR")) a.matugenNotifCriticalOutlineR = v->value_or(0.70f);
       if (auto* v = ap->get("matugenNotifCriticalOutlineG")) a.matugenNotifCriticalOutlineG = v->value_or(0.10f);
       if (auto* v = ap->get("matugenNotifCriticalOutlineB")) a.matugenNotifCriticalOutlineB = v->value_or(0.10f);
+
+      // Full M3 palette written by the shell's native color engine post-hook
+      // (matugen<Role>R/G/B, see sync_horizon_files in horizon_colors_templates.cpp)
+      bool m3_any = false;
+      for (unsigned ri = 0; ri < kM3RoleCount; ++ri) {
+        static constexpr char kComps[3] = {'R', 'G', 'B'};
+        for (int ci = 0; ci < 3; ++ci) {
+          std::string key = matugen_toml_key(kM3RoleNames[ri], kComps[ci]);
+          if (auto* v = ap->get(key)) {
+            a.m3Palette.rgb[ri][ci] = v->value_or(0.0f);
+            m3_any = true;
+          }
+        }
+      }
+      a.m3Palette.loaded = m3_any;
     }
 
     // dock
@@ -139,7 +175,9 @@ void shell_config_apply_from_memory(ShellConfig sc) {
 
 ChromePaintColors derived_chrome_colors(const ShellAppearance& appearance) {
   ChromePaintColors mc;
-  if (appearance.matugenThemingEnabled && appearance.matugenPaletteOk) {
+  const bool palette_active =
+      (appearance.colorEngineEnabled || appearance.matugenThemingEnabled) && appearance.matugenPaletteOk;
+  if (palette_active) {
     mc.accentR = appearance.matugenAccentR;
     mc.accentG = appearance.matugenAccentG;
     mc.accentB = appearance.matugenAccentB;
@@ -209,6 +247,7 @@ FileBrowserSettings read_file_browser_toml() {
     fbs.topbar_opacity_pct = tbl["topbar_opacity_pct"].value_or(100);
     fbs.statusbar_opacity_pct = tbl["statusbar_opacity_pct"].value_or(100);
     fbs.preview_opacity_pct = tbl["preview_opacity_pct"].value_or(100);
+    fbs.preview_scale = tbl["preview_scale"].value_or(1.0);
     fbs.dialog_opacity_pct = tbl["dialog_opacity_pct"].value_or(100);
     fbs.properties_opacity_pct = tbl["properties_opacity_pct"].value_or(100);
     fbs.view_mode = tbl["view_mode"].value_or(0);
@@ -253,6 +292,7 @@ bool write_file_browser_toml(const FileBrowserSettings& fbs) {
     tbl.emplace("topbar_opacity_pct", fbs.topbar_opacity_pct);
     tbl.emplace("statusbar_opacity_pct", fbs.statusbar_opacity_pct);
     tbl.emplace("preview_opacity_pct", fbs.preview_opacity_pct);
+    tbl.emplace("preview_scale", fbs.preview_scale);
     tbl.emplace("dialog_opacity_pct", fbs.dialog_opacity_pct);
     tbl.emplace("properties_opacity_pct", fbs.properties_opacity_pct);
     tbl.emplace("view_mode", fbs.view_mode);
@@ -293,24 +333,42 @@ bool write_state_settings_toml(const ShellConfig& c) {
     std::string path = state_settings_toml_path();
     fs::create_directories(fs::path(path).parent_path());
 
+    // Parse the existing file and overlay only the keys this app owns, so
+    // externally-synced data (color engine matugen*R/G/B floats,
+    // matugenPaletteOk, wallpaperImage, ...) survives a settings save.
     toml::table tbl;
+    {
+      std::ifstream in(path);
+      if (in) {
+        try {
+          tbl = toml::parse(in);
+        } catch (const std::exception& e) {
+          std::cerr << "[horizon-files] TOML parse error (existing settings): " << e.what() << "\n";
+          tbl = toml::table{};
+        }
+      }
+    }
 
     toml::table ap;
-    ap.emplace("matugenThemingEnabled", c.appearance.matugenThemingEnabled);
-    ap.emplace("matugenPaletteOk", c.appearance.matugenPaletteOk);
-    ap.emplace("colorBrightness", c.appearance.colorBrightness);
-    ap.emplace("colorContrast", c.appearance.colorContrast);
-    ap.emplace("colorVibrance", c.appearance.colorVibrance);
-    ap.emplace("colorGamma", c.appearance.colorGamma);
-    tbl.emplace("appearance", std::move(ap));
+    if (auto* old = tbl["appearance"].as_table()) ap = *old;
+    ap.insert_or_assign("matugenThemingEnabled", c.appearance.matugenThemingEnabled);
+    ap.insert_or_assign("colorEngineEnabled", c.appearance.colorEngineEnabled);
+    ap.insert_or_assign("matugenPaletteOk", c.appearance.matugenPaletteOk);
+    ap.insert_or_assign("colorBrightness", c.appearance.colorBrightness);
+    ap.insert_or_assign("colorContrast", c.appearance.colorContrast);
+    ap.insert_or_assign("colorVibrance", c.appearance.colorVibrance);
+    ap.insert_or_assign("colorGamma", c.appearance.colorGamma);
+    tbl.insert_or_assign("appearance", std::move(ap));
 
     toml::table dock;
-    dock.emplace("iconTheme", c.dock.iconTheme);
-    tbl.emplace("dock", std::move(dock));
+    if (auto* old = tbl["dock"].as_table()) dock = *old;
+    dock.insert_or_assign("iconTheme", c.dock.iconTheme);
+    tbl.insert_or_assign("dock", std::move(dock));
 
     toml::table da;
-    da.emplace("terminal", c.defaultApps.terminal);
-    tbl.emplace("defaultApps", std::move(da));
+    if (auto* old = tbl["defaultApps"].as_table()) da = *old;
+    da.insert_or_assign("terminal", c.defaultApps.terminal);
+    tbl.insert_or_assign("defaultApps", std::move(da));
 
     std::ofstream out(path);
     if (!out.is_open()) return false;

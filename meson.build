@@ -52,6 +52,63 @@ if dep_librsvg.found()
   cpp_args += ['-DEH_HAVE_RSVG']
 endif
 
+if dep_jpeg.found()
+  cpp_args += ['-DEH_HAVE_LIBJPEG']
+endif
+
+# ── Horizon Colors: Google material-color-utilities (C++, Apache-2.0) ────────
+absl_flat_hash_map_dep = dependency('absl_flat_hash_map')
+absl_strings_dep = dependency('absl_strings')
+
+material_colors_sources = files(
+  'third_party/material-color-utilities/cpp/blend/blend.cc',
+  'third_party/material-color-utilities/cpp/cam/cam.cc',
+  'third_party/material-color-utilities/cpp/cam/hct.cc',
+  'third_party/material-color-utilities/cpp/cam/hct_solver.cc',
+  'third_party/material-color-utilities/cpp/cam/viewing_conditions.cc',
+  'third_party/material-color-utilities/cpp/contrast/contrast.cc',
+  'third_party/material-color-utilities/cpp/dislike/dislike.cc',
+  'third_party/material-color-utilities/cpp/dynamiccolor/dynamic_color.cc',
+  'third_party/material-color-utilities/cpp/dynamiccolor/dynamic_scheme.cc',
+  'third_party/material-color-utilities/cpp/dynamiccolor/material_dynamic_colors.cc',
+  'third_party/material-color-utilities/cpp/palettes/tones.cc',
+  'third_party/material-color-utilities/cpp/quantize/celebi.cc',
+  'third_party/material-color-utilities/cpp/quantize/lab.cc',
+  'third_party/material-color-utilities/cpp/quantize/wsmeans.cc',
+  'third_party/material-color-utilities/cpp/quantize/wu.cc',
+  'third_party/material-color-utilities/cpp/scheme/scheme_content.cc',
+  'third_party/material-color-utilities/cpp/scheme/scheme_expressive.cc',
+  'third_party/material-color-utilities/cpp/scheme/scheme_fidelity.cc',
+  'third_party/material-color-utilities/cpp/scheme/scheme_fruit_salad.cc',
+  'third_party/material-color-utilities/cpp/scheme/scheme_monochrome.cc',
+  'third_party/material-color-utilities/cpp/scheme/scheme_neutral.cc',
+  'third_party/material-color-utilities/cpp/scheme/scheme_rainbow.cc',
+  'third_party/material-color-utilities/cpp/scheme/scheme_tonal_spot.cc',
+  'third_party/material-color-utilities/cpp/scheme/scheme_vibrant.cc',
+  'third_party/material-color-utilities/cpp/score/score.cc',
+  'third_party/material-color-utilities/cpp/temperature/temperature_cache.cc',
+  'third_party/material-color-utilities/cpp/utils/utils.cc',
+)
+
+material_colors_inc = include_directories('third_party/material-color-utilities')
+
+eh_material_colors_lib = static_library(
+  'eh_material_colors',
+  sources: material_colors_sources,
+  include_directories: material_colors_inc,
+  cpp_args: ['-Wno-unused-parameter', '-Wno-extra-semi', '-Wno-pedantic', '-Wno-extra-semi-braces'],
+  override_options: ['optimization=2', 'werror=false'],
+  dependencies: [absl_flat_hash_map_dep, absl_strings_dep],
+  cpp_pch: 'src/platform/common/palette/pch_material_colors.hpp',
+  pic: true,
+)
+
+eh_material_colors_dep = declare_dependency(
+  link_with: eh_material_colors_lib,
+  include_directories: material_colors_inc,
+  dependencies: [absl_flat_hash_map_dep, absl_strings_dep],
+)
+
 # ── Include paths ─────────────────────────────────────────────────────
 inc = include_directories(
   'src',
@@ -122,6 +179,7 @@ sources = files(
   'src/platform/common/fs/shell_paths.cpp',
   'src/platform/common/fs/string_util.cpp',
   'src/platform/common/palette/matugen_palette.cpp',
+  'src/platform/common/palette/horizon_colors.cpp',
 
   # Bootstrap thread
   'src/base/thread/thread_dispatch.cpp',
@@ -196,6 +254,7 @@ executable(
     dep_sdbus,
     dep_fontconfig,
     dep_uring,
+    eh_material_colors_dep,
   ],
   install: true,
 )

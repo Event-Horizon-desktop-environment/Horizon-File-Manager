@@ -10,3 +10,6 @@
 [submodule "third_party/ffmpegthumbnailer"]
 	path = third_party/ffmpegthumbnailer
 	url = https://github.com/dirkvdb/ffmpegthumbnailer.git
+[submodule "third_party/material-color-utilities"]
+	path = third_party/material-color-utilities
+	url = https://github.com/material-foundation/material-color-utilities.git

@@ -2226,6 +2226,7 @@ void open_settings(AppState& app) {
   {
     const auto& sc = eh::config::shell_config_snapshot();
     app.settings_matugen_theming = sc.appearance.matugenThemingEnabled;
+    app.settings_color_engine = sc.appearance.colorEngineEnabled;
   }
 
   // Build terminal options list
@@ -2274,6 +2275,7 @@ void save_file_browser_settings(AppState& app) {
   fbs.topbar_opacity_pct = app.topbar_opacity_pct;
   fbs.statusbar_opacity_pct = app.statusbar_opacity_pct;
   fbs.preview_opacity_pct = app.preview_opacity_pct;
+  fbs.preview_scale = app.preview_scale;
   fbs.dialog_opacity_pct = app.dialog_opacity_pct;
   fbs.properties_opacity_pct = app.properties_opacity_pct;
   fbs.view_mode = static_cast<int>(app.cur_tab().view_mode);
@@ -2310,6 +2312,7 @@ void settings_apply(AppState& app) {
   fbs.topbar_opacity_pct = app.settings_topbar_opacity_pct;
   fbs.statusbar_opacity_pct = app.settings_statusbar_opacity_pct;
   fbs.preview_opacity_pct = app.settings_preview_opacity_pct;
+  fbs.preview_scale = app.settings_preview_scale;
   fbs.dialog_opacity_pct = app.settings_dialog_opacity_pct;
   fbs.properties_opacity_pct = app.settings_properties_opacity_pct;
   fbs.view_mode = static_cast<int>(app.cur_tab().view_mode);
@@ -2337,6 +2340,7 @@ void settings_apply(AppState& app) {
       sc.defaultApps.terminal.clear();
     }
     sc.appearance.matugenThemingEnabled = app.settings_matugen_theming;
+    sc.appearance.colorEngineEnabled = app.settings_color_engine;
     (void)eh::config::write_state_settings_toml(sc);
     eh::config::shell_config_apply_from_memory(std::move(sc));
   }
@@ -2348,14 +2352,18 @@ void reload_colors_from_config(AppState& app) {
   eh::config::shell_config_reload_from_disk_now();
   const auto& sc = eh::config::shell_config_snapshot_skip_matugen();
   eh::config::ShellAppearance ap = sc.appearance;
-  if (ap.matugenPaletteOk) {
-    // Palette already populated from disk (written by color engine / matugen post-hook)
-  } else {
+  if (ap.colorEngineEnabled) {
+    // The rendered horizon-files-matugen.conf is the color engine's direct
+    // output — prefer it; on failure keep whatever synced TOML floats parsed.
+    (void)eh::matugen::read_shell_color_config(ap);
+  } else if (ap.matugenThemingEnabled) {
     eh::matugen::refresh_wallpaper_derived_palette(ap, sc.wallpaperImage);
+  } else {
+    ap.matugenPaletteOk = false;
   }
   const auto mc = eh::config::derived_chrome_colors(ap);
-  if (ap.matugenThemingEnabled && ap.matugenPaletteOk) {
-    // Use matugen colors for all UI with vibrance boost
+  if ((ap.colorEngineEnabled || ap.matugenThemingEnabled) && ap.matugenPaletteOk) {
+    // Use wallpaper-derived colors for all UI with vibrance boost
     // Mix surface/outline/bg with accent color to avoid flat grey M3 tones
     app.bg_r = mc.panelFillR * 0.5 + mc.accentR * 0.015;
     app.bg_g = mc.panelFillG * 0.5 + mc.accentG * 0.015;
@@ -2408,6 +2416,7 @@ void reload_settings_from_config(AppState& app) {
   eh::config::FileBrowserSettings fbs = eh::config::read_file_browser_toml();
   const auto& sc = eh::config::shell_config_snapshot_skip_matugen();
   app.settings_matugen_theming = sc.appearance.matugenThemingEnabled;
+  app.settings_color_engine = sc.appearance.colorEngineEnabled;
   apply_zoom_pct(app, fbs.zoom_pct);
   app.folders_before_files = fbs.folders_before_files;
   app.surface_opacity_pct = fbs.surface_opacity_pct;
@@ -2415,6 +2424,8 @@ void reload_settings_from_config(AppState& app) {
   app.topbar_opacity_pct = fbs.topbar_opacity_pct;
   app.statusbar_opacity_pct = fbs.statusbar_opacity_pct;
   app.preview_opacity_pct = fbs.preview_opacity_pct;
+  app.preview_scale = fbs.preview_scale;
+  app.settings_preview_scale = fbs.preview_scale;
   app.dialog_opacity_pct = fbs.dialog_opacity_pct;
   app.properties_opacity_pct = fbs.properties_opacity_pct;
   app.cur_tab().view_mode = static_cast<ViewMode>(fbs.view_mode);

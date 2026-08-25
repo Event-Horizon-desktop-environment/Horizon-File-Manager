@@ -863,11 +863,12 @@ struct AppState {
   int settings_preview_opacity_pct = 100;
   int settings_dialog_opacity_pct = 100;
   int settings_properties_opacity_pct = 100;
+  double settings_preview_scale = 1.0;
   int settings_default_term_idx = -1;
   std::vector<std::string> settings_term_opts;
   double settings_x = 0, settings_y = 0;
   double settings_w = 0, settings_h = 0;
-  double settings_tab_hit[2][4]{};
+  double settings_tab_hit[3][4]{};
   double settings_hit_ok[4]{};
   double settings_hit_apply[4]{};
   double settings_hit_cancel[4]{};
@@ -889,7 +890,9 @@ struct AppState {
   int settings_dropdown_hover = -1;
   int settings_dropdown_scroll = 0;
   bool settings_matugen_theming = false;
+  bool settings_color_engine = true;
   double settings_hit_matugen_toggle[4]{};
+  double settings_hit_color_engine_toggle[4]{};
   bool settings_independent_dir_views = false;
   int settings_slider_dragging = 0;
 
@@ -1157,6 +1160,7 @@ struct AppState {
   int topbar_opacity_pct = 100;
   int statusbar_opacity_pct = 100;
   int preview_opacity_pct = 100;
+  double preview_scale = 1.0;   // hover preview size multiplier (1.0-10.0)
   int dialog_opacity_pct = 100;
   int properties_opacity_pct = 100;
 

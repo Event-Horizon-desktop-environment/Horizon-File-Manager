@@ -3,6 +3,7 @@
 #include "config/shell_renderer_backend.hpp"
 #include "platform/dock/core/dock_settings.hpp"
 #include "platform/taskbar/core/taskbar_settings.hpp"
+#include "theme/tokens/color.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -57,6 +58,67 @@ struct MatugenExternalTemplateToggles {
   bool horizonPhoto = true;
 };
 
+// Full Material Design 3 role palette produced by the native color engine.
+// Role order matches m3::ColorRole (theme/tokens/color.hpp), PaletteResult::roles
+// in platform/common/palette/horizon_colors.cpp, and the shell's
+// matugen/templates/horizon-files-matugen.conf key list.
+inline constexpr unsigned kM3RoleCount = 47;
+
+inline constexpr const char* kM3RoleNames[kM3RoleCount] = {
+    "primary",
+    "on_primary",
+    "primary_container",
+    "on_primary_container",
+    "secondary",
+    "on_secondary",
+    "secondary_container",
+    "on_secondary_container",
+    "tertiary",
+    "on_tertiary",
+    "tertiary_container",
+    "on_tertiary_container",
+    "error",
+    "on_error",
+    "error_container",
+    "on_error_container",
+    "surface",
+    "on_surface",
+    "surface_variant",
+    "on_surface_variant",
+    "surface_dim",
+    "surface_bright",
+    "surface_container_lowest",
+    "surface_container_low",
+    "surface_container",
+    "surface_container_high",
+    "surface_container_highest",
+    "inverse_surface",
+    "inverse_on_surface",
+    "inverse_primary",
+    "outline",
+    "outline_variant",
+    "shadow",
+    "scrim",
+    "surface_tint",
+    "primary_fixed",
+    "primary_fixed_dim",
+    "on_primary_fixed",
+    "on_primary_fixed_variant",
+    "secondary_fixed",
+    "secondary_fixed_dim",
+    "on_secondary_fixed",
+    "on_secondary_fixed_variant",
+    "tertiary_fixed",
+    "tertiary_fixed_dim",
+    "on_tertiary_fixed",
+    "on_tertiary_fixed_variant",
+};
+
+struct M3Palette {
+  float rgb[kM3RoleCount][3] = {};
+  bool loaded = false;
+};
+
 struct ShellAppearance {
   bool overlayOpacityAdvanced = false;
   float overlayOpacityMaster = 1.f;
@@ -89,6 +151,12 @@ struct ShellAppearance {
 
   bool matugenThemingEnabled = false;
 
+  // Consume wallpaper-derived colors from the Event Horizon color engine
+  // (state-settings.toml sync / horizon-files-matugen.conf). On by default.
+  bool colorEngineEnabled = true;
+
+  bool horizonColorsNative = true;
+
   std::string matugenScheme = "scheme-content";
 
   std::string matugenMode = "dark";
@@ -111,6 +179,9 @@ struct ShellAppearance {
 
   float matugenNotifCriticalBgR = 0.18f, matugenNotifCriticalBgG = 0.06f, matugenNotifCriticalBgB = 0.06f;
   float matugenNotifCriticalOutlineR = 0.70f, matugenNotifCriticalOutlineG = 0.10f, matugenNotifCriticalOutlineB = 0.10f;
+
+  M3Palette m3Palette{};
+
   float colorBrightness = 1.0f;
   float colorContrast = 1.0f;
   float colorVibrance = 1.0f;
@@ -155,6 +226,14 @@ inline void apply_color_adjustment(double& r, double& g, double& b,
 }
 
 [[nodiscard]] ChromePaintColors derived_chrome_colors(const ShellAppearance& a);
+
+/// Full-palette lookup for the theme engine. Returns the float RGB triple for
+/// a role, or nullptr when no wallpaper-derived palette is loaded (callers
+/// fall back to their static defaults).
+[[nodiscard]] inline const float* m3_role_rgb(const ShellAppearance& a, m3::ColorRole role) {
+  if (!a.m3Palette.loaded) return nullptr;
+  return a.m3Palette.rgb[static_cast<unsigned>(role)];
+}
 
 enum class OverlaySurfaceAlphaKind : std::uint8_t {
   ControlCenter = 0,
@@ -283,6 +362,7 @@ struct FileBrowserSettings {
   int preview_opacity_pct = 100; // 0–100; frame only, not content
   int dialog_opacity_pct = 100; // 0–100; settings dialog background
   int properties_opacity_pct = 100; // 0–100; properties dialog background
+  double preview_scale = 1.0;    // 1.0–10.0; hover preview size multiplier
   std::string default_terminal;  // empty = use system default
   int view_mode = 0;             // 0=List, 1=Grid
   int sort_field = 0;            // 0=Name, 1=Size, 2=Modified, 3=Type

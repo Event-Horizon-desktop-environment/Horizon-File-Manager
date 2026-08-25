@@ -19,6 +19,7 @@
 #include <sys/stat.h>
 
 #include "config/shell_config.hpp"
+#include "platform/common/palette/matugen_palette.hpp"
 #include "theme/core/primitives/box.hpp"
 
 namespace eh::file_browser {
@@ -80,6 +81,20 @@ void paint(AppState& app, cairo_t* cr) {
       } else if (fb_st.st_mtim.tv_sec != s_last_fb_mtime.tv_sec ||
                  fb_st.st_mtim.tv_nsec != s_last_fb_mtime.tv_nsec) {
         s_last_fb_mtime = fb_st.st_mtim;
+        reload_settings_from_config(app);
+      }
+    }
+    static timespec s_last_shell_color_mtime{};
+    static bool s_initialized_shell_color = false;
+    const std::string sc_path = eh::matugen::shell_color_config_path();
+    struct stat sc_st{};
+    if (::stat(sc_path.c_str(), &sc_st) == 0) {
+      if (!s_initialized_shell_color) {
+        s_last_shell_color_mtime = sc_st.st_mtim;
+        s_initialized_shell_color = true;
+      } else if (sc_st.st_mtim.tv_sec != s_last_shell_color_mtime.tv_sec ||
+                 sc_st.st_mtim.tv_nsec != s_last_shell_color_mtime.tv_nsec) {
+        s_last_shell_color_mtime = sc_st.st_mtim;
         reload_settings_from_config(app);
       }
     }

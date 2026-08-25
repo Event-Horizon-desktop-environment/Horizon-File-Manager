@@ -633,6 +633,10 @@ void create_settings_window(AppState& app) {
   xdg_toplevel_add_listener(app.settings_toplevel, &kSettingsToplevelListener, &app);
   xdg_toplevel_set_title(app.settings_toplevel, "Settings");
   xdg_toplevel_set_app_id(app.settings_toplevel, "horizon-files-settings");
+
+  // Size the window to the active tab's content before pinning min==max.
+  app.settings_win_width = settings_dialog_width();
+  app.settings_win_height = settings_dialog_card_height(app);
   xdg_toplevel_set_min_size(app.settings_toplevel, app.settings_win_width, app.settings_win_height);
   xdg_toplevel_set_max_size(app.settings_toplevel, app.settings_win_width, app.settings_win_height);
 
@@ -671,7 +675,78 @@ static void settings_apply_slider(AppState& app, int hit, int x) {
   } else if (hit == -20) {
     app.settings_properties_opacity_pct = val;
     app.properties_opacity_pct = val;
+  } else if (hit == -23) {
+    const double sc = 1.0 + 9.0 * (val / 100.0);
+    app.settings_preview_scale = sc;
+    app.preview_scale = sc;
+    // Real time: resize an already-showing image preview.
+    if (app.preview_active && app.preview_thumb && app.preview_entry_idx >= 0 &&
+        !app.cur_tab().visible_entries.empty()) {
+      const int vi = app.preview_entry_idx;
+      if (vi >= 0 && vi < static_cast<int>(app.cur_tab().visible_entries.size())) {
+        const int ri = app.cur_tab().visible_entries[vi];
+        if (ri >= 0 && ri < static_cast<int>(app.cur_tab().entries.size()) &&
+            app.cur_tab().entries[ri].type == FileType::Image) {
+          const int tw = cairo_image_surface_get_width(app.preview_thumb);
+          const int th = cairo_image_surface_get_height(app.preview_thumb);
+            eh::file_browser::resize_active_image_preview(app);
+            app.pendingRedraw = true;
+        }
+      }
+    }
   }
+}
+
+// ── Settings dialog layout (single source of truth) ──────────────
+//
+// Vertical model (offsets from card top):
+//   title bar 44 + 4 gap + tabs 36 + 12 gap  => content top at 96
+//   per-tab rows (see settings_content_height)
+//   18 gap + button row 30 + 20 bottom pad   => button zone = card_h - 50
+static constexpr int kSetContentTop = 96;
+static constexpr int kSetContentGap = 18;
+static constexpr int kSetButtonZone = 50;
+
+int settings_dialog_width() {
+  return 420;
+}
+
+static int settings_content_height(const AppState& app) {
+  switch (app.settings_tab) {
+    case 0: {
+      // zoom @0..26, folders toggle @40..62, terminal box @76..106,
+      // independent-views toggle @118..140
+      int h = 140;
+      if (app.settings_dropdown_open) {
+        const int visible = std::min<int>(app.settings_term_opts.size(), 6);
+        h = std::max(h, 108 + visible * 28);
+      }
+      return h;
+    }
+    case 1:
+      // seven opacity slider rows + matugen + color engine toggles;
+      // last row top at content_top + 8*52 = 512 from card top
+      return 438;
+    default:
+      return 56;  // preview scale slider
+  }
+}
+
+int settings_dialog_card_height(const AppState& app) {
+  return kSetContentTop + settings_content_height(app) + kSetContentGap + kSetButtonZone;
+}
+
+void update_settings_window_size(AppState& app) {
+  const int w = settings_dialog_width();
+  const int h = settings_dialog_card_height(app);
+  if (w == app.settings_win_width && h == app.settings_win_height) return;
+  app.settings_win_width = w;
+  app.settings_win_height = h;
+  if (!app.settings_toplevel || !app.settings_surface) return;
+  xdg_toplevel_set_min_size(app.settings_toplevel, w, h);
+  xdg_toplevel_set_max_size(app.settings_toplevel, w, h);
+  wl_surface_commit(app.settings_surface);
+  if (app.wl.display()) wl_display_flush(app.wl.display());
 }
 
 void handle_settings_click(AppState& app, int x, int y, int button) {
@@ -694,11 +769,19 @@ void handle_settings_click(AppState& app, int x, int y, int button) {
   }
   if (hit == -3) {
     app.settings_tab = 0;
+    update_settings_window_size(app);
     app.settings_pendingRedraw = true;
     return;
   }
   if (hit == -4) {
     app.settings_tab = 1;
+    update_settings_window_size(app);
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -22) {
+    app.settings_tab = 2;
+    update_settings_window_size(app);
     app.settings_pendingRedraw = true;
     return;
   }
@@ -719,7 +802,7 @@ void handle_settings_click(AppState& app, int x, int y, int button) {
     app.settings_pendingRedraw = true;
     return;
   }
-  if (hit == -11 || hit == -13 || hit == -14 || hit == -15 || hit == -17 || hit == -19 || hit == -20) {
+  if (hit == -11 || hit == -13 || hit == -14 || hit == -15 || hit == -17 || hit == -19 || hit == -20 || hit == -23) {
     settings_apply_slider(app, hit, x);
     app.settings_slider_dragging = hit;
     app.settings_pendingRedraw = true;
@@ -728,11 +811,17 @@ void handle_settings_click(AppState& app, int x, int y, int button) {
   }
   if (hit == -12) {
     app.settings_dropdown_open = !app.settings_dropdown_open;
+    update_settings_window_size(app);
     app.settings_pendingRedraw = true;
     return;
   }
   if (hit == -18) {
     app.settings_matugen_theming = !app.settings_matugen_theming;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -24) {
+    app.settings_color_engine = !app.settings_color_engine;
     app.settings_pendingRedraw = true;
     return;
   }
@@ -744,6 +833,7 @@ void handle_settings_click(AppState& app, int x, int y, int button) {
   if (hit >= 0) {
     app.settings_default_term_idx = hit + app.settings_dropdown_scroll;
     app.settings_dropdown_open = false;
+    update_settings_window_size(app);
     app.settings_pendingRedraw = true;
     return;
   }
@@ -1138,6 +1228,7 @@ static bool create_window(AppState& app) {
   int64_t toml_mtime = 0;
   int64_t ini_mtime = 0;
   int64_t fb_toml_mtime = 0;
+  int64_t shell_color_mtime = 0;
   int64_t dev_disk_mtime = 0;
   auto last_progress_apply = std::chrono::steady_clock::now() -
                              std::chrono::milliseconds(1000);
@@ -1167,6 +1258,14 @@ static bool create_window(AppState& app) {
         if (stat(eh::config::state_file_browser_toml_path().c_str(), &st) == 0) {
           int64_t mt = static_cast<int64_t>(st.st_mtime);
           if (mt != fb_toml_mtime) { fb_toml_mtime = mt; settings_changed = true; }
+        }
+
+        {
+          const std::string sc_path = eh::matugen::shell_color_config_path();
+          if (stat(sc_path.c_str(), &st) == 0) {
+            int64_t mt = static_cast<int64_t>(st.st_mtime);
+            if (mt != shell_color_mtime) { shell_color_mtime = mt; settings_changed = true; }
+          }
         }
 
         if (settings_changed) {
@@ -1205,9 +1304,15 @@ static bool create_window(AppState& app) {
       {
         std::vector<eh::file_browser::ThumbBgResult> thumbs;
         eh::file_browser::thumb_pool_drain(app, thumbs);
-        for (auto& t : thumbs)
+        for (auto& t : thumbs) {
+          if (eh::file_browser::preview_dbg_enabled()) {
+            const int w = t.surface ? cairo_image_surface_get_width(t.surface) : 0;
+            const int h = t.surface ? cairo_image_surface_get_height(t.surface) : 0;
+            fprintf(stderr, "[preview] decode '%s' %dx%d\n", t.path.c_str(), w, h);
+          }
           eh::file_browser::thumb_cache_install(app, t.path, t.size,
                                                 t.surface);
+        }
         if (!thumbs.empty()) need_redraw = true;
         if (eh::file_browser::dir_stats_drain(app)) need_redraw = true;
       }

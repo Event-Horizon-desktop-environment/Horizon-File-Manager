@@ -223,6 +223,11 @@ static FileType mime_to_file_type(const std::string& mime) {
   }
 
   if (mime.size() > 12 && mime.substr(0, 12) == "application/") {
+    // Plain-text subtitle containers (SubRip etc.) preview as text.
+    if (mime.find("subrip") != std::string::npos ||
+        mime == "application/x-subtitle")
+      return FileType::Text;
+
     if (mime == "application/pdf" || mime == "application/msword" ||
         mime.find("officedocument") != std::string::npos ||
         mime.find("vnd.openxmlformats") != std::string::npos ||
@@ -344,7 +349,9 @@ static FileType detect_file_type(const std::string& name, bool is_dir,
         ext == "ini" || ext == "json" || ext == "xml" || ext == "yaml" ||
         ext == "yml" || ext == "log" || ext == "csv" || ext == "tsv" ||
         ext == "toml" || ext == "nfo" || ext == "info" || ext == "tex" ||
-        ext == "sty" || ext == "bst")
+        ext == "sty" || ext == "bst" ||
+        ext == "srt" || ext == "vtt" || ext == "ass" || ext == "ssa" ||
+        ext == "sub")
       return FileType::Text;
 
     if (ext == "pdf" || ext == "doc" || ext == "docx" || ext == "xls" ||
@@ -557,6 +564,10 @@ static std::string mime_by_ext(const std::string& path) {
   if (ext == "conf" || ext == "cfg") return "text/x-config";
   if (ext == "ini") return "text/x-ini";
   if (ext == "log") return "text/x-log";
+  if (ext == "srt") return "application/x-subrip";
+  if (ext == "vtt") return "text/vtt";
+  if (ext == "ass" || ext == "ssa") return "text/x-ssa";
+  if (ext == "sub") return "text/x-microdvd";
   if (ext == "csv") return "text/csv";
   if (ext == "tsv") return "text/tab-separated-values";
   if (ext == "yaml" || ext == "yml") return "text/yaml";
@@ -1935,22 +1946,6 @@ void thumb_cache_install(AppState& app, const std::string& path, int size,
     cairo_surface_destroy(s);
     return;
   }
-  while (app.thumb_cache_bytes >= AppState::kThumbCacheMaxBytes &&
-         !app.thumb_lru.empty()) {
-    auto evict = app.thumb_lru.back();
-    auto ev = app.thumb_cache.find(evict);
-    if (ev != app.thumb_cache.end()) {
-      int eh = cairo_image_surface_get_height(ev->second);
-      int estr = cairo_image_surface_get_stride(ev->second);
-      app.thumb_cache_bytes -= static_cast<std::size_t>(eh * estr);
-      cairo_surface_destroy(ev->second);
-      app.thumb_cache.erase(ev);
-    }
-    app.thumb_lru.pop_back();
-  }
-  int sh = cairo_image_surface_get_height(s);
-  int stride = cairo_image_surface_get_stride(s);
-  app.thumb_cache_bytes += static_cast<std::size_t>(sh * stride);
   app.thumb_cache[path] = s;
   app.thumb_lru.push_front(path);
   (void)size;
@@ -2808,6 +2803,7 @@ static bool create_preview_popup(AppState& app);
 static void commit_preview_popup(AppState& app);
 
 // Aspect-fit the hover popup around a full-res frame (same math as images)
+// VIDEO: original sizing, untouched — do not modify without asking.
 static void size_hover_popup_to_frame(int& popup_w, int& popup_h,
                                       int tw, int th) {
   int max_w = 700;
@@ -2821,6 +2817,14 @@ static void size_hover_popup_to_frame(int& popup_w, int& popup_h,
 }
 
 // Position the hover popup centered on mouse X, above mouse Y, clamped on screen
+static bool preview_dbg() {
+  static const bool on = [] {
+    const char* e = std::getenv("EH_PREVIEW_DEBUG");
+    return e && *e && e[0] != '0';
+  }();
+  return on;
+}
+
 static void place_hover_popup(AppState& app, int mx, int my,
                               int popup_w, int popup_h) {
   int popup_x = mx - popup_w / 2;
@@ -2840,6 +2844,31 @@ static void place_hover_popup(AppState& app, int mx, int my,
   app.preview_y = popup_y;
   app.preview_w = popup_w;
   app.preview_h = popup_h;
+}
+
+void resize_active_image_preview(AppState& app) {
+  if (!app.preview_active || !app.preview_thumb) return;
+  const int vi = app.preview_entry_idx;
+  if (vi < 0 || vi >= static_cast<int>(app.cur_tab().visible_entries.size()))
+    return;
+  const int ri = app.cur_tab().visible_entries[vi];
+  if (ri < 0 || ri >= static_cast<int>(app.cur_tab().entries.size())) return;
+  if (app.cur_tab().entries[ri].type != FileType::Image) return;
+  const int tw = cairo_image_surface_get_width(app.preview_thumb);
+  const int th = cairo_image_surface_get_height(app.preview_thumb);
+  if (tw <= 0 || th <= 0) return;
+  int popup_w = 260, popup_h = 240;
+  size_hover_popup_to_frame(popup_w, popup_h, tw, th);
+  const double sc = std::clamp(app.preview_scale, 1.0, 10.0);
+  popup_w = std::clamp(static_cast<int>(popup_w * sc), 120,
+                       std::max(120, app.width - 32));
+  popup_h = std::clamp(static_cast<int>(popup_h * sc), 120,
+                       std::max(120, app.height - app.status_bar_height - 48));
+  place_hover_popup(app, static_cast<int>(app.pointerX),
+                    static_cast<int>(app.pointerY), popup_w, popup_h);
+  if (create_preview_popup(app))
+    commit_preview_popup(app);
+  app.pendingRedraw = true;
 }
 
 void reset_preview(AppState& app) {
@@ -2911,6 +2940,7 @@ void check_hover_preview(AppState& app) {
           if (entry.type == FileType::Image) {
             app.preview_req_px = 500;
             app.preview_req_path = entry.path;
+            if (preview_dbg()) fprintf(stderr, "[preview] open req='%s' px=500\n", entry.path.c_str());
             thumb_pool_enqueue(app, entry.path, app.preview_req_px);
           } else if (entry.type == FileType::Video) {
             video_worker().enqueue_preview(entry.path, kVideoPreviewFrameMaxPx);
@@ -2947,8 +2977,14 @@ void check_hover_preview(AppState& app) {
           if (entry.type == FileType::Image && app.preview_thumb) {
             int tw = cairo_image_surface_get_width(app.preview_thumb);
             int th = cairo_image_surface_get_height(app.preview_thumb);
-            if (tw > 0 && th > 0)
+            if (tw > 0 && th > 0) {
               size_hover_popup_to_frame(popup_w, popup_h, tw, th);
+              const double sc = std::clamp(app.preview_scale, 1.0, 10.0);
+              popup_w = std::clamp(static_cast<int>(popup_w * sc), 120,
+                                   std::max(120, app.width - 32));
+              popup_h = std::clamp(static_cast<int>(popup_h * sc), 120,
+                                   std::max(120, app.height - app.status_bar_height - 48));
+            }
           }
 
           place_hover_popup(app, mx, my, popup_w, popup_h);
@@ -3024,12 +3060,18 @@ void check_hover_preview(AppState& app) {
             bool big_enough =
                 std::max(tw, th) >= (app.preview_req_px * 3) / 4;
             if (big_enough) {
+              if (preview_dbg()) fprintf(stderr, "[preview] accept '%s' %dx%d\n", entry.path.c_str(), tw, th);
               cairo_surface_reference(s2);
               app.preview_thumb = s2;
               if (entry.type == FileType::Image && tw > 0 && th > 0) {
                 int popup_w = 260;
                 int popup_h = 240;
                 size_hover_popup_to_frame(popup_w, popup_h, tw, th);
+                const double sc = std::clamp(app.preview_scale, 1.0, 10.0);
+                popup_w = std::clamp(static_cast<int>(popup_w * sc), 120,
+                                     std::max(120, app.width - 32));
+                popup_h = std::clamp(static_cast<int>(popup_h * sc), 120,
+                                     std::max(120, app.height - app.status_bar_height - 48));
                 place_hover_popup(app, static_cast<int>(app.pointerX),
                                   static_cast<int>(app.pointerY),
                                   popup_w, popup_h);

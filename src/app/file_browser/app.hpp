@@ -94,6 +94,11 @@ FileType detect_file_type_for_path(const std::string& name, bool is_dir,
 // of a one-frame letter-placeholder flash. Implemented in draw.cpp.
 void prewarm_tab_icons(AppState& app);
 
+// Re-apply hover preview sizing (thumb dims x preview_scale, viewport
+// clamped) to the currently showing preview popup and redraw it. No-op
+// when no image preview is active. Implemented in nav.cpp.
+void resize_active_image_preview(AppState& app);
+
 // Restart the active pane's search with current query/mode/case/filters.
 void restart_active_search(AppState& app);
 
@@ -288,6 +293,15 @@ void create_settings_window(AppState& app);
 void destroy_settings_window(AppState& app);
 void draw_settings_window(AppState& app);
 void handle_settings_click(AppState& app, int x, int y, int button);
+
+/// Settings dialog geometry — single source of truth shared by the painter
+/// and the hit-tester so they can never drift apart.
+int settings_dialog_width();
+/// Height needed to fit the active tab's rows plus the button row with even
+/// padding (grows while the terminal dropdown is open on the General tab).
+int settings_dialog_card_height(const AppState& app);
+/// Re-pin the settings xdg-toplevel to the size required by current content.
+void update_settings_window_size(AppState& app);
 
 // ── compress feature (features/compress.cpp) ─────────────────────
 

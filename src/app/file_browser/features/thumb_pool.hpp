@@ -52,3 +52,10 @@ void thumb_cache_install(AppState& app, const std::string& path, int size,
 void thumb_pool_drain(AppState& app, std::vector<ThumbBgResult>& out);
 
 }  // namespace eh::file_browser
+
+namespace eh::file_browser {
+inline bool preview_dbg_enabled() {
+  const char* e = std::getenv("EH_PREVIEW_DEBUG");
+  return e && *e && e[0] != '0';
+}
+}  // namespace eh::file_browser

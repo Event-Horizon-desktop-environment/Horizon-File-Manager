@@ -117,8 +117,8 @@ int properties_hit_test(AppState& app, int x, int y) {
 // ── settings hit test ────────────────────────────────────────────
 
 int settings_hit_test(AppState& app, int x, int y) {
-  const int card_w = 420;
-  const int card_h = 560;
+  const int card_w = settings_dialog_width();
+  const int card_h = settings_dialog_card_height(app);
   const int cx = (app.width - card_w) / 2;
   const int cy = (app.height - card_h) / 2;
   const int pad = 20;
@@ -135,7 +135,7 @@ int settings_hit_test(AppState& app, int x, int y) {
 
   const int top_bar_h = 44;
   const int tab_y = cy + top_bar_h + 4;
-  const int tab_w = 200;
+  const int tab_w = (card_w - 2 * pad) / 3;
   const int tab_h = 36;
 
   {
@@ -147,6 +147,11 @@ int settings_hit_test(AppState& app, int x, int y) {
     const int tx = cx + pad + tab_w;
     if (x >= tx && x < tx + tab_w && y >= tab_y && y < tab_y + tab_h)
       return -4;
+  }
+  {
+    const int tx = cx + pad + tab_w * 2;
+    if (x >= tx && x < tx + tab_w && y >= tab_y && y < tab_y + tab_h)
+      return -22;
   }
 
   const int content_y = tab_y + tab_h + 12;
@@ -287,6 +292,16 @@ int settings_hit_test(AppState& app, int x, int y) {
       return -20;
   }
 
+  // Preview scale slider (Preview tab)
+  if (app.settings_tab == 2) {
+    const int sc_slider_y = content_y + 24;
+    const int sc_slider_w = card_w - 2 * pad - 16;
+    const int sc_slider_h = 6;
+    if (x >= cx + pad + 8 && x < cx + pad + 8 + sc_slider_w &&
+        y >= sc_slider_y - 10 && y < sc_slider_y + sc_slider_h + 20)
+      return -23;
+  }
+
   // Matugen theming toggle (Appearance tab)
   if (app.settings_tab == 1) {
     const int toggle_x = static_cast<int>(app.settings_hit_matugen_toggle[0]);
@@ -296,6 +311,17 @@ int settings_hit_test(AppState& app, int x, int y) {
     if (toggle_w > 0 && x >= toggle_x && x < toggle_x + toggle_w &&
         y >= toggle_y && y < toggle_y + toggle_h)
       return -18;
+  }
+
+  // Color engine sync toggle (Appearance tab)
+  if (app.settings_tab == 1) {
+    const int toggle_x = static_cast<int>(app.settings_hit_color_engine_toggle[0]);
+    const int toggle_y = static_cast<int>(app.settings_hit_color_engine_toggle[1]);
+    const int toggle_w = static_cast<int>(app.settings_hit_color_engine_toggle[2]);
+    const int toggle_h = static_cast<int>(app.settings_hit_color_engine_toggle[3]);
+    if (toggle_w > 0 && x >= toggle_x && x < toggle_x + toggle_w &&
+        y >= toggle_y && y < toggle_y + toggle_h)
+      return -24;
   }
 
   {
