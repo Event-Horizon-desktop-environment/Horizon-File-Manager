@@ -649,6 +649,44 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
     }
 
     auto draw_icon_at = [&](int ix, int iy) {
+      const char* icon_name = loc.icon_name.c_str();
+      std::string trash_icon;
+      if (loc.kind == SidebarLocation::Kind::Trash) {
+        trash_icon = trash_has_files() ? "user-trash-full" : "user-trash";
+        icon_name = trash_icon.c_str();
+      }
+      // Theme-first: honor the system icon pack (e.g. MacTahoe). The bundled
+      // monochrome stencils below are only a fallback for themes that lack
+      // these names — they used to take precedence, painting flat
+      // text-colored glyphs no matter which icon theme was active.
+      //
+      // Async resolve: never decode theme SVGs on the paint thread.
+      // The placeholder letter shows for a frame or two, then the real
+      // icon pops in (catch-up frames are scheduled right after startup).
+      const auto* ic = [&]{
+        auto ti0 = std::chrono::steady_clock::now();
+        const auto* r = app.icons.tray_icon(icon_name, icon_sz);
+        static std::atomic<int> tic{0};
+        if (tic.fetch_add(1, std::memory_order_relaxed) < 12 &&
+            trace::enabled().load(std::memory_order_relaxed))
+          trace::log("SIDEBAR tray[%s] %.2f ms", icon_name,
+                     std::chrono::duration<double, std::milli>(
+                         std::chrono::steady_clock::now() - ti0).count());
+        return r;
+      }();
+      if (ic && ic->surface) {
+        double iw = static_cast<double>(ic->width);
+        double ih = static_cast<double>(ic->height);
+        double scale = icon_sz / std::max(1.0, std::max(iw, ih));
+        cairo_save(cr);
+        cairo_translate(cr, ix, iy);
+        cairo_scale(cr, scale, scale);
+        cairo_set_source_surface(cr, ic->surface, (icon_sz / scale - iw) / 2,
+                                  (icon_sz / scale - ih) / 2);
+        cairo_paint(cr);
+        cairo_restore(cr);
+        return;
+      }
       if (cs) {
         double iw = static_cast<double>(cairo_image_surface_get_width(cs));
         double ih = static_cast<double>(cairo_image_surface_get_height(cs));
@@ -661,48 +699,15 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
         cairo_clip(cr);
         cairo_mask_surface(cr, cs, (icon_sz / scale - iw) / 2, (icon_sz / scale - ih) / 2);
         cairo_restore(cr);
-      } else {
-        const char* icon_name = loc.icon_name.c_str();
-        std::string trash_icon;
-        if (loc.kind == SidebarLocation::Kind::Trash) {
-          trash_icon = trash_has_files() ? "user-trash-full" : "user-trash";
-          icon_name = trash_icon.c_str();
-        }
-        // Async resolve: never decode theme SVGs on the paint thread.
-        // The placeholder letter shows for a frame or two, then the real
-        // icon pops in (catch-up frames are scheduled right after startup).
-        const auto* ic = [&]{
-          auto ti0 = std::chrono::steady_clock::now();
-          const auto* r = app.icons.tray_icon(icon_name, icon_sz);
-          static std::atomic<int> tic{0};
-          if (tic.fetch_add(1, std::memory_order_relaxed) < 12 &&
-              trace::enabled().load(std::memory_order_relaxed))
-            trace::log("SIDEBAR tray[%s] %.2f ms", icon_name,
-                       std::chrono::duration<double, std::milli>(
-                           std::chrono::steady_clock::now() - ti0).count());
-          return r;
-        }();
-        if (ic && ic->surface) {
-          double iw = static_cast<double>(ic->width);
-          double ih = static_cast<double>(ic->height);
-          double scale = icon_sz / std::max(1.0, std::max(iw, ih));
-          cairo_save(cr);
-          cairo_translate(cr, ix, iy);
-          cairo_scale(cr, scale, scale);
-          cairo_set_source_surface(cr, ic->surface, (icon_sz / scale - iw) / 2,
-                                    (icon_sz / scale - ih) / 2);
-          cairo_paint(cr);
-          cairo_restore(cr);
-        } else {
-          cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-          cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                                  CAIRO_FONT_WEIGHT_NORMAL);
-          cairo_set_font_size(cr, 16.0 * zf);
-          cairo_move_to(cr, ix, iy + icon_sz);
-          char fallback[2] = { loc.label.empty() ? '?' : loc.label[0], '\0' };
-          cairo_show_text(cr, fallback);
-        }
+        return;
       }
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                              CAIRO_FONT_WEIGHT_NORMAL);
+      cairo_set_font_size(cr, 16.0 * zf);
+      cairo_move_to(cr, ix, iy + icon_sz);
+      char fallback[2] = { loc.label.empty() ? '?' : loc.label[0], '\0' };
+      cairo_show_text(cr, fallback);
     };
 
     // For items with extra usage row, center icon in the main row (top 36px)
@@ -1268,17 +1273,36 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
   (app.active_pane ? app.r_dots_btn_y : app.dots_btn_y) = dots_y;
   (app.active_pane ? app.r_dots_btn_w : app.dots_btn_w) = dots_btn_w;
   (app.active_pane ? app.r_dots_btn_h : app.dots_btn_h) = path_h;
-  // Three filled circles (⋮) with tight spacing
+  // Three dots (⋮) — bold SVG, circle fallback
   {
-    double dot_r = 1.1 * zf;
-    double gap = 2.8 * zf;
-    double cx = dots_x + dots_btn_w / 2.0;
-    double cy0 = path_y + path_h / 2.0 - gap - dot_r;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
-                            (app.active_pane ? app.r_dots_btn_hover : app.dots_btn_hover) ? 0.85 : 0.5);
-    for (int i = 0; i < 3; ++i) {
-      cairo_arc(cr, cx, cy0 + i * (2.0 * dot_r + gap), dot_r, 0.0, 2.0 * M_PI);
-      cairo_fill(cr);
+    bool dhover = (app.active_pane ? app.r_dots_btn_hover : app.dots_btn_hover);
+    if (app.three_dots_svg) {
+      int dsz = static_cast<int>(14.0 * zf);
+      int dox = dots_x + (dots_btn_w - dsz) / 2;
+      int doy = path_y + (path_h - dsz) / 2;
+      double svg_w = static_cast<double>(cairo_image_surface_get_width(app.three_dots_svg));
+      double svg_h = static_cast<double>(cairo_image_surface_get_height(app.three_dots_svg));
+      double display_scale = dsz / std::max(svg_w, svg_h);
+      cairo_save(cr);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
+                            dhover ? 0.95 : 0.65);
+      cairo_rectangle(cr, dox, doy, dsz, dsz);
+      cairo_clip(cr);
+      cairo_translate(cr, dox, doy);
+      cairo_scale(cr, display_scale, display_scale);
+      cairo_mask_surface(cr, app.three_dots_svg, 0, 0);
+      cairo_restore(cr);
+    } else {
+      double dot_r = 1.1 * zf;
+      double gap = 2.8 * zf;
+      double cx = dots_x + dots_btn_w / 2.0;
+      double cy0 = path_y + path_h / 2.0 - gap - dot_r;
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
+                              dhover ? 0.85 : 0.5);
+      for (int i = 0; i < 3; ++i) {
+        cairo_arc(cr, cx, cy0 + i * (2.0 * dot_r + gap), dot_r, 0.0, 2.0 * M_PI);
+        cairo_fill(cr);
+      }
     }
   }
 
@@ -1290,11 +1314,34 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
   int text_x = path_x + static_cast<int>(12.0 * zf);
   int text_y = top_h / 2 + static_cast<int>(4.0 * zf);
 
-  // Draw house icon
+  // Draw location icon (home / music / video / documents — bold SVG,
+  // vector house fallback). Sidebar icons are untouched.
   int icon_sz = static_cast<int>(12.0 * zf);
   int icon_y = (top_h - icon_sz) / 2;
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.75);
-  draw_house_icon(cr, text_x, icon_y, icon_sz);
+  {
+    cairo_surface_t* nav_svg = app.home_nav_svg;
+    std::string hp = home_dir();
+    const std::string& cp = app.cur_tab().current_path;
+    if (cp == hp + "/Music")           nav_svg = app.music_nav_svg;
+    else if (cp == hp + "/Videos")     nav_svg = app.video_nav_svg;
+    else if (cp == hp + "/Documents")  nav_svg = app.documents_nav_svg;
+    if (nav_svg) {
+      double svg_w = static_cast<double>(cairo_image_surface_get_width(nav_svg));
+      double svg_h = static_cast<double>(cairo_image_surface_get_height(nav_svg));
+      double display_scale = icon_sz / std::max(svg_w, svg_h);
+      cairo_save(cr);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.85);
+      cairo_rectangle(cr, text_x, icon_y, icon_sz, icon_sz);
+      cairo_clip(cr);
+      cairo_translate(cr, text_x, icon_y);
+      cairo_scale(cr, display_scale, display_scale);
+      cairo_mask_surface(cr, nav_svg, 0, 0);
+      cairo_restore(cr);
+    } else {
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.75);
+      draw_house_icon(cr, text_x, icon_y, icon_sz);
+    }
+  }
 
   int path_text_x = text_x + icon_sz + static_cast<int>(12.0 * zf); // gap-3
   int path_text_w = path_w - (path_text_x - path_x) - dots_btn_w - static_cast<int>(16.0 * zf);
@@ -1664,19 +1711,37 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
 
   // ── View-mode toggle (cycles List→Grid→Compact→Tree→List) ──
   {
-    const char* icon = "\u25A6";
+    // Icon previews the mode the next click switches TO.
+    cairo_surface_t* svg = nullptr;
+    const char* fallback = "\u25A6";
     switch (app.cur_tab().view_mode) {
-      case ViewMode::List:    icon = "\u25A6"; break; // grid icon (next: Grid)
-      case ViewMode::Grid:    icon = "\u2261"; break; // list icon (next: Compact)
-      case ViewMode::Compact: icon = "\u25B3"; break; // tree icon (next: Tree)
-      case ViewMode::Tree:    icon = "\u25A3"; break; // list icon (next: List)
-      default:                icon = "\u25A6"; break;
+      case ViewMode::List:    svg = app.view_grid_svg;    fallback = "\u25A6"; break; // next: Grid
+      case ViewMode::Grid:    svg = app.view_compact_svg; fallback = "\u2261"; break; // next: Compact
+      case ViewMode::Compact: svg = app.view_tree_svg;    fallback = "\u25B3"; break; // next: Tree
+      case ViewMode::Tree:    svg = app.view_list_svg;    fallback = "\u25A3"; break; // next: List
+      default:                svg = app.view_grid_svg;    fallback = "\u25A6"; break;
     }
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, icon, &te);
-    cairo_move_to(cr, view_toggle_x + (view_toggle_w - te.width) / 2,
-                   path_y + path_h / 2 + te.height / 2);
-    cairo_show_text(cr, icon);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    int sz = static_cast<int>(16.0 * zf);
+    int ox = view_toggle_x + (view_toggle_w - sz) / 2;
+    int oy = (top_h - sz) / 2;
+    if (svg) {
+      double svg_w = static_cast<double>(cairo_image_surface_get_width(svg));
+      double svg_h = static_cast<double>(cairo_image_surface_get_height(svg));
+      double display_scale = sz / std::max(svg_w, svg_h);
+      cairo_save(cr);
+      cairo_rectangle(cr, ox, oy, sz, sz);
+      cairo_clip(cr);
+      cairo_translate(cr, ox, oy);
+      cairo_scale(cr, display_scale, display_scale);
+      cairo_mask_surface(cr, svg, 0, 0);
+      cairo_restore(cr);
+    } else {
+      cairo_text_extents_t te;
+      cairo_text_extents(cr, fallback, &te);
+      cairo_move_to(cr, ox + (sz - te.width) / 2, oy + sz / 2 + te.height / 2);
+      cairo_show_text(cr, fallback);
+    }
   }
 
   // ── Folder-search button (folder + magnifying glass) ──
@@ -1783,13 +1848,29 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
       cairo_fill(cr);
       cairo_restore(cr);
     }
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                            CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 16.0 * zf);
+    int gz = static_cast<int>(15.0 * zf);
+    int gox = gear_x + (gear_w - gz) / 2;
+    int goy = (top_h - gz) / 2;
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    cairo_move_to(cr, gear_x + (gear_w - 14.0 * zf) / 2,
-                   top_h / 2 + static_cast<int>(5.0 * zf));
-    cairo_show_text(cr, "\u2699");
+    if (app.settings_gear_svg) {
+      double svg_w = static_cast<double>(cairo_image_surface_get_width(app.settings_gear_svg));
+      double svg_h = static_cast<double>(cairo_image_surface_get_height(app.settings_gear_svg));
+      double display_scale = gz / std::max(svg_w, svg_h);
+      cairo_save(cr);
+      cairo_rectangle(cr, gox, goy, gz, gz);
+      cairo_clip(cr);
+      cairo_translate(cr, gox, goy);
+      cairo_scale(cr, display_scale, display_scale);
+      cairo_mask_surface(cr, app.settings_gear_svg, 0, 0);
+      cairo_restore(cr);
+    } else {
+      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                              CAIRO_FONT_WEIGHT_NORMAL);
+      cairo_set_font_size(cr, 16.0 * zf);
+      cairo_move_to(cr, gear_x + (gear_w - 14.0 * zf) / 2,
+                     top_h / 2 + static_cast<int>(5.0 * zf));
+      cairo_show_text(cr, "\u2699");
+    }
   }
 
   } // end split-view guard (skip full bar when split_view && global)
@@ -4716,77 +4797,123 @@ void draw_marquee(AppState& app, cairo_t* cr) {
   cairo_set_dash(cr, nullptr, 0, 0.0);
 }
 
+// ── Shared split-view geometry ───────────────────────────────────
+// Single source of truth for hit-testing. Mirrors the layout math in
+// draw() (app.cpp) exactly, including search-banner / select-bar /
+// info-panel / ops-panel insets and the per-pane top bar. The pane is
+// derived FROM THE POINTER X, so results stay position-correct no matter
+// which pane currently has focus.
+struct PaneViewRect {
+  int x, y, w, h;
+  int pane;  // 0 = left/single pane, 1 = right split pane
+};
+
+static PaneViewRect pane_view_rect_at(const AppState& app, int px) {
+  int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
+  int info_w = 0;
+  if (app.info_panel_open)
+    info_w = std::max(200, static_cast<int>(280.0 * app.zoom_pct / 100.0));
+  int ops_w = 0;
+  if (app.ops_panel_slide > 0.01) {
+    ops_w = static_cast<int>(
+        std::max(240, static_cast<int>(320.0 * app.zoom_pct / 100.0)) *
+        app.ops_panel_slide);
+  }
+  // Info panel must never squeeze the content column to nothing.
+  if (info_w > 0) {
+    int max_info = std::max(160, app.width - sidebar_w - ops_w - 240);
+    if (info_w > max_info) info_w = max_info;
+  }
+  int cx = sidebar_w;
+  int cw = app.width - sidebar_w - info_w - ops_w;
+  int selector_h =
+      (app.select_dir_mode || app.select_file_mode) ? app.select_bar_h : 0;
+  bool banner_on = app.search_active || app.recursive_search_active ||
+                   app.r_search_active || app.r_recursive_search_active;
+  int cy = app.top_bar_height + app.tab_bar_height + (banner_on ? 28 : 0);
+  int ch = app.height - cy - app.status_bar_height - selector_h;
+  if (!app.split_view) return {cx, cy, std::max(0, cw), ch, 0};
+
+  constexpr int kDivW = 4;
+  int split =
+      app.split_divider_x > 0 ? app.split_divider_x : std::max(200, cw) / 2;
+  int left_w = std::max(100, split - kDivW / 2);
+  int right_x = std::min(cx + cw - 100, cx + split + kDivW / 2);
+  int right_w = std::max(100, cx + cw - right_x);
+  int pt = app.top_bar_height;
+  if (px >= right_x) return {right_x, cy + pt, right_w, ch - pt, 1};
+  return {cx, cy + pt, left_w, ch - pt, 0};
+}
+
+// Tab whose entry list lives in the pane under px.
+static Tab& pane_tab_at(AppState& app, int px) {
+  if (app.split_view && pane_view_rect_at(app, px).pane == 1)
+    return app.right_pane;
+  return app.tabs[app.active_tab];
+}
+
 void hit_test_marquee(AppState& app) {
   double x0 = std::min(app.marquee_x0, app.marquee_x1);
   double y0 = std::min(app.marquee_y0, app.marquee_y1);
   double x1 = std::max(app.marquee_x0, app.marquee_x1);
   double y1 = std::max(app.marquee_y0, app.marquee_y1);
 
-  int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
-  int content_x = sidebar_w;
-  int content_w = app.width - sidebar_w;
-  int content_y = app.top_bar_height + app.tab_bar_height;
+  // Resolve pane from the marquee's horizontal midpoint.
+  int mcx = static_cast<int>((x0 + x1) / 2.0);
+  PaneViewRect r = pane_view_rect_at(app, mcx);
+  Tab& tab = pane_tab_at(app, mcx);
 
-  // Split pane adjustment
-  if (app.split_view) {
-    int div_w = 4;
-    int split = app.split_divider_x;
-    if (split <= 0) split = content_w / 2;
-    if (app.active_pane == 1) {
-      int right_x = std::min(content_x + content_w - 100, content_x + split + div_w / 2);
-      content_w = content_x + content_w - right_x;
-      content_x = right_x;
-    } else {
-      content_w = std::max(100, split - div_w / 2);
-    }
-    content_y += app.top_bar_height; // pane top bar
-  }
+  int content_x = r.x;
+  int content_w = r.w;
+  int content_y = r.y;
 
-  app.cur_tab().multi_selected.clear();
-  app.cur_tab().selected_idx = -1;
+  tab.multi_selected.clear();
+  tab.selected_idx = -1;
 
-  if (app.cur_tab().view_mode == ViewMode::List) {
+  if (tab.view_mode == ViewMode::List) {
     int entry_h = app.entry_height;
     int header_h = static_cast<int>(entry_h * 0.55);
-    bool grouped = app.cur_tab().group_by_type;
+    bool grouped = tab.group_by_type;
     int prev_type = -1;
     int acc = 0;
-    for (int i = 0; i < static_cast<int>(app.cur_tab().visible_entries.size()); ++i) {
+    for (int i = 0; i < static_cast<int>(tab.visible_entries.size()); ++i) {
       if (grouped) {
-        int r = app.cur_tab().visible_entries[i];
-        if (r >= 0 && r < static_cast<int>(app.cur_tab().entries.size())) {
-          int t = static_cast<int>(app.cur_tab().entries[r].type);
+        int rr = tab.visible_entries[i];
+        if (rr >= 0 && rr < static_cast<int>(tab.entries.size())) {
+          int t = static_cast<int>(tab.entries[rr].type);
           if (t != prev_type) { acc += header_h; prev_type = t; }
         }
       }
-      double iy = static_cast<double>(content_y - app.cur_tab().scroll_px + acc);
+      double iy = static_cast<double>(content_y - tab.scroll_px + acc);
       double ih = static_cast<double>(entry_h);
       if (iy > y1) break;
       if (iy + ih >= y0 && !(x1 < content_x || x0 > content_x + content_w)) {
-        app.cur_tab().multi_selected.push_back(i);
-        if (app.cur_tab().selected_idx < 0) app.cur_tab().selected_idx = i;
+        tab.multi_selected.push_back(i);
+        if (tab.selected_idx < 0) tab.selected_idx = i;
       }
       acc += entry_h;
     }
-  } else if (app.cur_tab().view_mode == ViewMode::Compact) {
+  } else if (tab.view_mode == ViewMode::Compact) {
     double zf = app.zoom_pct / 100.0;
     int entry_h = static_cast<int>(24.0 * zf);
-    for (int i = 0; i < static_cast<int>(app.cur_tab().visible_entries.size()); ++i) {
-      double iy = static_cast<double>(content_y - app.cur_tab().scroll_px + i * entry_h);
+    for (int i = 0; i < static_cast<int>(tab.visible_entries.size()); ++i) {
+      double iy = static_cast<double>(content_y - tab.scroll_px + i * entry_h);
       double ih = static_cast<double>(entry_h);
       if (iy + ih < y0) continue;
       if (iy > y1) break;
       if (x1 < content_x || x0 > content_x + content_w) continue;
-      app.cur_tab().multi_selected.push_back(i);
-      if (app.cur_tab().selected_idx < 0) app.cur_tab().selected_idx = i;
+      tab.multi_selected.push_back(i);
+      if (tab.selected_idx < 0) tab.selected_idx = i;
     }
-  } else if (app.cur_tab().view_mode == ViewMode::Grid) {
+  } else if (tab.view_mode == ViewMode::Grid) {
+    // Recompute layout from THIS pane's width — the app.grid_* globals are
+    // overwritten by whichever pane drew last and go stale in split view.
     double zf = app.zoom_pct / 100.0;
-    int col_gap = app.grid_cell_gap;
+    int min_cell_w = static_cast<int>(110.0 * zf);
+    int col_gap = static_cast<int>(18.0 * zf);
     int row_gap = static_cast<int>(10.0 * zf);
-    int cell_w = app.grid_cell_size;
-    int cols = app.grid_cols;
-    int row_h = app.grid_row_h;
+    int cols = std::max(1, (content_w + col_gap) / (min_cell_w + col_gap));
+    int cell_w = (content_w - col_gap - (cols - 1) * col_gap) / cols;
 
     // Must mirror draw_grid_view exactly: icon_size, item_h, and the
     // horizontal centering offset all factor into cell placement.
@@ -4795,25 +4922,26 @@ void hit_test_marquee(AppState& app) {
     int text_gap = static_cast<int>(4.0 * zf);
     int label_h = static_cast<int>(32.0 * zf); // 2 lines of label text
     int item_h = icon_size + text_gap + label_h;
+    int row_h = item_h + row_gap;
 
     int grid_w = cols * cell_w + (cols - 1) * col_gap;
     int grid_offset_x = (content_w - grid_w) / 2;
 
-    int y = content_y + row_gap - app.cur_tab().scroll_px;
+    int gy = content_y + row_gap - tab.scroll_px;
 
     double clamp_x1 = std::min(x1, static_cast<double>(content_x + content_w));
-    for (int i = 0; i < static_cast<int>(app.cur_tab().visible_entries.size()); ++i) {
+    for (int i = 0; i < static_cast<int>(tab.visible_entries.size()); ++i) {
       int col = i % cols;
       int row = i / cols;
-      double cx = static_cast<double>(content_x + grid_offset_x + col * (cell_w + col_gap));
-      double cy = static_cast<double>(y + row * row_h);
-      double cw = static_cast<double>(cell_w);
-      double ch = static_cast<double>(item_h);
-      if (cy + ch < y0) continue;
-      if (cy > y1) break;
-      if (cx + cw < x0 || cx > clamp_x1) continue;
-      app.cur_tab().multi_selected.push_back(i);
-      if (app.cur_tab().selected_idx < 0) app.cur_tab().selected_idx = i;
+      double gx = static_cast<double>(content_x + grid_offset_x + col * (cell_w + col_gap));
+      double gyy = static_cast<double>(gy + row * row_h);
+      double gcw = static_cast<double>(cell_w);
+      double gch = static_cast<double>(item_h);
+      if (gyy + gch < y0) continue;
+      if (gyy > y1) break;
+      if (gx + gcw < x0 || gx > clamp_x1) continue;
+      tab.multi_selected.push_back(i);
+      if (tab.selected_idx < 0) tab.selected_idx = i;
     }
   }
 }
@@ -5002,38 +5130,21 @@ void draw_context_menu(AppState& app, cairo_t* cr) {
 // ── hit testing ──────────────────────────────────────────────────
 
 int hit_test_list(AppState& app, int x, int y) {
-  int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
-  int content_x = sidebar_w;
-  int content_y = app.top_bar_height + app.tab_bar_height;
-  int content_w = app.width - sidebar_w;
+  PaneViewRect r = pane_view_rect_at(app, x);
+  Tab& tab = pane_tab_at(app, x);
 
-  // Split pane adjustment
-  if (app.split_view) {
-    int div_w = 4;
-    int split = app.split_divider_x;
-    if (split <= 0) split = content_w / 2;
-    if (app.active_pane == 1) {
-      int right_x = std::min(content_x + content_w - 100, content_x + split + div_w / 2);
-      content_w = content_x + content_w - right_x;
-      content_x = right_x;
-    } else {
-      content_w = std::max(100, split - div_w / 2);
-    }
-  }
+  if (x < r.x || x >= r.x + r.w) return -1;
+  if (y < r.y || y >= r.y + r.h) return -1;
 
-  int view_h = app.height - content_y - app.status_bar_height;
   int col_header_h = app.entry_height;
-  int scroll = app.cur_tab().scroll_px;
+  int scroll = tab.scroll_px;
 
-  if (x < content_x || x >= content_x + content_w) return -1;
-  if (y < content_y || y >= content_y + view_h) return -1;
-
-  int rel_y = y - content_y - col_header_h + scroll;
+  int rel_y = y - r.y - col_header_h + scroll;
   if (rel_y < 0) return -1;
 
-  if (!app.cur_tab().group_by_type) {
+  if (!tab.group_by_type) {
     int idx = rel_y / app.entry_height;
-    if (idx < 0 || idx >= static_cast<int>(app.cur_tab().visible_entries.size()))
+    if (idx < 0 || idx >= static_cast<int>(tab.visible_entries.size()))
       return -1;
     return idx;
   }
@@ -5041,10 +5152,10 @@ int hit_test_list(AppState& app, int x, int y) {
   int hdr_h = static_cast<int>(app.entry_height * 0.55);
   int acc = 0;
   int prev_type = -1;
-  for (int vi = 0; vi < static_cast<int>(app.cur_tab().visible_entries.size()); ++vi) {
-    int r = app.cur_tab().visible_entries[vi];
-    if (r >= 0 && r < static_cast<int>(app.cur_tab().entries.size())) {
-      int t = static_cast<int>(app.cur_tab().entries[r].type);
+  for (int vi = 0; vi < static_cast<int>(tab.visible_entries.size()); ++vi) {
+    int ri = tab.visible_entries[vi];
+    if (ri >= 0 && ri < static_cast<int>(tab.entries.size())) {
+      int t = static_cast<int>(tab.entries[ri].type);
       if (t != prev_type) { acc += hdr_h; prev_type = t; }
     }
     if (rel_y >= acc && rel_y < acc + app.entry_height) return vi;
@@ -5054,50 +5165,40 @@ int hit_test_list(AppState& app, int x, int y) {
 }
 
 int hit_test_grid(AppState& app, int x, int y) {
-  int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
-  int content_x = sidebar_w;
-  int content_y = app.top_bar_height + app.tab_bar_height;
-  int content_w = app.width - sidebar_w;
+  PaneViewRect r = pane_view_rect_at(app, x);
+  Tab& tab = pane_tab_at(app, x);
 
-  // Split pane adjustment
-  if (app.split_view) {
-    int div_w = 4;
-    int split = app.split_divider_x;
-    if (split <= 0) split = content_w / 2;
-    if (app.active_pane == 1) {
-      int right_x = std::min(content_x + content_w - 100, content_x + split + div_w / 2);
-      content_w = content_x + content_w - right_x;
-      content_x = right_x;
-    } else {
-      content_w = std::max(100, split - div_w / 2);
-    }
-  }
+  if (x < r.x || x >= r.x + r.w) return -1;
+  if (y < r.y || y >= r.y + r.h) return -1;
 
-  int view_h = app.height - content_y - app.status_bar_height;
-
-  if (x < content_x || x >= content_x + content_w) return -1;
-  if (y < content_y || y >= content_y + view_h) return -1;
-
+  // Recompute layout from THIS pane's width on demand — the app.grid_*
+  // globals are overwritten by whichever pane drew last and go stale in
+  // split view.
   double zf = app.zoom_pct / 100.0;
-  int cell_size = app.grid_cell_size;
-  int col_gap = app.grid_cell_gap;
+  int min_cell_w = static_cast<int>(110.0 * zf);
+  int col_gap = static_cast<int>(18.0 * zf);
   int row_gap = static_cast<int>(10.0 * zf);
-  int cols = app.grid_cols;
-  int row_h = app.grid_row_h;
+  int cols = std::max(1, (r.w + col_gap) / (min_cell_w + col_gap));
+  int cell_size = (r.w - col_gap - (cols - 1) * col_gap) / cols;
+  int icon_size = std::min(cell_size - static_cast<int>(16.0 * zf),
+                           static_cast<int>(72.0 * zf));
+  int label_h = static_cast<int>(32.0 * zf);
+  int text_gap = static_cast<int>(4.0 * zf);
+  int item_h = icon_size + text_gap + label_h;
+  int row_h = item_h + row_gap;
   if (row_h <= 0) return -1;
-  int item_h = row_h - row_gap;
 
   int grid_w = cols * cell_size + (cols - 1) * col_gap;
-  int grid_offset_x = (content_w - grid_w) / 2;
+  int grid_offset_x = (r.w - grid_w) / 2;
 
-  int rel_x = x - content_x - grid_offset_x;
-  int rel_y = y - content_y - row_gap + app.cur_tab().scroll_px;
+  int rel_x = x - r.x - grid_offset_x;
+  int rel_y = y - r.y - row_gap + tab.scroll_px;
 
   int col = (rel_x + col_gap / 2) / (cell_size + col_gap);
   int row = (rel_y + row_gap / 2) / row_h;
 
   int idx = row * cols + col;
-  if (idx < 0 || idx >= static_cast<int>(app.cur_tab().visible_entries.size()))
+  if (idx < 0 || idx >= static_cast<int>(tab.visible_entries.size()))
     return -1;
 
   int cx = col * (cell_size + col_gap);
@@ -5904,6 +6005,50 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
       }
 
       cairo_restore(cr);
+    }
+
+    ly = content_y + 120;
+
+    // Independent views per directory toggle
+    // (skipped while the terminal dropdown is open so the list stays on top)
+    if (!app.settings_dropdown_open) {
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_set_font_size(cr, 13);
+    cairo_move_to(cr, left_x, ly + 14);
+    cairo_show_text(cr, "Independent views per folder");
+
+    {
+      double iv_toggle_x = left_x + 220;
+      double iv_toggle_y = ly - 2;
+      double iv_toggle_w = 40;
+      double iv_toggle_h = 22;
+      app.settings_hit_indep_views_toggle[0] = iv_toggle_x;
+      app.settings_hit_indep_views_toggle[1] = iv_toggle_y;
+      app.settings_hit_indep_views_toggle[2] = iv_toggle_w;
+      app.settings_hit_indep_views_toggle[3] = iv_toggle_h;
+
+      bool iv_hov = (app.pointerX >= iv_toggle_x && app.pointerX < iv_toggle_x + iv_toggle_w &&
+                     app.pointerY >= iv_toggle_y && app.pointerY < iv_toggle_y + iv_toggle_h);
+      if (iv_hov) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.1);
+        draw_rounded_rect(cr, iv_toggle_x - 2, iv_toggle_y - 2, iv_toggle_w + 4, iv_toggle_h + 4, iv_toggle_h / 2 + 2);
+        cairo_fill(cr);
+      }
+
+      // Toggle track
+      cairo_set_source_rgba(cr, app.settings_independent_dir_views ? app.accent_r : app.outline_r,
+                            app.settings_independent_dir_views ? app.accent_g : app.outline_g,
+                            app.settings_independent_dir_views ? app.accent_b : app.outline_b,
+                            0.6);
+      draw_rounded_rect(cr, iv_toggle_x, iv_toggle_y, iv_toggle_w, iv_toggle_h, iv_toggle_h / 2);
+      cairo_fill(cr);
+
+      // Toggle knob
+      double iv_knob_x = app.settings_independent_dir_views ? iv_toggle_x + iv_toggle_w - iv_toggle_h : iv_toggle_x;
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
+      cairo_arc(cr, iv_knob_x + iv_toggle_h / 2, iv_toggle_y + iv_toggle_h / 2, iv_toggle_h / 2 - 2, 0, 2 * M_PI);
+      cairo_fill(cr);
+    }
     }
   }
 
@@ -7737,7 +7882,8 @@ void draw_compact_view(AppState& app, cairo_t* cr, int content_x,
 
 // ── Hit-test: tree view ──────────────────────────────────────────
 int hit_test_tree(AppState& app, int x, int y, bool for_click) {
-  auto& tab = app.cur_tab();
+  PaneViewRect r = pane_view_rect_at(app, x);
+  Tab& tab = pane_tab_at(app, x);
   if (tab.tree_entries.empty()) build_tree_entries(app);
   if (tab.tree_entries.empty()) return -1;
 
@@ -7746,31 +7892,11 @@ int hit_test_tree(AppState& app, int x, int y, bool for_click) {
   int indent_step = static_cast<int>(24.0 * zf);
   int arrow_w = static_cast<int>(16.0 * zf);
 
-  int content_x, content_y;
-  {
-    int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
-    int info_panel_w = app.info_panel_open ? app.info_panel_width : 0;
-    content_x = sidebar_w;
-    (void)info_panel_w; (void)sidebar_w;
-
-    if (app.split_view) {
-      int s_w = app.sidebar_expanded ? app.sidebar_width : 0;
-      int content_x_global = s_w;
-      int content_w_global = app.width - s_w - (app.info_panel_open ? app.info_panel_width : 0);
-      int split = app.split_divider_x;
-      if (split <= 0) split = content_w_global / 2;
-      int div_w = 4;
-      int left_w = std::max(100, split - div_w / 2);
-      int right_x = std::min(content_x_global + content_w_global - 100, content_x_global + split + div_w / 2);
-      (void)left_w;
-      if (app.active_pane == 0)
-        content_x = content_x_global;
-      else
-        content_x = right_x;
-    }
-    content_y = app.top_bar_height + app.tab_bar_height;
-    if (app.split_view) content_y += app.top_bar_height;
-  }
+  int content_x = r.x;
+  int content_y = r.y;
+  if (x < content_x || x >= content_x + r.w || y < content_y ||
+      y >= content_y + r.h)
+    return -1;
 
   int rel_y = y - content_y + tab.scroll_px;
   int idx = rel_y / entry_h;
@@ -7799,16 +7925,15 @@ int hit_test_tree(AppState& app, int x, int y, bool for_click) {
 
 // ── Hit-test: compact view ───────────────────────────────────────
 int hit_test_compact(AppState& app, int x, int y) {
-  auto& tab = app.cur_tab();
+  PaneViewRect r = pane_view_rect_at(app, x);
+  Tab& tab = pane_tab_at(app, x);
   if (tab.visible_entries.empty()) return -1;
+  if (x < r.x || x >= r.x + r.w || y < r.y || y >= r.y + r.h) return -1;
 
   double zf = app.zoom_pct / 100.0;
   int entry_h = static_cast<int>(24.0 * zf);
 
-  int content_y = app.top_bar_height + app.tab_bar_height;
-  if (app.split_view) content_y += app.top_bar_height;
-
-  int rel_y = y - content_y + tab.scroll_px;
+  int rel_y = y - r.y + tab.scroll_px;
   int idx = rel_y / entry_h;
   if (idx < 0 || idx >= static_cast<int>(tab.visible_entries.size())) return -1;
   return idx;

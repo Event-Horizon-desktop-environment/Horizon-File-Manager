@@ -1747,10 +1747,24 @@ static void scan_entries(
   }
 }
 
+// Pin cur_tab() to the pane that requested the in-flight scan for the
+// duration of an apply, so helpers inside (and build_tree_entries) resolve
+// to the target pane even if focus sits on the other split pane.
+struct ScanPaneGuard {
+  AppState& app;
+  int saved;
+  explicit ScanPaneGuard(AppState& a)
+      : app(a), saved(a.active_pane) {
+    if (a.split_view && a.scan_target_pane == 1) a.active_pane = 1;
+  }
+  ~ScanPaneGuard() { app.active_pane = saved; }
+};
+
 // Swap a finished background scan into the active tab. Runs on the UI
 // thread — either inline from reload_dir's fast path or polled from the
 // main loop once the worker finishes.
 void apply_scan_result(AppState& app, bool is_progress) {
+  ScanPaneGuard pane_guard(app);
   const bool tr = trace::enabled().load(std::memory_order_relaxed);
   if (tr)
     trace::log("apply: begin ready=%d progress=%d n=%zu",
@@ -1952,6 +1966,10 @@ void reload_dir(AppState& app) {
     const char* e = std::getenv("EH_BENCH");
     return e && *e && e[0] != '0';
   }();
+
+  // Remember the requesting pane up front so a deferred scan applies back
+  // to it even if focus moves to the other split pane in the meantime.
+  app.scan_target_pane = app.active_pane ? 1 : 0;
 
   reset_preview(app);
   hide_tooltip(app);
@@ -2235,6 +2253,41 @@ static void save_dir_props_before_leave(AppState& app) {
   write_dir_props(old_dir, p);
 }
 
+// Snapshot the current tab's view settings into the per-directory cache
+static void remember_independent_view(AppState& app) {
+  if (!app.independent_dir_views) return;
+  const std::string& p = app.cur_tab().current_path;
+  if (p.empty() || p == "computer://" || p == "trash://" ||
+      p.rfind("recent://", 0) == 0)
+    return;
+  auto& t = app.cur_tab();
+  AppState::DirViewState st;
+  st.view_mode = t.view_mode;
+  st.sort_field = t.sort_field;
+  st.sort_descending = t.sort_descending;
+  st.group_by_type = t.group_by_type;
+  st.group_field = t.group_field;
+  app.dir_view_states[p] = st;
+}
+
+// Restore the cached view settings for `path` into the current tab
+static void recall_independent_view(AppState& app, const std::string& path) {
+  if (!app.independent_dir_views) return;
+  if (path == "computer://" || path == "trash://" ||
+      path.rfind("recent://", 0) == 0)
+    return;
+  auto it = app.dir_view_states.find(path);
+  if (it == app.dir_view_states.end()) return;
+  auto& t = app.cur_tab();
+  t.view_mode = it->second.view_mode;
+  t.sort_field = it->second.sort_field;
+  t.sort_descending = it->second.sort_descending;
+  t.group_by_type = it->second.group_by_type;
+  t.group_field = it->second.group_field;
+  if (t.view_mode != ViewMode::Computer)
+    app.last_browser_view_mode = t.view_mode;
+}
+
 void navigate_to(AppState& app, const std::string& path) {
   const bool startup_nav = app.startup_loading;
   auto nav_mark = [&](const char* what) {
@@ -2256,6 +2309,7 @@ void navigate_to(AppState& app, const std::string& path) {
   } nav_clock{std::chrono::steady_clock::now()};
   (void)nav_mark;
   save_dir_props_before_leave(app);
+  remember_independent_view(app);
   nav_mark("props_saved");
   // Handle virtual "computer://" path
   if (path == "computer://") {
@@ -2295,6 +2349,9 @@ void navigate_to(AppState& app, const std::string& path) {
   app.cur_tab().scroll_smooth_current = 0;
   app.cur_tab().scroll_smooth_target = 0;
 
+  // Independent views per directory: restore this folder's remembered view
+  recall_independent_view(app, resolved);
+
   // View/sort settings are global — keep the current ones across folders.
   // Only recover if we were in the virtual computer view.
   if (app.cur_tab().view_mode == ViewMode::Computer) {
@@ -2322,11 +2379,13 @@ void navigate_up(AppState& app) {
 void navigate_back(AppState& app) {
   if (app.cur_tab().nav_history.empty()) return;
   save_dir_props_before_leave(app);
+  remember_independent_view(app);
   app.cur_tab().nav_forward.push_back(app.cur_tab().current_path);
   app.cur_tab().current_path = app.cur_tab().nav_history.back();
   app.cur_tab().nav_history.pop_back();
   app.cur_tab().selected_idx = -1;
   app.cur_tab().scroll_px = 0;
+  recall_independent_view(app, app.cur_tab().current_path);
   reload_dir(app);
   draw(app);
 }
@@ -2334,11 +2393,13 @@ void navigate_back(AppState& app) {
 void navigate_forward(AppState& app) {
   if (app.cur_tab().nav_forward.empty()) return;
   save_dir_props_before_leave(app);
+  remember_independent_view(app);
   app.cur_tab().nav_history.push_back(app.cur_tab().current_path);
   app.cur_tab().current_path = app.cur_tab().nav_forward.back();
   app.cur_tab().nav_forward.pop_back();
   app.cur_tab().selected_idx = -1;
   app.cur_tab().scroll_px = 0;
+  recall_independent_view(app, app.cur_tab().current_path);
   reload_dir(app);
   draw(app);
 }
@@ -3520,6 +3581,77 @@ void close_tab(AppState& app) {
   app.tabs.erase(app.tabs.begin() + idx);
   if (idx >= static_cast<int>(app.tabs.size()))
     app.active_tab = static_cast<int>(app.tabs.size()) - 1;
+  reload_dir(app);
+}
+
+// ── split pane ───────────────────────────────────────────────────
+
+// Copy path + persistent view settings from `src` into `dst`, resetting all
+// transient state (history, scroll, selection). Mirrors Dolphin's secondary
+// view: same folder as the source view, clean navigation state.
+static void adopt_tab_state(Tab& dst, const Tab& src) {
+  dst.current_path = src.current_path;
+  dst.view_mode = src.view_mode;
+  dst.sort_field = src.sort_field;
+  dst.sort_descending = src.sort_descending;
+  dst.group_by_type = src.group_by_type;
+  dst.group_field = src.group_field;
+  dst.nav_history.clear();
+  dst.nav_forward.clear();
+  dst.selected_idx = -1;
+  dst.hover_idx = -1;
+  dst.sel_anchor = -1;
+  dst.multi_selected.clear();
+  dst.scroll_px = 0;
+  dst.scroll_smooth_current = 0;
+  dst.scroll_smooth_target = 0;
+}
+
+void enter_split_view(AppState& app, int src_tab_idx,
+                      const std::string& target_dir) {
+  if (app.split_view) return;
+  app.split_view = true;
+  if (app.split_divider_x <= 0) app.split_divider_x = app.width / 2;
+  int src = src_tab_idx;
+  if (src < 0 || src >= static_cast<int>(app.tabs.size()))
+    src = app.active_tab;
+  adopt_tab_state(app.right_pane, app.tabs[src]);
+  if (!target_dir.empty()) app.right_pane.current_path = target_dir;
+  // Activate the newly created pane (Dolphin behavior)
+  app.active_pane = 1;
+  reload_dir(app);
+}
+
+void exit_split_view(AppState& app) {
+  if (!app.split_view) return;
+  if (app.active_pane == 1) {
+    // Right pane is active: it survives and becomes the single view,
+    // replacing the left pane's folder ("close active view").
+    ViewMode vm = app.right_pane.view_mode;
+    app.tabs[app.active_tab] = std::move(app.right_pane);
+    app.right_pane = Tab{};
+    if (vm != ViewMode::Computer) app.last_browser_view_mode = vm;
+  } else {
+    app.right_pane = Tab{};
+  }
+  app.split_view = false;
+  app.active_pane = 0;
+}
+
+void sync_split_panes(AppState& app) {
+  if (!app.split_view || app.tabs.empty()) return;
+  adopt_tab_state(app.right_pane, app.tabs[app.active_tab]);
+  reload_dir(app);
+}
+
+void open_tab_in_active_pane(AppState& app, int tab_idx) {
+  if (tab_idx < 0 || tab_idx >= static_cast<int>(app.tabs.size())) return;
+  if (!app.split_view || app.active_pane == 0) {
+    app.active_tab = tab_idx;
+    reload_dir(app);
+    return;
+  }
+  adopt_tab_state(app.right_pane, app.tabs[tab_idx]);
   reload_dir(app);
 }
 

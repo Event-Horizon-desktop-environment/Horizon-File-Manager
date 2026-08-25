@@ -736,6 +736,11 @@ void handle_settings_click(AppState& app, int x, int y, int button) {
     app.settings_pendingRedraw = true;
     return;
   }
+  if (hit == -21) {
+    app.settings_independent_dir_views = !app.settings_independent_dir_views;
+    app.settings_pendingRedraw = true;
+    return;
+  }
   if (hit >= 0) {
     app.settings_default_term_idx = hit + app.settings_dropdown_scroll;
     app.settings_dropdown_open = false;
@@ -954,6 +959,16 @@ static bool create_window(AppState& app) {
     app.arrow_up_svg      = eh::shell::asset::load_asset_svg("UI", "arrow-up.svg", kArrowIconLoadPx);
     app.search_svg        = eh::shell::asset::load_asset_svg("UI", "search.svg", kArrowIconLoadPx);
     app.folder_search_svg = eh::shell::asset::load_asset_svg("UI", "folder-search.svg", kArrowIconLoadPx);
+  app.view_list_svg     = eh::shell::asset::load_asset_svg("UI", "view-list.svg", kArrowIconLoadPx);
+  app.view_grid_svg     = eh::shell::asset::load_asset_svg("UI", "view-grid.svg", kArrowIconLoadPx);
+  app.view_compact_svg  = eh::shell::asset::load_asset_svg("UI", "view-compact.svg", kArrowIconLoadPx);
+  app.view_tree_svg     = eh::shell::asset::load_asset_svg("UI", "view-tree.svg", kArrowIconLoadPx);
+  app.settings_gear_svg = eh::shell::asset::load_asset_svg("UI", "settings-gear.svg", kArrowIconLoadPx);
+  app.three_dots_svg    = eh::shell::asset::load_asset_svg("UI", "three-dots.svg", kArrowIconLoadPx);
+  app.home_nav_svg      = eh::shell::asset::load_asset_svg("UI", "home.svg", kArrowIconLoadPx);
+  app.music_nav_svg     = eh::shell::asset::load_asset_svg("UI", "music.svg", kArrowIconLoadPx);
+  app.video_nav_svg     = eh::shell::asset::load_asset_svg("UI", "video.svg", kArrowIconLoadPx);
+  app.documents_nav_svg = eh::shell::asset::load_asset_svg("UI", "documents.svg", kArrowIconLoadPx);
     app.mounted_svg       = eh::shell::asset::load_asset_svg("UI", "Mounted.svg", kArrowIconLoadPx);
   });
   app.icon_desktop_svg    = eh::shell::asset::load_asset_svg("UI", "icon-desktop.svg", 64);
@@ -1197,25 +1212,39 @@ static bool create_window(AppState& app) {
         if (eh::file_browser::dir_stats_drain(app)) need_redraw = true;
       }
 
-      // Directory content refresh
-      {
-        struct stat dir_st;
-        if (stat(app.cur_tab().current_path.c_str(), &dir_st) == 0) {
+      // Directory content refresh (active pane, plus the inactive split pane)
+      // Skipped while a scan is already in flight or deferred: there is a
+      // single scan slot, and stealing it would cancel a pending navigation.
+      if (app.scan_active_path.empty() && !app.scan_apply_deferred) {
+        auto refresh_pane = [&app]() -> bool {
+          struct stat dir_st;
+          if (::stat(app.cur_tab().current_path.c_str(), &dir_st) != 0)
+            return false;
           int64_t new_mtime = static_cast<int64_t>(dir_st.st_mtime);
-          if (new_mtime != app.cur_tab().dir_mtime) {
-            int saved_scroll = app.cur_tab().scroll_px;
-            int saved_selected = app.cur_tab().selected_idx;
+          if (new_mtime == app.cur_tab().dir_mtime) return false;
+          int saved_scroll = app.cur_tab().scroll_px;
+          int saved_selected = app.cur_tab().selected_idx;
 
-            reload_dir(app);
+          reload_dir(app);
 
-            app.cur_tab().scroll_px = saved_scroll;
-            app.cur_tab().scroll_smooth_current = static_cast<double>(saved_scroll);
-            app.cur_tab().scroll_smooth_target = static_cast<double>(saved_scroll);
-            app.cur_tab().selected_idx = saved_selected;
+          app.cur_tab().scroll_px = saved_scroll;
+          app.cur_tab().scroll_smooth_current = static_cast<double>(saved_scroll);
+          app.cur_tab().scroll_smooth_target = static_cast<double>(saved_scroll);
+          app.cur_tab().selected_idx = saved_selected;
+          return true;
+        };
 
-            need_redraw = true;
-          }
+        bool refreshed = refresh_pane();
+        if (app.split_view && app.active_pane == 0) {
+          // Inactive right pane: reload_dir targets the active pane, so
+          // flip panes around the call to refresh it too. The scan result
+          // is tagged with the requesting pane, so a deferred apply still
+          // lands in the right pane after active_pane is restored.
+          app.active_pane = 1;
+          refreshed = refresh_pane() || refreshed;
+          app.active_pane = 0;
         }
+        if (refreshed) need_redraw = true;
       }
 
       if (need_redraw) draw(app);
@@ -1598,6 +1627,16 @@ static bool create_window(AppState& app) {
   app.arrow_up_svg    = eh::shell::asset::load_asset_svg("UI", "arrow-up.svg", kArrowIconLoadPx);
   app.search_svg      = eh::shell::asset::load_asset_svg("UI", "search.svg", kArrowIconLoadPx);
   app.folder_search_svg = eh::shell::asset::load_asset_svg("UI", "folder-search.svg", kArrowIconLoadPx);
+  app.view_list_svg     = eh::shell::asset::load_asset_svg("UI", "view-list.svg", kArrowIconLoadPx);
+  app.view_grid_svg     = eh::shell::asset::load_asset_svg("UI", "view-grid.svg", kArrowIconLoadPx);
+  app.view_compact_svg  = eh::shell::asset::load_asset_svg("UI", "view-compact.svg", kArrowIconLoadPx);
+  app.view_tree_svg     = eh::shell::asset::load_asset_svg("UI", "view-tree.svg", kArrowIconLoadPx);
+  app.settings_gear_svg = eh::shell::asset::load_asset_svg("UI", "settings-gear.svg", kArrowIconLoadPx);
+  app.three_dots_svg    = eh::shell::asset::load_asset_svg("UI", "three-dots.svg", kArrowIconLoadPx);
+  app.home_nav_svg      = eh::shell::asset::load_asset_svg("UI", "home.svg", kArrowIconLoadPx);
+  app.music_nav_svg     = eh::shell::asset::load_asset_svg("UI", "music.svg", kArrowIconLoadPx);
+  app.video_nav_svg     = eh::shell::asset::load_asset_svg("UI", "video.svg", kArrowIconLoadPx);
+  app.documents_nav_svg = eh::shell::asset::load_asset_svg("UI", "documents.svg", kArrowIconLoadPx);
   app.mounted_svg     = eh::shell::asset::load_asset_svg("UI", "Mounted.svg", kArrowIconLoadPx);
   app.icon_desktop_svg    = eh::shell::asset::load_asset_svg("UI", "icon-desktop.svg", 64);
   app.icon_documents_svg  = eh::shell::asset::load_asset_svg("UI", "icon-documents.svg", 64);
@@ -1826,6 +1865,16 @@ static bool create_window(AppState& app) {
   app.arrow_up_svg    = eh::shell::asset::load_asset_svg("UI", "arrow-up.svg", kArrowIconLoadPx);
   app.search_svg      = eh::shell::asset::load_asset_svg("UI", "search.svg", kArrowIconLoadPx);
   app.folder_search_svg = eh::shell::asset::load_asset_svg("UI", "folder-search.svg", kArrowIconLoadPx);
+  app.view_list_svg     = eh::shell::asset::load_asset_svg("UI", "view-list.svg", kArrowIconLoadPx);
+  app.view_grid_svg     = eh::shell::asset::load_asset_svg("UI", "view-grid.svg", kArrowIconLoadPx);
+  app.view_compact_svg  = eh::shell::asset::load_asset_svg("UI", "view-compact.svg", kArrowIconLoadPx);
+  app.view_tree_svg     = eh::shell::asset::load_asset_svg("UI", "view-tree.svg", kArrowIconLoadPx);
+  app.settings_gear_svg = eh::shell::asset::load_asset_svg("UI", "settings-gear.svg", kArrowIconLoadPx);
+  app.three_dots_svg    = eh::shell::asset::load_asset_svg("UI", "three-dots.svg", kArrowIconLoadPx);
+  app.home_nav_svg      = eh::shell::asset::load_asset_svg("UI", "home.svg", kArrowIconLoadPx);
+  app.music_nav_svg     = eh::shell::asset::load_asset_svg("UI", "music.svg", kArrowIconLoadPx);
+  app.video_nav_svg     = eh::shell::asset::load_asset_svg("UI", "video.svg", kArrowIconLoadPx);
+  app.documents_nav_svg = eh::shell::asset::load_asset_svg("UI", "documents.svg", kArrowIconLoadPx);
   app.mounted_svg     = eh::shell::asset::load_asset_svg("UI", "Mounted.svg", kArrowIconLoadPx);
   app.icon_desktop_svg    = eh::shell::asset::load_asset_svg("UI", "icon-desktop.svg", 64);
   app.icon_documents_svg  = eh::shell::asset::load_asset_svg("UI", "icon-documents.svg", 64);

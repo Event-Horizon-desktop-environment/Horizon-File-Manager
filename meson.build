@@ -211,6 +211,14 @@ install_data(
   rename: 'horizon-filesv2.svg',
 )
 
+# ── UI icon assets (top-bar buttons, folder glyphs, etc.) ───────────
+# Installed to <prefix>/share/event-horizon/assets/UI — one of the paths
+# eh::shell::asset::find_asset() searches at runtime.
+install_subdir(
+  join_paths(meson.project_source_root(), 'assets', 'UI'),
+  install_dir: join_paths(get_option('datadir'), 'event-horizon', 'assets'),
+)
+
 
 # ── Tests ─────────────────────────────────────────────────────────────
 test_cpp_args = cpp_args

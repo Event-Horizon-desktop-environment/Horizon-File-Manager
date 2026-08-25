@@ -165,7 +165,13 @@ static cairo_surface_t* load_svg(const std::string& path, int size) {
         float sc = static_cast<float>(size) / std::max(pw, ph);
         int tw = std::max(1, static_cast<int>(pw * sc));
         int th = std::max(1, static_cast<int>(ph * sc));
-        auto* scaled = static_cast<unsigned char*>(std::malloc(static_cast<std::size_t>(tw) * th * 4));
+        // calloc: cairo's default OVER operator blends against the
+        // destination, so malloc'd garbage in transparent/soft-edge pixels
+        // used to leak through as colorful noise around photorealistic
+        // icons (e.g. user-trash-full). SOURCE below would also fix it;
+        // zeroed memory is defense in depth for any future paint path.
+        auto* scaled = static_cast<unsigned char*>(
+            std::calloc(static_cast<std::size_t>(tw) * th, 4));
         if (scaled) {
           cairo_surface_t* src = cairo_image_surface_create_for_data(
               png_rgba, CAIRO_FORMAT_ARGB32, pw, ph, pw * 4);
@@ -183,6 +189,7 @@ static cairo_surface_t* load_svg(const std::string& path, int size) {
           cairo_surface_t* dst = cairo_image_surface_create_for_data(
               scaled, CAIRO_FORMAT_ARGB32, tw, th, tw * 4);
           cairo_t* cr = cairo_create(dst);
+          cairo_set_operator(cr, CAIRO_OPERATOR_SOURCE);
           cairo_scale(cr, static_cast<double>(tw) / pw, static_cast<double>(th) / ph);
           cairo_set_source_surface(cr, src, 0, 0);
           cairo_paint(cr);

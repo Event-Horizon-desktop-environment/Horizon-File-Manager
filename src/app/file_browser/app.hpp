@@ -38,6 +38,25 @@ bool handle_key(AppState& app, uint32_t keycode, uint32_t state,
 /// Navigate to a directory. Updates history, reloads listing.
 void navigate_to(AppState& app, const std::string& path);
 
+/// Turn split view on: the right pane opens fresh (same folder as tab
+/// `src_tab_idx`, empty history/selection) and becomes the active pane.
+/// Non-empty `target_dir` overrides the starting folder.
+void enter_split_view(AppState& app, int src_tab_idx,
+                      const std::string& target_dir = {});
+
+/// Turn split view off. The active pane's folder survives: if the right
+/// pane was active its content is promoted into the single view
+/// (Dolphin "close active view" behavior).
+void exit_split_view(AppState& app);
+
+/// Re-sync the right pane to the current tab after a structural tab change
+/// (close all / close others / move to window) so it never shows a stale dir.
+void sync_split_panes(AppState& app);
+
+/// Activate a tab from the tab bar: switches tabs[] when the left pane is
+/// active; loads the tab into the right pane when it has focus.
+void open_tab_in_active_pane(AppState& app, int tab_idx);
+
 /// Navigate to the parent directory.
 void navigate_up(AppState& app);
 

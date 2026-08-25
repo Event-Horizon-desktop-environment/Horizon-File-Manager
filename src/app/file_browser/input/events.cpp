@@ -323,6 +323,17 @@ int settings_hit_test(AppState& app, int x, int y) {
     }
   }
 
+  // Independent views per directory toggle (General tab)
+  if (!app.settings_dropdown_open) {
+    const int toggle_x = left_x + 220;
+    const int toggle_y = content_y + 120 - 2;
+    const int toggle_w = 40;
+    const int toggle_h = 22;
+    if (x >= toggle_x && x < toggle_x + toggle_w &&
+        y >= toggle_y && y < toggle_y + toggle_h)
+      return -21;
+  }
+
   return -1;
 }
 
@@ -2176,9 +2187,9 @@ void handle_click(AppState& app, int x, int y, int button) {
             // Left-click on tab — set up drag potential
             app.tab_drag_from = static_cast<int>(i);
             app.tab_drag_start_x = x;
-            if (static_cast<int>(i) != app.active_tab) {
-              app.active_tab = static_cast<int>(i);
-              reload_dir(app);
+            if (static_cast<int>(i) != app.active_tab ||
+                (app.split_view && app.active_pane == 1)) {
+              open_tab_in_active_pane(app, static_cast<int>(i));
             }
             draw(app);
             return;
@@ -2551,6 +2562,9 @@ void handle_click(AppState& app, int x, int y, int button) {
             AppState::menu_item(AppState::ContextMenuAction::CloseAllTabs, "Close All Tabs"));
           app.context_menu_items.push_back(
             AppState::menu_item(AppState::ContextMenuAction::DuplicateTab, "Duplicate Tab"));
+          app.context_menu_items.push_back(
+            AppState::menu_item(AppState::ContextMenuAction::ToggleSplitView,
+                                app.split_view ? "Exit Split View" : "Split View"));
           app.context_menu_items.push_back(
             AppState::menu_item(AppState::ContextMenuAction::Separator, ""));
           app.context_menu_items.push_back(
@@ -5446,13 +5460,21 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   }
 
   if (sym == XKB_KEY_F3) {
-    app.split_view = !app.split_view;
-    if (app.split_view) {
-      app.right_pane = app.cur_tab();
-      app.split_divider_x = app.width / 2;
-      app.active_pane = 0;
+    if (!app.split_view) {
+      // With exactly one folder selected, split opens at that folder
+      std::string sel_dir;
+      const auto& tab = app.cur_tab();
+      if (tab.selected_idx >= 0 &&
+          tab.selected_idx < static_cast<int>(tab.visible_entries.size()) &&
+          tab.multi_selected.size() <= 1) {
+        int ri = tab.visible_entries[tab.selected_idx];
+        if (ri >= 0 && ri < static_cast<int>(tab.entries.size()) &&
+            tab.entries[ri].is_dir)
+          sel_dir = tab.entries[ri].path;
+      }
+      enter_split_view(app, app.active_tab, sel_dir);
     } else {
-      app.active_pane = 0;
+      exit_split_view(app);
     }
     draw(app);
     return true;

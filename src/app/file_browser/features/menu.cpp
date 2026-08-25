@@ -1153,7 +1153,9 @@ void execute_context_menu_action(AppState& app, int item_idx) {
         app.tabs.clear();
         app.tabs.push_back(std::move(kept));
         app.active_tab = 0;
+        app.active_pane = 0;
         reload_dir(app);
+        sync_split_panes(app);
       }
       draw(app);
       return;
@@ -1163,7 +1165,9 @@ void execute_context_menu_action(AppState& app, int item_idx) {
       app.tabs.emplace_back();
       app.tabs[0].current_path = home_dir();
       app.active_tab = 0;
+      app.active_pane = 0;
       reload_dir(app);
+      sync_split_panes(app);
       draw(app);
       return;
     }
@@ -1189,6 +1193,16 @@ void execute_context_menu_action(AppState& app, int item_idx) {
       draw(app);
       return;
     }
+    if (action == AppState::ContextMenuAction::ToggleSplitView) {
+      if (!app.split_view) {
+        // Split at the right-clicked tab (falls back to the active tab)
+        enter_split_view(app, app.context_menu_tab_idx);
+      } else {
+        exit_split_view(app);
+      }
+      draw(app);
+      return;
+    }
     if (action == AppState::ContextMenuAction::OpenInNewWindow) {
       if (app.context_menu_tab_idx >= 0 &&
           app.context_menu_tab_idx < static_cast<int>(app.tabs.size())) {
@@ -1209,7 +1223,9 @@ void execute_context_menu_action(AppState& app, int item_idx) {
           app.active_tab = static_cast<int>(app.tabs.size()) - 1;
         else
           app.active_tab = idx;
+        app.active_pane = 0;
         reload_dir(app);
+        sync_split_panes(app);
       }
       draw(app);
       return;
@@ -2126,6 +2142,7 @@ void open_settings(AppState& app) {
   // stored in the main settings.toml.
   app.settings_zoom_pct = app.zoom_pct;
   app.settings_folders_before_files = app.folders_before_files;
+  app.settings_independent_dir_views = app.independent_dir_views;
   app.settings_opacity_pct = app.surface_opacity_pct;
   app.settings_sidebar_opacity_pct = app.sidebar_opacity_pct;
   app.settings_topbar_opacity_pct = app.topbar_opacity_pct;
@@ -2199,6 +2216,7 @@ void save_file_browser_settings(AppState& app) {
   fbs.col_target = app.col_target;
   fbs.dynamic_view = app.dynamic_view;
   fbs.per_folder_props = app.per_folder_props;
+  fbs.independent_dir_views = app.independent_dir_views;
   fbs.show_hidden = app.show_hidden;
   fbs.favorites = app.favorites;
   fbs.window_controls_left = app.window_controls_left;
@@ -2234,6 +2252,7 @@ void settings_apply(AppState& app) {
   fbs.col_target = app.col_target;
   fbs.show_hidden = app.show_hidden;
   fbs.favorites = app.favorites;
+  fbs.independent_dir_views = app.settings_independent_dir_views;
   (void)eh::config::write_file_browser_toml(fbs);
 
   // Terminal preference is a global setting — update the main config
@@ -2344,6 +2363,7 @@ void reload_settings_from_config(AppState& app) {
   app.col_target = fbs.col_target;
   app.dynamic_view = fbs.dynamic_view;
   app.per_folder_props = fbs.per_folder_props;
+  app.independent_dir_views = fbs.independent_dir_views;
   app.show_hidden = fbs.show_hidden;
   app.sort_natural = fbs.sort_natural;
   app.sort_case_sensitive = fbs.sort_case_sensitive;

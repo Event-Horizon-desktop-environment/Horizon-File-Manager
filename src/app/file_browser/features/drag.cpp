@@ -575,6 +575,22 @@ bool has_mime(const DropOfferData& od, const std::string_view target) {
 
 } // namespace
 
+// While dragging, activate whichever split pane is under the cursor so all
+// drop-target hit testing (and the eventual drop) acts on that pane —
+// mirrors Dolphin activating a pane when files are dragged onto it.
+static void activate_pane_under_dnd(AppState& app, int sx) {
+  if (!app.split_view) return;
+  int s_w = app.sidebar_expanded ? app.sidebar_width : 0;
+  int content_w = app.width - s_w - (app.info_panel_open ? app.info_panel_width : 0);
+  int split = app.split_divider_x;
+  if (split <= 0) split = content_w / 2;
+  int pane = (sx >= s_w + split + 4) ? 1 : 0;
+  if (pane != app.active_pane) {
+    app.active_pane = pane;
+    app.pendingRedraw = true;
+  }
+}
+
 void data_device_data_offer(void* data, wl_data_device*, wl_data_offer* offer) {
   auto& app = *static_cast<AppState*>(data);
   if (app.drop_offer) {
@@ -608,6 +624,7 @@ void data_device_enter(void* data, wl_data_device*, uint32_t serial, wl_surface*
   int sy = wl_fixed_to_int(y);
   app.drop_x = sx;
   app.drop_y = sy;
+  activate_pane_under_dnd(app, sx);
 
   // Check tab bar
   int tab_bar_top = app.top_bar_height;
@@ -708,6 +725,7 @@ void data_device_motion(void* data, wl_data_device*, uint32_t, wl_fixed_t x, wl_
   int sy = wl_fixed_to_int(y);
   app.drop_x = sx;
   app.drop_y = sy;
+  activate_pane_under_dnd(app, sx);
 
   // Re-accept the offer on every motion so the compositor knows we're still interested
   if (app.drop_offer) {

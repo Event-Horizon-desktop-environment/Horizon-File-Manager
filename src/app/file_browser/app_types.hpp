@@ -319,6 +319,16 @@ struct AppState {
   bool split_divider_dragging = false;
   Tab right_pane;
 
+  // ── Independent views per directory (session cache) ──
+  struct DirViewState {
+    ViewMode view_mode = ViewMode::List;
+    SortField sort_field = SortField::Name;
+    bool sort_descending = false;
+    bool group_by_type = false;
+    int group_field = 0;
+  };
+  std::unordered_map<std::string, DirViewState> dir_view_states;
+
   // ── Main-view scrollbar (click/drag) ──
   struct ScrollbarRect {
     int x = 0, y = 0, w = 0, h = 0;
@@ -360,6 +370,10 @@ struct AppState {
   // Identity of the in-flight scan (written/read on UI thread only).
   std::string scan_active_path;
   ScanParams scan_active_params;
+  // Which pane requested the in-flight scan (0 = left/active tab, 1 = right
+  // split pane). apply_scan_result feeds the result back to THIS pane, not
+  // to whichever pane happens to be active when the scan lands.
+  int scan_target_pane = 0;
 
   bool show_hidden = false;
 
@@ -429,6 +443,9 @@ struct AppState {
   bool dynamic_view = true;
   // Per-folder .directory view properties (read + write on leave)
   bool per_folder_props = false;
+  // Independent views per directory: each folder remembers its own view
+  // mode/sort/group for the current session (no files written)
+  bool independent_dir_views = false;
   // Media-folder auto-icon cache: dir path -> first image child ("" = none)
   std::unordered_map<std::string, std::string> media_folder_child;
   int search_bar_x = 0, search_bar_w = 0;
@@ -565,6 +582,7 @@ struct AppState {
     MoveToDesktop,
     MoveToOtherPane,
     ReopenClosedTab,
+    ToggleSplitView,
     HideFile,
     UnhideFile,
     ApplyPropsToSubfolders,
@@ -848,6 +866,7 @@ struct AppState {
   bool settings_zoom_editing = false;
   std::string settings_zoom_buf;
   double settings_hit_folders_toggle[4]{};
+  double settings_hit_indep_views_toggle[4]{};
   double settings_hit_opacity_slider[4]{};
   double settings_hit_sidebar_opacity_slider[4]{};
   double settings_hit_topbar_opacity_slider[4]{};
@@ -861,6 +880,7 @@ struct AppState {
   int settings_dropdown_scroll = 0;
   bool settings_matugen_theming = false;
   double settings_hit_matugen_toggle[4]{};
+  bool settings_independent_dir_views = false;
   int settings_slider_dragging = 0;
 
   // ── Overwrite/merge conflict dialog (Dolphin-style) ──
@@ -1146,6 +1166,16 @@ struct AppState {
   cairo_surface_t* arrow_up_svg = nullptr;
   cairo_surface_t* search_svg = nullptr;
   cairo_surface_t* folder_search_svg = nullptr;
+  cairo_surface_t* view_list_svg = nullptr;
+  cairo_surface_t* view_grid_svg = nullptr;
+  cairo_surface_t* view_compact_svg = nullptr;
+  cairo_surface_t* view_tree_svg = nullptr;
+  cairo_surface_t* settings_gear_svg = nullptr;
+  cairo_surface_t* three_dots_svg = nullptr;
+  cairo_surface_t* home_nav_svg = nullptr;
+  cairo_surface_t* music_nav_svg = nullptr;
+  cairo_surface_t* video_nav_svg = nullptr;
+  cairo_surface_t* documents_nav_svg = nullptr;
   cairo_surface_t* mounted_svg = nullptr;
   cairo_surface_t* icon_desktop_svg = nullptr;
   cairo_surface_t* icon_documents_svg = nullptr;
