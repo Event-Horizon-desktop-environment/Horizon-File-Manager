@@ -751,6 +751,14 @@ static bool matches_filter(const AppState& app, const FileEntry& entry) {
   return true;
 }
 
+// Classify a filesystem entry for callers outside the scan pipeline (e.g.
+// tree-view children read lazily in draw.cpp). Same detection chain as
+// directory scans: extension fast path, then content sniff on full_path.
+FileType detect_file_type_for_path(const std::string& name, bool is_dir,
+                                   const std::string& full_path) {
+  return detect_file_type(name, is_dir, mime_by_ext(name), full_path);
+}
+
 // Thread-safe predicate for the recursive search worker: applies the filter
 // dropdown's type/size/date selections to raw stat data. Runs on the worker
 // thread — must not touch AppState.
@@ -1901,6 +1909,10 @@ void apply_scan_result(AppState& app, bool is_progress) {
             tab.entries.size(), tab.visible_entries.size(),
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t_apply0).count());
+
+  // Final scan landed: resolve all visible icons synchronously so the next
+  // paint is final artwork — no placeholder flash on folder open/switch.
+  if (!is_progress) prewarm_tab_icons(app);
 }
 
 static void recompute_item_counts(Tab& tab, bool show_hidden) {

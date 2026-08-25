@@ -2482,6 +2482,16 @@ void handle_click(AppState& app, int x, int y, int button) {
       app.last_click_y = y;
       app.last_click_idx = idx;
 
+      // Tree rows: remember WHICH row is selected by path — tree indices
+      // shift as folders expand/collapse, and child rows have no slot in
+      // visible_entries.
+      if (app.cur_tab().view_mode == ViewMode::Tree) {
+        if (idx >= 0 && idx < static_cast<int>(app.cur_tab().tree_entries.size()))
+          app.cur_tab().tree_selected_path = app.cur_tab().tree_entries[idx].path;
+        else
+          app.cur_tab().tree_selected_path.clear();
+      }
+
       // Set drag potential (only for plain click)
       if (!shift_mod && !ctrl_mod) {
         app.drag_potential = true;

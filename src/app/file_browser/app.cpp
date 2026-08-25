@@ -165,8 +165,11 @@ void paint(AppState& app, cairo_t* cr) {
     }
   }
 
-  // Close ops panel when operation finishes
-  if (app.ops_panel_open && app.op_progress && !app.op_progress->active.load()) {
+  // Close ops panel when operation finishes. op_progress can be null here:
+  // fast operations complete before the UI assigns the shared pointer (the
+  // completion callback resets it), which used to leave the panel stuck open.
+  if (app.ops_panel_open &&
+      (!app.op_progress || !app.op_progress->active.load())) {
     app.ops_panel_open = false;
   }
 

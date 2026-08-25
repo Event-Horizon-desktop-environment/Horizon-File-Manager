@@ -774,9 +774,7 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
         double ih = static_cast<double>(cairo_image_surface_get_height(app.mounted_svg));
         double scale = ind_sz / std::max(1.0, std::max(iw, ih));
         cairo_save(cr);
-        cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
-                               app.text_secondary_b,
-                               idx == app.sidebar_mount_hover_idx ? 1.0 : 0.7);
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
         cairo_rectangle(cr, ind_x, ind_y, ind_sz, ind_sz);
         cairo_clip(cr);
         cairo_translate(cr, ind_x, ind_y);
@@ -1358,7 +1356,7 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
     (app.active_pane ? app.r_search_bar_w : app.search_bar_w) = search_w;
 
     // Draw magnifying glass icon (SVG or fallback text)
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.5);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
     if (app.search_svg) {
       double svg_w = static_cast<double>(cairo_image_surface_get_width(app.search_svg));
       double svg_h = static_cast<double>(cairo_image_surface_get_height(app.search_svg));
@@ -1756,7 +1754,7 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
       cairo_fill(cr);
       cairo_restore(cr);
     }
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, active ? 1.0 : hv ? 0.9 : 0.6);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
     int sz = static_cast<int>(16.0 * zf);
     int ox = folder_search_btn_x + (folder_search_btn_w - sz) / 2;
     int oy = (top_h - sz) / 2;
@@ -1793,7 +1791,7 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
       cairo_fill(cr);
       cairo_restore(cr);
     }
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, active ? 1.0 : hv ? 0.9 : 0.6);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
     if (app.search_svg) {
       double svg_w = static_cast<double>(cairo_image_surface_get_width(app.search_svg));
       double svg_h = static_cast<double>(cairo_image_surface_get_height(app.search_svg));
@@ -7641,53 +7639,75 @@ void build_tree_entries(AppState& app) {
   auto& tab = app.cur_tab();
   tab.tree_entries.clear();
   tab.tree_entries.reserve(tab.visible_entries.size());
+
+  // Recursive expansion for tree rows. `upper` carries the branch-guide
+  // state of ancestor columns into this directory's children: for each
+  // column k, FULL means the ancestor's spine continues through this
+  // subtree, NONE means it already terminated at that ancestor's elbow.
+  constexpr unsigned char kGuideNone = 0, kGuideFull = 1, kGuideLast = 2;
+  auto collect = [&](auto&& self, const fs::path& dir, int depth,
+                     const std::vector<unsigned char>& upper) -> void {
+    std::vector<TreeEntry> children;
+    std::error_code ec;
+    const auto hidden_names = read_hidden_file(dir.string());
+    for (auto& de : fs::directory_iterator(dir, ec)) {
+      auto path = de.path();
+      auto name = path.filename().string();
+      if (name.empty()) continue;
+      if (!app.show_hidden &&
+          (name[0] == '.' || hidden_names.count(name) > 0)) continue;
+      bool is_dir = de.is_directory(ec);
+      bool child_expanded = tab.tree_expanded.count(path.string()) > 0;
+      TreeEntry child;
+      child.name = name;
+      child.path = path.string();
+      child.is_dir = is_dir;
+      child.depth = depth;
+      child.has_children = is_dir;
+      child.is_expanded = child_expanded;
+      child.type = detect_file_type_for_path(name, is_dir, path.string());
+      child.guides = upper;
+      child.guides.push_back(0); // filled in below once siblings are known
+      children.push_back(std::move(child));
+    }
+    std::sort(children.begin(), children.end(), [](auto& a, auto& b) {
+      if (a.is_dir != b.is_dir) return a.is_dir > b.is_dir;
+      return strverscmp(a.name.c_str(), b.name.c_str()) < 0;
+    });
+    for (size_t j = 0; j < children.size(); ++j) {
+      const bool last = (j + 1 == children.size());
+      auto& child = children[j];
+      // This row's own column: ├ (spine passes on) or └ (terminates here).
+      child.guides.back() = last ? kGuideLast : kGuideFull;
+      TreeEntry pushed = child; // keep guides/type for the recursion below
+      if (child.is_dir && child.is_expanded && depth < 2) {
+        // Ancestor columns below this row: FULL only where the spine
+        // continues past it; a terminated (kGuideLast) column goes dark.
+        std::vector<unsigned char> sub_upper;
+        sub_upper.reserve(child.guides.size());
+        for (unsigned char g : child.guides)
+          sub_upper.push_back(g == kGuideLast ? kGuideNone : g);
+        self(self, fs::path(child.path), depth + 1, sub_upper);
+      }
+      tab.tree_entries.push_back(std::move(child));
+    }
+  };
+
   for (int vi : tab.visible_entries) {
     auto& entry = tab.entries[vi];
     bool is_expanded = tab.tree_expanded.count(entry.path) > 0;
     bool has_children = entry.is_dir;
-    TreeEntry te{entry.name, entry.path, entry.is_dir, 0, has_children, is_expanded};
+    TreeEntry te;
+    te.name = entry.name;
+    te.path = entry.path;
+    te.is_dir = entry.is_dir;
+    te.depth = 0;
+    te.has_children = has_children;
+    te.is_expanded = is_expanded;
+    te.type = entry.type;
     tab.tree_entries.push_back(std::move(te));
     if (entry.is_dir && is_expanded) {
-      // Read children recursively
-      std::vector<TreeEntry> children;
-      std::error_code ec;
-      const auto hidden_names = read_hidden_file(entry.path);
-      for (auto& de : fs::directory_iterator(entry.path, ec)) {
-        auto path = de.path();
-        auto name = path.filename().string();
-        if (name.empty()) continue;
-        if (!app.show_hidden &&
-            (name[0] == '.' || hidden_names.count(name) > 0)) continue;
-        bool is_dir = de.is_directory(ec);
-        bool child_expanded = tab.tree_expanded.count(path.string()) > 0;
-        children.push_back({name, path.string(), is_dir, 1, is_dir, child_expanded});
-      }
-      std::sort(children.begin(), children.end(), [](auto& a, auto& b) {
-        if (a.is_dir != b.is_dir) return a.is_dir > b.is_dir;
-        return strverscmp(a.name.c_str(), b.name.c_str()) < 0;
-      });
-      for (auto& child : children) {
-        if (child.is_dir && child.is_expanded) {
-          std::vector<TreeEntry> grandchildren;
-          const auto ghidden = read_hidden_file(child.path);
-          for (auto& gde : fs::directory_iterator(child.path, ec)) {
-            auto gp = gde.path();
-            auto gn = gp.filename().string();
-            if (gn.empty()) continue;
-            if (!app.show_hidden &&
-                (gn[0] == '.' || ghidden.count(gn) > 0)) continue;
-            bool gd = gde.is_directory(ec);
-            grandchildren.push_back({gn, gp.string(), gd, 2, gd, false});
-          }
-          std::sort(grandchildren.begin(), grandchildren.end(), [](auto& a, auto& b) {
-            if (a.is_dir != b.is_dir) return a.is_dir > b.is_dir;
-            return strverscmp(a.name.c_str(), b.name.c_str()) < 0;
-          });
-          for (auto& gc : grandchildren)
-            tab.tree_entries.push_back(std::move(gc));
-        }
-        tab.tree_entries.push_back(std::move(child));
-      }
+      collect(collect, fs::path(entry.path), 1, {});
     }
   }
 }
@@ -7712,20 +7732,11 @@ void draw_tree_view(AppState& app, cairo_t* cr, int content_x,
     if (y + entry_h < content_y) { y += entry_h; continue; }
     if (y > content_y + view_h) break;
 
-    // Map vi to visible_entries index for selection
-    int visible_idx = -1;
-    if (te.depth == 0) {
-      if (vi < static_cast<int>(app.cur_tab().visible_entries.size()))
-        visible_idx = vi;
-    }
-
-    bool selected = false;
-    if (visible_idx >= 0) {
-      selected = visible_idx == app.cur_tab().selected_idx ||
-                 std::find(app.cur_tab().multi_selected.begin(),
-                           app.cur_tab().multi_selected.end(), visible_idx)
-                     != app.cur_tab().multi_selected.end();
-    }
+    // Selection: selected_idx is a TREE-row index while in this view
+    // (keyboard handlers treat it that way too); also honor the explicit
+    // path so right-clicked rows stay highlighted.
+    bool selected = vi == app.cur_tab().selected_idx ||
+                    te.path == app.cur_tab().tree_selected_path;
     bool hovered = vi == app.cur_tab().hover_idx;
 
     if (selected) {
@@ -7738,21 +7749,78 @@ void draw_tree_view(AppState& app, cairo_t* cr, int content_x,
       cairo_fill(cr);
     }
 
-    // Expand/collapse arrow for directories
+    // Branch guide lines (Dolphin-style tree decoration): a faint spine in
+    // each ancestor's expander column, elbowing into this row. kGuideFull
+    // passes through (├), kGuideLast terminates at the midline (└).
+    if (!te.guides.empty()) {
+      const double row_top = static_cast<double>(y);
+      const double row_mid = y + entry_h / 2.0;
+      const double row_bot = y + entry_h;
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.16);
+      cairo_set_line_width(cr, 1.0);
+      cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+      for (size_t k = 0; k < te.guides.size(); ++k) {
+        const double col_cx =
+            content_x + static_cast<double>(k) * indent_step + 4 + arrow_w * 0.5;
+        switch (te.guides[k]) {
+          case 1:  // full vertical through the row
+            cairo_move_to(cr, col_cx, row_top);
+            cairo_line_to(cr, col_cx, row_bot);
+            cairo_stroke(cr);
+            break;
+          case 2:  // last child: vertical stops at the elbow
+            cairo_move_to(cr, col_cx, row_top);
+            cairo_line_to(cr, col_cx, row_mid);
+            cairo_stroke(cr);
+            break;
+          default:
+            break;
+        }
+      }
+      // Elbow from the nearest ancestor column across to the file icon.
+      const double last_col_cx =
+          content_x + static_cast<double>(te.guides.size() - 1) * indent_step +
+          4 + arrow_w * 0.5;
+      const int elbow_icon_x =
+          content_x + te.depth * indent_step + arrow_w + 4;
+      cairo_move_to(cr, last_col_cx, row_mid);
+      cairo_line_to(cr, elbow_icon_x - 5.0 * zf, row_mid);
+      cairo_stroke(cr);
+    }
+
+    // Expand/collapse chevron for directories.
+    // Matches the Nautilus/Dolphin/Nemo design language: a thin stroked
+    // chevron (pan-end/pan-down symbolic style) that rotates 90° between
+    // states, dimmed at rest and brightening to full when the row is hot.
+    // Pure cairo geometry, so it can't blank out on missing font glyphs the
+    // way the old ▼/▶ text approach did.
     int arrow_x = content_x + indent + 4;
     int arrow_y = y + (entry_h - arrow_w) / 2;
     if (te.is_dir) {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.6);
-      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-      cairo_set_font_size(cr, arrow_w * 0.8);
-      cairo_move_to(cr, arrow_x, arrow_y + arrow_w * 0.75);
-      cairo_show_text(cr, te.is_expanded ? "\u25BC" : "\u25B6");
+      const bool hot = hovered || selected;
+      const double cx = arrow_x + arrow_w * 0.5;
+      const double cy = arrow_y + arrow_w * 0.5;
+      const double r  = arrow_w * 0.26;   // chevron half-span
+      const double dip = r * 1.05;        // apex depth below the arms
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
+                            hot ? 1.0 : 0.68);
+      cairo_save(cr);
+      cairo_translate(cr, cx, cy);
+      if (!te.is_expanded) cairo_rotate(cr, -M_PI / 2.0);
+      cairo_set_line_width(cr, std::max(1.25, arrow_w * 0.115));
+      cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+      cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+      cairo_move_to(cr, -r, -dip * 0.5);
+      cairo_line_to(cr, 0.0, dip * 0.55);
+      cairo_line_to(cr, r, -dip * 0.5);
+      cairo_stroke(cr);
+      cairo_restore(cr);
     }
 
     // File icon
     int icon_x = content_x + indent + arrow_w + 4;
     int icon_y = y + (entry_h - icon_size) / 2;
-    FileType ftype = te.is_dir ? FileType::Folder : FileType::File;
+    FileType ftype = te.is_dir ? FileType::Folder : te.type;
     draw_file_icon_cairo(app, cr, icon_x, icon_y, icon_size, ftype, selected, "", nullptr, &te.path);
 
     // Name
@@ -7878,6 +7946,41 @@ void draw_compact_view(AppState& app, cairo_t* cr, int content_x,
                             cheader_h, first_vis_label, true);
 
   app.cur_tab().content_h = y - content_y + app.cur_tab().scroll_px;
+}
+
+// ── Icon prewarm ─────────────────────────────────────────────────
+//
+// draw_file_icon_cairo resolves icons through the ASYNC cache path, so on a
+// freshly-scanned folder the first frames paint letter placeholders while
+// the worker rasterizes. Prewarming synchronously right after apply_scan_result
+// (same candidate order + size buckets as the painters) makes the very first
+// paint final. Unique-name dedup keeps the stall bounded to a few ms even
+// for large folders; the budget is a hard cap against pathological themes.
+void prewarm_tab_icons(AppState& app) {
+  auto& tab = app.cur_tab();
+  if (tab.visible_entries.empty()) return;
+  const double zf = app.zoom_pct / 100.0;
+  // Match painter request sizes so cache buckets line up exactly.
+  int px = 24;  // list / compact / tree rows (~20-24 * zf)
+  if (tab.view_mode == ViewMode::Grid)
+    px = std::clamp(static_cast<int>(app.grid_cell_size * 0.5 * zf), 24, 96);
+
+  std::unordered_set<std::string> seen;
+  seen.reserve(tab.visible_entries.size() * 2);
+  int budget = 400;
+  for (int vi : tab.visible_entries) {
+    if (vi < 0 || vi >= static_cast<int>(tab.entries.size())) continue;
+    const auto& e = tab.entries[vi];
+    if (!e.icon_name.empty() && seen.insert(e.icon_name).second) {
+      app.icons.tray_icon_sync(e.icon_name, px);
+      if (--budget <= 0) return;
+    }
+    const char* type_name = icon_name_for_file_type(e.type, &e.path);
+    if (type_name && *type_name && seen.insert(type_name).second) {
+      app.icons.tray_icon_sync(type_name, px);
+      if (--budget <= 0) return;
+    }
+  }
 }
 
 // ── Hit-test: tree view ──────────────────────────────────────────

@@ -157,6 +157,11 @@ struct TreeEntry {
   int depth = 0;
   bool has_children = false;
   bool is_expanded = false;
+  FileType type = FileType::File;
+  // Branch-guide columns for depth >= 1 rows, one entry per ancestor level:
+  // 0 = no line, 1 = full-height vertical (├ passes through), 2 = vertical
+  // stops at this row's midline (└ last child).
+  std::vector<unsigned char> guides;
 };
 
 // ── Breadcrumb segment ──
@@ -198,6 +203,7 @@ struct Tab {
   int selected_idx = -1;
   int sel_anchor = -1;                      // anchor for Shift-click range
   std::vector<int> multi_selected;        // indices into visible_entries
+  std::string tree_selected_path;           // tree view: selected row path (rows may not exist in visible_entries)
 
   // Directory auto-refresh
   int64_t dir_mtime = 0;
@@ -612,9 +618,13 @@ struct AppState {
   int context_menu_hover = -1;
   int context_menu_hover_prev = -1; // previous hover index (for submenu tracking)
   int context_menu_sub_hover = -1;  // submenu item hover index (-1 = none)
-  int context_menu_file_idx = -1; // -1 = background, -2 = sidebar, -3 = path editing, -4 = tab, -5 = dots menu
+  int context_menu_file_idx = -1; // -1 = background, -2 = sidebar, -3 = path editing, -4 = tab, -5 = dots menu, -9 = tree row (path target)
   int context_menu_sidebar_idx = -1;
   int context_menu_tab_idx = -1;
+  // Tree-view rows live outside visible_entries, so their context menus
+  // target a materialized path instead of an entry index. Handlers bind to
+  // context_menu_tree_entry when context_menu_file_idx == -9.
+  FileEntry context_menu_tree_entry{};
   std::vector<ContextMenuItem> context_menu_items;
 
   // ── Path bar dots menu button hit target ──

@@ -407,6 +407,12 @@ static void start_planned_fs_operation(AppState& app) {
   std::string toast = app.conflict_success_toast;
   auto prog = std::make_shared<OperationProgress>();
   prog->type = is_move ? OperationType::Move : OperationType::Copy;
+  // Assign to the app BEFORE starting: start_async_op may finish
+  // synchronously (empty source list), and the completion callback resets
+  // op_progress — assigning afterwards would resurrect a finished op and
+  // strand the operations panel open.
+  app.op_progress = prog;
+  app.ops_panel_open = true;
   start_async_op(final_srcs, app.conflict_dest_dir, is_move, prog,
       [&app, is_move, clear_cut, toast](bool cancelled) {
         if (!cancelled) {
@@ -420,8 +426,6 @@ static void start_planned_fs_operation(AppState& app) {
         draw(app);
       },
       app.conflict_overwrite, dst_names);
-  app.op_progress = prog;
-  app.ops_panel_open = true;
 }
 
 void request_fs_operation(AppState& app, const std::vector<std::string>& srcs,
@@ -558,7 +562,9 @@ void paste_clipboard(AppState& app, const std::string& dest_dir) {
 void resolve_conflict_choice(AppState& app, int choice) {
   if (!app.conflict_open || app.conflict_queue.empty()) return;
 
-  if (choice == 2) {  // Cancel
+  // Button order must match draw_conflict_dialog / the click handler:
+  // 0 = Skip, 1 = Cancel, 2 = Overwrite/Merge.
+  if (choice == 1) {  // Cancel
     conflict_cleanup(app);
     draw(app);
     return;
@@ -567,7 +573,7 @@ void resolve_conflict_choice(AppState& app, int choice) {
   const AppState::ConflictEntry cur = app.conflict_queue.front();
   bool apply_all = app.conflict_apply_all;
 
-  if (choice == 0) {  // Overwrite / Merge
+  if (choice == 2) {  // Overwrite / Merge
     if (apply_all) {
       for (const auto& c : app.conflict_queue)
         app.conflict_overwrite.push_back(c.src);
@@ -601,6 +607,19 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
   app.context_menu_x = x;
   app.context_menu_y = y;
   app.context_menu_hover = -1; app.context_menu_hover_prev = -1; app.context_menu_sub_hover = -1;
+
+  // ── Tree view rows: target a real path, not a visible_entries slot ──
+  // Expanded tree rows don't exist in visible_entries, so index resolution
+  // would bind to the wrong entry and actions like Delete silently no-op.
+  // Materialize the row into context_menu_tree_entry and mark the menu with
+  // the -9 sentinel; the action dispatcher binds to it instead.
+  const bool tree_row =
+      app.cur_tab().view_mode == ViewMode::Tree &&
+      item_idx >= 0 &&
+      item_idx < static_cast<int>(app.cur_tab().tree_entries.size());
+  if (!tree_row)
+    app.context_menu_tree_entry = FileEntry{};
+
   app.context_menu_file_idx = item_idx;
 
   std::string term_label = "Open in Terminal";
@@ -623,7 +642,32 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
     }
   }
 
-  if (item_idx >= 0 &&
+  bool is_dir = false;
+  bool is_executable = false;
+  if (tree_row) {
+    const auto& te = app.cur_tab().tree_entries[item_idx];
+    FileEntry& ov = app.context_menu_tree_entry;
+    ov = FileEntry{};
+    ov.name = te.name;
+    ov.path = te.path;
+    ov.is_dir = te.is_dir;
+    ov.type = te.type;
+    if (!te.is_dir) {
+      std::error_code sec;
+      auto sz = fs::file_size(te.path, sec);
+      if (!sec) ov.size = sz;
+    }
+    is_dir = te.is_dir;
+    is_executable = te.type == FileType::Executable;
+    app.cur_tab().selected_idx = item_idx;
+    app.cur_tab().tree_selected_path = te.path;
+    app.cur_tab().multi_selected.clear();
+    app.context_menu_file_idx = -9;   // tree-path target sentinel
+    app.context_menu_items = {
+      AppState::menu_item(AppState::ContextMenuAction::Open, "Open"),
+      AppState::menu_item(AppState::ContextMenuAction::OpenWith, "Open With..."),
+    };
+  } else if (item_idx >= 0 &&
       item_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
     app.cur_tab().selected_idx = item_idx;
     // Keep existing multi-selection if right-clicked item is already part of it
@@ -635,10 +679,13 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
       AppState::menu_item(AppState::ContextMenuAction::OpenWith, "Open With..."),
     };
     int real_idx = app.cur_tab().visible_entries[item_idx];
-    bool is_dir = real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
+    is_dir = real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
                   app.cur_tab().entries[real_idx].is_dir;
-    bool is_executable = real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
-                         app.cur_tab().entries[real_idx].type == FileType::Executable;
+    is_executable = real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
+                  app.cur_tab().entries[real_idx].type == FileType::Executable;
+  }
+  // Shared item construction for both entry-backed and tree-row targets.
+  {
     if (is_executable) {
       app.context_menu_items.push_back(
         AppState::menu_item(AppState::ContextMenuAction::RunProgram, "Run as Program"));
@@ -663,12 +710,15 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
       app.context_menu_items.push_back(
         AppState::menu_item(AppState::ContextMenuAction::PasteInto, "Paste Into Folder"));
     app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Rename, "Rename"));
-    {
-      int real_for_hide = app.cur_tab().visible_entries[item_idx];
-      bool listed = real_for_hide >= 0 &&
+    if (tree_row) {
+      // .hidden bookkeeping only applies to scanned directory entries.
+    } else {
+      int real_for_hide = item_idx < static_cast<int>(app.cur_tab().visible_entries.size())
+                          ? app.cur_tab().visible_entries[item_idx] : -1;
+      bool hide_listed = real_for_hide >= 0 &&
                     real_for_hide < static_cast<int>(app.cur_tab().entries.size()) &&
                     app.cur_tab().entries[real_for_hide].in_hidden_file;
-      if (listed)
+      if (hide_listed)
         app.context_menu_items.push_back(
           AppState::menu_item(AppState::ContextMenuAction::UnhideFile, "Unhide"));
       else
@@ -747,8 +797,16 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
       archive_item.sub_items = {
         AppState::menu_item(AppState::ContextMenuAction::Compress, "Compress..."),
       };
-      if (!is_dir && real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size())) {
-        if (is_archive_extension(app.cur_tab().entries[real_idx].path)) {
+      if (!is_dir) {
+        const std::string* archive_path = nullptr;
+        if (tree_row)
+          archive_path = &app.context_menu_tree_entry.path;
+        else if (item_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+          int real_idx = app.cur_tab().visible_entries[item_idx];
+          if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()))
+            archive_path = &app.cur_tab().entries[real_idx].path;
+        }
+        if (archive_path && is_archive_extension(*archive_path)) {
           archive_item.sub_items.push_back(AppState::menu_item(AppState::ContextMenuAction::BrowseArchive, "Browse Archive"));
           archive_item.sub_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Extract, "Extract"));
           archive_item.sub_items.push_back(AppState::menu_item(AppState::ContextMenuAction::ExtractTo, "Extract to..."));
@@ -779,7 +837,10 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
     }
     app.context_menu_items.push_back(AppState::menu_separator());
     app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Properties, "Properties"));
-  } else {
+  }
+  if (!tree_row &&
+      !(item_idx >= 0 &&
+        item_idx < static_cast<int>(app.cur_tab().visible_entries.size()))) {
     app.context_menu_items = {
       AppState::menu_item(AppState::ContextMenuAction::NewFolder, "New Folder"),
       AppState::menu_item(AppState::ContextMenuAction::NewDocument, "New Document"),
@@ -1295,15 +1356,26 @@ void execute_context_menu_action(AppState& app, int item_idx) {
     return;
   }
 
-  if (app.context_menu_file_idx < 0 ||
-      app.context_menu_file_idx >= static_cast<int>(app.cur_tab().visible_entries.size()))
-    return;
-
-  int real_idx = app.cur_tab().visible_entries[app.context_menu_file_idx];
-  if (real_idx < 0 || real_idx >= static_cast<int>(app.cur_tab().entries.size()))
-    return;
-
-  auto& entry = app.cur_tab().entries[real_idx];
+  // Tree-row menus carry their own materialized target: expanded rows have
+  // no slot in visible_entries, so index resolution would bind (and act!)
+  // on the wrong file. Refresh existence so stale targets fail safely.
+  FileEntry* entry_target = nullptr;
+  if (app.context_menu_file_idx == -9) {
+    if (app.context_menu_tree_entry.path.empty()) return;
+    std::error_code tec;
+    app.context_menu_tree_entry.is_dir =
+        fs::is_directory(app.context_menu_tree_entry.path, tec);
+    entry_target = &app.context_menu_tree_entry;
+  } else {
+    if (app.context_menu_file_idx < 0 ||
+        app.context_menu_file_idx >= static_cast<int>(app.cur_tab().visible_entries.size()))
+      return;
+    int real_idx = app.cur_tab().visible_entries[app.context_menu_file_idx];
+    if (real_idx < 0 || real_idx >= static_cast<int>(app.cur_tab().entries.size()))
+      return;
+    entry_target = &app.cur_tab().entries[real_idx];
+  }
+  auto& entry = *entry_target;
 
   switch (action) {
     case AppState::ContextMenuAction::Open:
@@ -2385,6 +2457,9 @@ void reload_settings_from_config(AppState& app) {
   if (!sc.dock.iconTheme.empty() && sc.dock.iconTheme != app.last_icon_theme) {
     app.icons.set_icon_theme(sc.dock.iconTheme);
     app.last_icon_theme = sc.dock.iconTheme;
+    // Theme switch wipes the icon cache; re-resolve the current folder's
+    // icons synchronously so the next paint is already final artwork.
+    prewarm_tab_icons(app);
   }
 }
 

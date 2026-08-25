@@ -82,6 +82,18 @@ bool search_predicate_passes(int type_idx, int size_idx, int date_idx,
                              const std::string& path, const std::string& name,
                              bool is_dir, uint64_t size, int64_t mtime);
 
+// Classify a filesystem entry by name/extension (content-sniff fallback on
+// full_path). Implemented in nav.cpp so tree-view children — which are read
+// lazily outside the normal directory scan — get real per-type icons too.
+FileType detect_file_type_for_path(const std::string& name, bool is_dir,
+                                   const std::string& full_path);
+
+// Blocking-resolve every distinct icon name used by the current tab's
+// visible entries at the sizes the painters will request. Called after a
+// folder scan lands so the first paint shows final themed artwork instead
+// of a one-frame letter-placeholder flash. Implemented in draw.cpp.
+void prewarm_tab_icons(AppState& app);
+
 // Restart the active pane's search with current query/mode/case/filters.
 void restart_active_search(AppState& app);
 
