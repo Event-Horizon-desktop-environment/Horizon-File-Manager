@@ -57,8 +57,13 @@ if dep_jpeg.found()
 endif
 
 # ── Horizon Colors: Google material-color-utilities (C++, Apache-2.0) ────────
-absl_flat_hash_map_dep = dependency('absl_flat_hash_map')
-absl_strings_dep = dependency('absl_strings')
+# Vendored material-color-utilities references Abseil for exactly two things:
+# `absl::flat_hash_map` (wsmeans quantizer) and `StrCat(absl::Hex(x))` (utils).
+# Instead of linking any Abseil build — system or vendored, either way the
+# binary ends up coupled to a libabsl SONAME that differs per distro and broke
+# every packaged build — compile-time shims provide those two names over the
+# C++ standard library. The submodule stays pristine; no libabsl at runtime.
+mcu_absl_shim_inc = include_directories('third_party/absl-shim')
 
 material_colors_sources = files(
   'third_party/material-color-utilities/cpp/blend/blend.cc',
@@ -95,18 +100,16 @@ material_colors_inc = include_directories('third_party/material-color-utilities'
 eh_material_colors_lib = static_library(
   'eh_material_colors',
   sources: material_colors_sources,
-  include_directories: material_colors_inc,
+  include_directories: [material_colors_inc, mcu_absl_shim_inc],
   cpp_args: ['-Wno-unused-parameter', '-Wno-extra-semi', '-Wno-pedantic', '-Wno-extra-semi-braces'],
   override_options: ['optimization=2', 'werror=false'],
-  dependencies: [absl_flat_hash_map_dep, absl_strings_dep],
   cpp_pch: 'src/platform/common/palette/pch_material_colors.hpp',
   pic: true,
 )
 
 eh_material_colors_dep = declare_dependency(
   link_with: eh_material_colors_lib,
-  include_directories: material_colors_inc,
-  dependencies: [absl_flat_hash_map_dep, absl_strings_dep],
+  include_directories: [material_colors_inc, mcu_absl_shim_inc],
 )
 
 # ── Include paths ─────────────────────────────────────────────────────
