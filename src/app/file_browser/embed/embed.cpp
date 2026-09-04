@@ -26,6 +26,7 @@
 #include "app/file_browser/features/drag.hpp"
 #include "app/file_browser/features/thumb_pool.hpp"
 #include "app/file_browser/features/dir_stats.hpp"
+#include "app/file_browser/features/dir_watch.hpp"
 #include "base/thread/thread_dispatch.hpp"
 #include "platform/common/asset/asset_loader.hpp"
 #include "platform/common/bench/startup_trace.hpp"
@@ -1235,6 +1236,11 @@ static bool create_window(AppState& app) {
 
   eh::file_browser::thumb_pool_start(&app);
   eh::file_browser::dir_stats_start();
+  // Directed inotify watcher: reload on create/delete/move, re-stat changed
+  // children in place (modify/attrib) so a rebuilt binary flips type/icon
+  // while the folder stays open.
+  app.dir_watch_fd = eh::file_browser::dir_watch_init();
+  dir_watch_sync(app);
   while (app.running && g_signal == 0) {
     // ── check for external file changes on every iteration ────────
     if (!app.confirm_open && !app.create_dialog_open &&
@@ -1321,35 +1327,91 @@ static bool create_window(AppState& app) {
       // Skipped while a scan is already in flight or deferred: there is a
       // single scan slot, and stealing it would cancel a pending navigation.
       if (app.scan_active_path.empty() && !app.scan_apply_deferred) {
-        auto refresh_pane = [&app]() -> bool {
-          struct stat dir_st;
-          if (::stat(app.cur_tab().current_path.c_str(), &dir_st) != 0)
-            return false;
-          int64_t new_mtime = static_cast<int64_t>(dir_st.st_mtime);
-          if (new_mtime == app.cur_tab().dir_mtime) return false;
-          int saved_scroll = app.cur_tab().scroll_px;
-          int saved_selected = app.cur_tab().selected_idx;
+        // Re-arm the inotify watches so they track the folders currently on
+        // screen. No-op while the paths haven't changed. `dir_watched` is
+        // true once a live watch covers the active tab's folder.
+        const bool dir_watched = dir_watch_sync(app);
 
-          reload_dir(app);
+        // Directed inotify path: reload the pane on create/delete/move, and
+        // re-stat named children in place on modify/attribute/close_write so
+        // a rebuilt binary flips back to binary (type+icon+size) without the
+        // full reload that navigate-away-and-back used to force.
+        if (app.dir_watch_fd >= 0) {
+          struct pollfd ipf{};
+          ipf.fd = app.dir_watch_fd;
+          ipf.events = POLLIN | POLLERR | POLLHUP;
+          const bool ifd_ready =
+              poll(&ipf, 1, 0) > 0 && (ipf.revents & (POLLIN | POLLERR));
 
-          app.cur_tab().scroll_px = saved_scroll;
-          app.cur_tab().scroll_smooth_current = static_cast<double>(saved_scroll);
-          app.cur_tab().scroll_smooth_target = static_cast<double>(saved_scroll);
-          app.cur_tab().selected_idx = saved_selected;
-          return true;
-        };
+          bool need_reload_tab = false, need_reload_pane = false;
+          dir_watch_process(app, ifd_ready, need_reload_tab,
+                            need_reload_pane);
 
-        bool refreshed = refresh_pane();
-        if (app.split_view && app.active_pane == 0) {
-          // Inactive right pane: reload_dir targets the active pane, so
-          // flip panes around the call to refresh it too. The scan result
-          // is tagged with the requesting pane, so a deferred apply still
-          // lands in the right pane after active_pane is restored.
-          app.active_pane = 1;
-          refreshed = refresh_pane() || refreshed;
-          app.active_pane = 0;
+          // reload_dir targets app.cur_tab(), so pin the right pane index
+          // around each call — the deferred scan result is tagged with the
+          // requesting pane and lands there after active_pane is restored.
+          auto reload_pane_pinned = [&app](int pane) -> bool {
+            const bool flip = app.split_view && app.active_pane != pane;
+            if (flip) app.active_pane = pane;
+            int saved_scroll = app.cur_tab().scroll_px;
+            int saved_selected = app.cur_tab().selected_idx;
+            reload_dir(app);
+            app.cur_tab().scroll_px = saved_scroll;
+            app.cur_tab().scroll_smooth_current =
+                static_cast<double>(saved_scroll);
+            app.cur_tab().scroll_smooth_target =
+                static_cast<double>(saved_scroll);
+            app.cur_tab().selected_idx = saved_selected;
+            if (flip) app.active_pane = (pane == 0 ? 1 : 0);
+            return true;
+          };
+
+          bool inotify_refreshed = false;
+          if (need_reload_tab) {
+            reload_pane_pinned(0);
+            inotify_refreshed = true;
+          }
+          if (need_reload_pane && app.split_view) {
+            reload_pane_pinned(1);
+            inotify_refreshed = true;
+          }
+          if (dir_watch_refresh_entries(app)) need_redraw = true;
+          if (inotify_refreshed) need_redraw = true;
         }
-        if (refreshed) need_redraw = true;
+
+        // stat() fallback only where inotify isn't covering the active
+        // folder (NFS mounts, exhausted watch limits, unavailable kernels).
+        if (!dir_watched) {
+          auto refresh_pane = [&app]() -> bool {
+            struct stat dir_st;
+            if (::stat(app.cur_tab().current_path.c_str(), &dir_st) != 0)
+              return false;
+            int64_t new_mtime = static_cast<int64_t>(dir_st.st_mtime);
+            if (new_mtime == app.cur_tab().dir_mtime) return false;
+            int saved_scroll = app.cur_tab().scroll_px;
+            int saved_selected = app.cur_tab().selected_idx;
+
+            reload_dir(app);
+
+            app.cur_tab().scroll_px = saved_scroll;
+            app.cur_tab().scroll_smooth_current = static_cast<double>(saved_scroll);
+            app.cur_tab().scroll_smooth_target = static_cast<double>(saved_scroll);
+            app.cur_tab().selected_idx = saved_selected;
+            return true;
+          };
+
+          bool refreshed = refresh_pane();
+          if (app.split_view && app.active_pane == 0) {
+            // Inactive right pane: reload_dir targets the active pane, so
+            // flip panes around the call to refresh it too. The scan result
+            // is tagged with the requesting pane, so a deferred apply still
+            // lands in the right pane after active_pane is restored.
+            app.active_pane = 1;
+            refreshed = refresh_pane() || refreshed;
+            app.active_pane = 0;
+          }
+          if (refreshed) need_redraw = true;
+        }
       }
 
       if (need_redraw) draw(app);
@@ -1684,6 +1746,7 @@ static bool create_window(AppState& app) {
   join_scan(app);  // reap background directory scanner before teardown
   eh::file_browser::thumb_pool_stop();
   eh::file_browser::dir_stats_stop();
+  eh::file_browser::dir_watch_close(app);
   destroy_settings_window(app);
   destroy_props_window(app);
   for (auto& b : app.buf) b.destroy();

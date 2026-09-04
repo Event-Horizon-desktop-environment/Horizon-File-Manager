@@ -381,6 +381,24 @@ struct AppState {
   // to whichever pane happens to be active when the scan lands.
   int scan_target_pane = 0;
 
+  // ── Directed inotify watcher (auto-refresh without per-frame stat) ──
+  // One inotify descriptor backs up to two directory watches (the active tab
+  // and, when split view is on, the right pane). Events let us reload the
+  // listing on create/delete/move AND re-stat individual children in place
+  // on modify/attribute — so a rebuilt binary flips back to binary type while
+  // the folder stays open (GNOME/Dolphin-style, no full reload needed).
+  int dir_watch_fd = -1;
+  int dir_watch_tab_wd = -1;   // watch descriptor for the active tab's folder
+  int dir_watch_pane_wd = -1;  // watch descriptor for the split right pane
+  std::string dir_watch_tab_path;
+  std::string dir_watch_pane_path;
+  // Child names whose metadata (type/size/mtime/icon) changed in place and
+  // must be re-stated before the next redraw. One set per pane; both guarded
+  // by dir_watch_mtx.
+  std::unordered_set<std::string> dir_watch_refresh_names;
+  std::unordered_set<std::string> dir_watch_pane_refresh_names;
+  std::mutex dir_watch_mtx;
+
   bool show_hidden = false;
 
   // ── Selection ──

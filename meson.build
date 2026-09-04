@@ -150,6 +150,7 @@ sources = files(
   'src/app/file_browser/features/video_worker.cpp',
   'src/app/file_browser/features/thumb_pool.cpp',
   'src/app/file_browser/features/dir_stats.cpp',
+  'src/app/file_browser/features/dir_watch.cpp',
   'src/app/file_browser/features/terminal.cpp',
   'src/app/file_browser/ui/computer_view.cpp',
   'src/app/file_browser/ui/rename_ui.cpp',

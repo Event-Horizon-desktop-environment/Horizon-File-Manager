@@ -88,6 +88,13 @@ bool search_predicate_passes(int type_idx, int size_idx, int date_idx,
 FileType detect_file_type_for_path(const std::string& name, bool is_dir,
                                    const std::string& full_path);
 
+// Re-stat a cached FileEntry from disk and refresh its metadata in place
+// (size, mtime, mode, owner/group, type, mime, icon) so the row reflects
+// the current file without a full directory reload. Used by the inotify
+// watcher to fold files that changed in place (e.g. a freshly relinked
+// binary) back into binary type/icon while the folder stays open.
+void refresh_entry_from_disk(FileEntry& e);
+
 // Blocking-resolve every distinct icon name used by the current tab's
 // visible entries at the sizes the painters will request. Called after a
 // folder scan lands so the first paint shows final themed artwork instead

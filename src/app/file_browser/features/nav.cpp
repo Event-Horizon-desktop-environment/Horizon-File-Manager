@@ -663,6 +663,10 @@ AppState::AppState() {
 }
 
 AppState::~AppState() {
+  if (dir_watch_fd >= 0) {
+    ::close(dir_watch_fd);  // defensive: teardown already calls dir_watch_close
+    dir_watch_fd = -1;
+  }
   if (arrow_left_svg) cairo_surface_destroy(arrow_left_svg);
   if (arrow_right_svg) cairo_surface_destroy(arrow_right_svg);
   if (arrow_up_svg) cairo_surface_destroy(arrow_up_svg);
@@ -1205,6 +1209,68 @@ static FileEntry make_entry(const std::string& prefix, const DirItem& it,
     sd.gid = st.st_gid;
   }
   return make_entry_from(it, sd, prefix, hidden_names, xdg_full);
+}
+
+// Re-stat a cached entry from disk and refresh its metadata in place so a
+// row reflects the current file — size, mtime, permissions, type, mime and
+// derived icon — without a full directory reload. Called by the inotify
+// watcher when a watched file is modified in place (IN_MODIFY/IN_ATTRIB/
+// IN_CLOSE_WRITE), e.g. a binary that was just relinked over itself.
+void refresh_entry_from_disk(FileEntry& e) {
+  struct stat st{};
+  if (::stat(e.path.c_str(), &st) != 0) return;  // gone: structural reload drops it
+
+  e.size = static_cast<uint64_t>(st.st_size);
+  e.modified_sec = static_cast<int64_t>(st.st_mtime);
+  e.mode = st.st_mode;
+  e.readable = (st.st_mode & (S_IRUSR | S_IRGRP | S_IROTH)) != 0 ||
+               geteuid() == 0;
+  e.writable = (st.st_mode & (S_IWUSR | S_IWGRP | S_IWOTH)) != 0 ||
+               geteuid() == 0;
+  e.owner = user_name(st.st_uid);
+  e.group = group_name(st.st_gid);
+  e.owned_by_root = (st.st_uid == 0);
+  e.is_symlink = S_ISLNK(st.st_mode);
+  e.is_dir = S_ISDIR(st.st_mode);
+
+  if (e.is_symlink) {
+    char buf[4096];
+    ssize_t n = readlink(e.path.c_str(), buf, sizeof(buf) - 1);
+    if (n > 0) {
+      buf[n] = '\0';
+      e.link_target = buf;
+    } else {
+      e.link_target.clear();
+    }
+  } else {
+    e.link_target.clear();
+  }
+
+  if (e.is_dir) {
+    // Keep the existing (scan-time) icon: folders have no type change to
+    // re-derive from, and clearing would drop the XDG-userdir emblems.
+    return;
+  }
+
+  // Lowercase extension without the dot (mirrors make_entry_from).
+  e.extension.clear();
+  auto dot = e.name.rfind('.');
+  if (dot != std::string::npos && dot + 1 < e.name.size()) {
+    e.extension = e.name.substr(dot + 1);
+    for (auto& c : e.extension) c = std::tolower(c);
+  }
+
+  e.mime_type = mime_by_ext(e.name);
+  e.type = detect_file_type(e.name, false, e.mime_type, e.path, e.extension);
+
+  // Re-derive the icon from the fresh MIME (mirrors make_entry_from) so a
+  // changed type (text -> ELF binary) gets the right artwork at next paint.
+  e.icon_name.clear();
+  if (!e.mime_type.empty()) {
+    std::string icon = e.mime_type;
+    for (auto& c : icon) if (c == '/') c = '-';
+    e.icon_name = std::move(icon);
+  }
 }
 
 // Streaming directory reader: getdents64 batches land in fixed-size chunks
