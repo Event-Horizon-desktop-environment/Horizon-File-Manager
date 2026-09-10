@@ -419,6 +419,78 @@ struct AppState {
   int sidebar_drag_start_x = 0;
   int sidebar_drag_start_width = 0;
 
+  // ── Adaptive sidebar (Nautilus-style fold on narrow windows) ──
+  // Below this width the sidebar auto-hides and becomes a temporary
+  // overlay (flap) revealed by the toolbar toggle button instead of
+  // consuming layout space. 682 = Nautilus 51's "max-width: 682sp"
+  // breakpoint (Adw.OverlaySplitView collapsed).
+  static constexpr int kSidebarFoldBreakpoint = 682;
+  bool sidebar_folded = false;          // window too narrow for an inline sidebar
+  bool sidebar_folded_revealed = false; // fold flap overlay currently shown
+  int sidebar_toggle_x = 0;             // toolbar toggle button hit rect
+  int sidebar_toggle_w = 0;
+  bool sidebar_toggle_hover = false;
+
+  // Width the sidebar currently contributes to the layout (0 while folded).
+  int sidebar_w() const {
+    return sidebar_expanded && !sidebar_folded ? sidebar_width : 0;
+  }
+  // Width the sidebar occupies when drawn: its inline width, or the flap
+  // overlay clamped so a strip of content stays visible. 0 when fully hidden.
+  int effective_sidebar_width() const {
+    if (sidebar_folded) {
+      if (!sidebar_folded_revealed) return 0;
+      return std::min(sidebar_width, std::max(120, width - 80));
+    }
+    return sidebar_expanded ? sidebar_width : 0;
+  }
+  // Top of the content column (below top/tab/banner bars) — the fold flap
+  // overlays exactly this region.
+  int content_top_y() const {
+    bool banner = search_active || r_search_active || recursive_search_active ||
+                  r_recursive_search_active;
+    return top_bar_height + tab_bar_height + (banner ? 28 : 0);
+  }
+  // x where the nav-arrow buttons begin, after any fold-toggle button.
+  int nav_origin_x() const {
+    double zf = zoom_pct / 100.0;
+    int o = sidebar_w() + static_cast<int>(20.0 * zf);
+    if (sidebar_folded) o += static_cast<int>(42.0 * zf); // 36 slot + 6 px gap
+    return o;
+  }
+
+  // Minimum window width at which the top bar can lay out the nav arrows,
+  // path bar and right-side button cluster without overlapping. The moment
+  // the window goes below this, the sidebar folds to reclaim its width.
+  // Mirrors draw_top_bar()/events.cpp geometry (measured at app.width).
+  // The sidebar is assumed inline (sidebar_width directly, not sidebar_w()),
+  // so the result is independent of the current fold state and the fold
+  // condition in app.cpp keeps a single stable threshold (no oscillation).
+  int top_bar_min_width() const {
+    double zf = zoom_pct / 100.0;
+    int arrow_slot = static_cast<int>(36.0 * zf);
+    int gap = static_cast<int>(6.0 * zf);
+    int path_margin = static_cast<int>(24.0 * zf);
+    int right_margin = static_cast<int>(16.0 * zf);
+    int gear_gap = static_cast<int>(8.0 * zf);
+    int view_toggle_w = static_cast<int>(40.0 * zf);
+    int folder_search_btn_w = static_cast<int>(40.0 * zf);
+    int search_btn_w = static_cast<int>(40.0 * zf);
+    int sort_w = static_cast<int>(28.0 * zf); // flush with view toggle (split button)
+    int gear_w = static_cast<int>(36.0 * zf);
+    int traffic_w = static_cast<int>(52.0 * zf);
+    int min_path_w = 60; // draw.cpp's path_w floor before forced overlap
+
+    int nav_origin = (sidebar_expanded ? sidebar_width : 0) +
+                     static_cast<int>(20.0 * zf);
+    int arrows_w = 2 * arrow_slot + 2 * gap; // back + forward (+ trailing gap)
+    int right_block_w = folder_search_btn_w + gap + search_btn_w + gap +
+                        view_toggle_w + sort_w + gap + gear_w +
+                        gear_gap + traffic_w + right_margin;
+    return nav_origin + arrows_w + path_margin + gap + right_block_w +
+           min_path_w;
+  }
+
   // ── Favorites (persistent bookmark folders) ──
   std::vector<std::string> favorites;
 
@@ -664,6 +736,7 @@ struct AppState {
   int create_cursor_pos = 0;
   int create_sel_start = -1;
   int create_sel_end = -1;
+  int create_hover_btn = -1;  // -1 none, 0 create, 1 cancel
 
   // ── Select-by-pattern dialog ──
   bool select_pattern_open = false;
@@ -688,6 +761,7 @@ struct AppState {
   int rename_ui_sel_start = -1;
   int rename_ui_sel_end = -1;
   bool rename_ui_dragging = false;
+  int rename_ui_hover_btn = -1;  // -1 none, 0 rename, 1 cancel
 
   // ── Key repeat (application-level, for consistent repeat across compositors) ──
   uint32_t key_repeat_sym = 0;   // 0 = none
@@ -1097,6 +1171,8 @@ struct AppState {
   int r_sort_menu_w = 0, r_sort_menu_h = 0;
   int sort_menu_hover = -1;
   int r_sort_menu_hover = -1;
+  int sort_menu_scroll = 0;
+  int r_sort_menu_scroll = 0;
   bool sort_btn_hover = false;
   bool r_sort_btn_hover = false;
   int sort_btn_x = 0, sort_btn_w = 0;   // stored during draw for hit-testing
@@ -1204,6 +1280,29 @@ struct AppState {
   cairo_surface_t* view_tree_svg = nullptr;
   cairo_surface_t* settings_gear_svg = nullptr;
   cairo_surface_t* three_dots_svg = nullptr;
+  cairo_surface_t* sidebar_toggle_svg = nullptr;
+  cairo_surface_t* sort_chevron_svg = nullptr;
+  cairo_surface_t* checkmark_svg = nullptr;
+  cairo_surface_t* arrow_down_svg = nullptr;
+  cairo_surface_t* arrow_downward_svg = nullptr;
+  cairo_surface_t* icon_hash_svg = nullptr;
+  cairo_surface_t* icon_bars_svg = nullptr;
+  cairo_surface_t* icon_clock_svg = nullptr;
+  cairo_surface_t* icon_file_text_svg = nullptr;
+  cairo_surface_t* icon_person_svg = nullptr;
+  cairo_surface_t* icon_people_svg = nullptr;
+  cairo_surface_t* icon_shield_svg = nullptr;
+  cairo_surface_t* icon_file_svg = nullptr;
+  cairo_surface_t* icon_link_svg = nullptr;
+  cairo_surface_t* icon_folder_svg = nullptr;
+  cairo_surface_t* icon_eyeoff_svg = nullptr;
+  cairo_surface_t* icon_list_svg = nullptr;
+  cairo_surface_t* icon_aa_svg = nullptr;
+  cairo_surface_t* icon_minus_svg = nullptr;
+  cairo_surface_t* edit_svg = nullptr;
+  cairo_surface_t* lock_svg = nullptr;
+  cairo_surface_t* trash_svg = nullptr;
+  cairo_surface_t* monitor_svg = nullptr;
   cairo_surface_t* home_nav_svg = nullptr;
   cairo_surface_t* music_nav_svg = nullptr;
   cairo_surface_t* video_nav_svg = nullptr;

@@ -499,10 +499,20 @@ void draw_computer_view(AppState& app, cairo_t* cr, int content_x,
       if (cy > content_y + view_h) break;
 
       bool hovered = (i == app.computer_hover_idx);
-      cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b,
-                            hovered ? 0.95 : 0.75);
+      // Translucent card tinted with the wallpaper-derived accent, so the
+      // drive cards harmonize with the background wallpaper behind the window.
+      double tint = 0.35;
+      double card_r = app.surface_r * (1.0 - tint) + app.accent_r * tint;
+      double card_g = app.surface_g * (1.0 - tint) + app.accent_g * tint;
+      double card_b = app.surface_b * (1.0 - tint) + app.accent_b * tint;
+      cairo_set_source_rgba(cr, card_r, card_g, card_b, hovered ? 0.55 : 0.32);
       draw_rounded_rect(cr, cx, cy, actual_large_w, kLargeH, kCardRadius);
       cairo_fill(cr);
+      cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.35);
+      cairo_set_line_width(cr, 1);
+      draw_rounded_rect(cr, cx + 0.5, cy + 0.5, actual_large_w - 1, kLargeH - 1,
+                        kCardRadius - 0.5);
+      cairo_stroke(cr);
 
       // Device icon (left side, aligned with device name)
       int dev_icon_sz = static_cast<int>(36 * zf);
@@ -637,7 +647,7 @@ int hit_test_computer(AppState& app, int x, int y) {
   if (app.computer_items.empty()) return -1;
 
   double zf = app.zoom_pct / 100.0;
-  int content_x = app.sidebar_expanded ? app.sidebar_width : 0;
+  int content_x = app.sidebar_w();
   int content_y = app.top_bar_height + app.tab_bar_height;
   int content_w = app.width - content_x;
   const int kItemGap = static_cast<int>(16 * zf);

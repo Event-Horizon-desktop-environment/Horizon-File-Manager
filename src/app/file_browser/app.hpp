@@ -122,14 +122,33 @@ struct SortMenuRow {
     GroupField,          // group_by selector (field = 0..4)
     Separator,
   };
+  enum class Icon {
+    None,
+    Hash,
+    Bars,
+    Clock,
+    FileText,
+    Person,
+    People,
+    Shield,
+    File,
+    Link,
+    ArrowDownward,
+    Folder,
+    EyeOff,
+    List,
+    Text,
+    Minus,
+  };
   Kind kind = Kind::Separator;
   const char* label = "";
+  Icon icon = Icon::None;
   int field = 0; // valid when kind == Field or GroupField
 };
 
 int sort_menu_row_count();
 const SortMenuRow& sort_menu_row(int index);
-inline constexpr int kSortMenuItemH = 30;
+inline constexpr int kSortMenuItemH = 28;
 inline constexpr int kSortMenuPad = 6;
 
 /// Re-apply the current search filter / hidden filter to the existing entries.

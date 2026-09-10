@@ -580,7 +580,7 @@ bool has_mime(const DropOfferData& od, const std::string_view target) {
 // mirrors Dolphin activating a pane when files are dragged onto it.
 static void activate_pane_under_dnd(AppState& app, int sx) {
   if (!app.split_view) return;
-  int s_w = app.sidebar_expanded ? app.sidebar_width : 0;
+  int s_w = app.sidebar_w();
   int content_w = app.width - s_w - (app.info_panel_open ? app.info_panel_width : 0);
   int split = app.split_divider_x;
   if (split <= 0) split = content_w / 2;

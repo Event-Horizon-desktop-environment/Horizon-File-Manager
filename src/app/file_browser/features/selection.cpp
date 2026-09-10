@@ -76,15 +76,22 @@ void apply_select_pattern(AppState& app) {
 void draw_select_pattern_dialog(AppState& app, cairo_t* cr) {
   int dlg_x, dlg_y;
   dialog_geometry(app, dlg_x, dlg_y);
-  double sa = app.surface_opacity_pct / 100.0;
 
   // Dimmed backdrop
   cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
   cairo_rectangle(cr, 0, 0, app.width, app.height);
   cairo_fill(cr);
 
-  // Card
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, sa);
+  // Card (fully opaque, layered soft shadow)
+  for (int s = 4; s >= 1; --s) {
+    cairo_set_source_rgba(cr, 0, 0, 0, 0.09 * (1.0 - s / 5.0));
+    draw_rounded_rect(cr, dlg_x + s, dlg_y + s, kDlgW, kDlgH, 10);
+    cairo_fill(cr);
+  }
+  double tint_r = (app.surface_r * 0.65 + app.accent_r * 0.35) * 0.9;
+  double tint_g = (app.surface_g * 0.65 + app.accent_g * 0.35) * 0.9;
+  double tint_b = (app.surface_b * 0.65 + app.accent_b * 0.35) * 0.9;
+  cairo_set_source_rgba(cr, tint_r, tint_g, tint_b, 1.0);
   draw_rounded_rect(cr, dlg_x, dlg_y, kDlgW, kDlgH, 10);
   cairo_fill(cr);
   cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);

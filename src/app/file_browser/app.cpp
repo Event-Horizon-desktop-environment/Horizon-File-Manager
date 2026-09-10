@@ -197,6 +197,18 @@ void paint(AppState& app, cairo_t* cr) {
   int tab_h = app.tab_bar_height;
   int status_h = app.status_bar_height;
 
+  // Adaptive sidebar: fold into a toolbar toggle when the window is narrow —
+  // either below Nautilus 51's breakpoint, or the very moment the right-side
+  // button cluster would start overlapping the nav arrows/path bar.
+  // The fold only applies to the non-split layout; split panes keep the
+  // sidebar pinned-inline so the layout stays predictable.
+  bool prev_folded = app.sidebar_folded;
+  app.sidebar_folded = !app.split_view &&
+      w < std::max(AppState::kSidebarFoldBreakpoint,
+                   app.top_bar_min_width());
+  if (app.sidebar_folded != prev_folded) app.sidebar_folded_revealed = false;
+  if (!app.sidebar_folded) app.sidebar_folded_revealed = false;
+
   // Fit sidebar width to longest label
   if (app.sidebar_expanded && !app.sidebar_locations.empty()) {
     cairo_save(cr);
@@ -229,7 +241,7 @@ void paint(AppState& app, cairo_t* cr) {
     ops_panel_w = static_cast<int>(app.ops_panel_width * app.ops_panel_slide);
   }
   size_sidebar_to_content(app, cr);
-  int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
+  int sidebar_w = app.sidebar_w();
   // Info panel must never squeeze the content column to nothing.
   if (info_panel_w > 0) {
     int max_info = std::max(160, w - sidebar_w - ops_panel_w - 240);
@@ -466,6 +478,30 @@ void paint(AppState& app, cairo_t* cr) {
 
   // Status bar
   { auto ph = phase("statusbar"); draw_status_bar(app, cr, w, h, status_h); }
+
+  // Adaptive sidebar fold flap: the sidebar is a temporary overlay covering
+  // only the content column (below top/tab/banner bars), leaving the toolbars
+  // fully interactive while a strip of content peek out to the right.
+  if (app.sidebar_folded && app.sidebar_folded_revealed) {
+    int o_w = app.effective_sidebar_width();
+    int flap_top = app.content_top_y();
+    int flap_bottom = h - status_h;
+    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.15);
+    cairo_rectangle(cr, o_w, flap_top, w - o_w, flap_bottom - flap_top);
+    cairo_fill(cr);
+    cairo_save(cr);
+    cairo_rectangle(cr, 0, flap_top, o_w, flap_bottom - flap_top);
+    cairo_clip(cr);
+    double flap_alpha = app.sidebar_opacity_pct / 100.0;
+    cairo_set_source_rgba(cr, app.surface_r * 2, app.surface_g * 2, app.surface_b * 2, flap_alpha);
+    cairo_rectangle(cr, 0, flap_top, o_w, flap_bottom - flap_top);
+    cairo_fill(cr);
+    { auto ph = phase("sidebar"); draw_sidebar(app, cr, o_w, flap_top, view_h); }
+    cairo_restore(cr);
+    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.3);
+    cairo_rectangle(cr, o_w, flap_top, 1, flap_bottom - flap_top);
+    cairo_fill(cr);
+  }
 
   // Directory/file picker bar
   if (app.select_dir_mode || app.select_file_mode)

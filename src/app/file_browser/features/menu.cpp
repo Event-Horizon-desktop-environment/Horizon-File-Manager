@@ -978,6 +978,7 @@ void execute_context_menu_action(AppState& app, int item_idx) {
     app.create_is_folder = true;
     app.create_buf = "New Folder";
     app.create_cursor_pos = static_cast<int>(app.create_buf.size());
+    app.create_hover_btn = -1;
     draw(app);
     return;
   }
@@ -987,6 +988,7 @@ void execute_context_menu_action(AppState& app, int item_idx) {
     app.create_is_folder = false;
     app.create_buf = "New Document";
     app.create_cursor_pos = static_cast<int>(app.create_buf.size());
+    app.create_hover_btn = -1;
     draw(app);
     return;
   }
@@ -1004,6 +1006,7 @@ void execute_context_menu_action(AppState& app, int item_idx) {
     if (stem.empty()) stem = "New Document";
     app.create_buf = stem;
     app.create_cursor_pos = static_cast<int>(app.create_buf.size());
+    app.create_hover_btn = -1;
     draw(app);
     return;
   }
@@ -1666,6 +1669,7 @@ void execute_context_menu_action(AppState& app, int item_idx) {
         app.rename_ui_buf = entry.name;
         app.rename_ui_cursor_pos = static_cast<int>(entry.name.size());
         app.rename_ui_entry_path = entry.path;
+        app.rename_ui_hover_btn = -1;
       }
       break;
     }

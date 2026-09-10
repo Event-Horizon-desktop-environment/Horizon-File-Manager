@@ -411,9 +411,24 @@ void handle_click(AppState& app, int x, int y, int button) {
   app.pointerX = static_cast<double>(x);
   app.pointerY = static_cast<double>(y);
 
+  // ── Adaptive sidebar flap: clicks outside dismiss it ──
+  // The flap is a transient overlay, so clicking anywhere outside the flap
+  // closes it. The click is still processed normally (it acts on whatever
+  // was clicked), matching the Nautilus AdwFlap behavior.
+  if (app.sidebar_folded && app.sidebar_folded_revealed) {
+    int o_w = app.effective_sidebar_width();
+    bool on_toggle = app.sidebar_toggle_w > 0 &&
+                     x >= app.sidebar_toggle_x &&
+                     x < app.sidebar_toggle_x + app.sidebar_toggle_w &&
+                     y < app.top_bar_height;
+    bool in_flap = x < o_w && y >= app.content_top_y();
+    if (!in_flap && !on_toggle)
+      app.sidebar_folded_revealed = false;
+  }
+
   // Split pane: determine which pane was clicked
   if (app.split_view) {
-    int s_w = app.sidebar_expanded ? app.sidebar_width : 0;
+    int s_w = app.sidebar_w();
     int content_w = app.width - s_w - (app.info_panel_open ? app.info_panel_width : 0);
     int split = app.split_divider_x;
     if (split <= 0) split = content_w / 2;
@@ -464,17 +479,16 @@ void handle_click(AppState& app, int x, int y, int button) {
       if (y >= content_y && y < content_y + app.top_bar_height)
         bar_y = y - content_y;
     }
-    int s_w = app.sidebar_expanded ? app.sidebar_width : 0;
     int arrow_w = static_cast<int>(36.0 * zf);
-    int gap4 = static_cast<int>(4.0 * zf);
+    int gap4 = static_cast<int>(6.0 * zf);
     int mx6 = static_cast<int>(24.0 * zf);
     int path_pad = static_cast<int>(12.0 * zf);
     int house_w = static_cast<int>(16.0 * zf);
     int gap12 = static_cast<int>(12.0 * zf);
-    int nav_origin = s_w + static_cast<int>(20.0 * zf);
+    int nav_origin = app.nav_origin_x();
     int path_x = nav_origin + 2 * arrow_w + gap4 + mx6 + path_pad + house_w + gap12;
     auto& in_search_btn_x = app.active_pane ? app.r_search_btn_x : app.search_btn_x;
-    int path_w = in_search_btn_x - static_cast<int>(4.0 * zf) - path_x;
+    int path_w = in_search_btn_x - static_cast<int>(6.0 * zf) - path_x;
     bool in_nav_field =
         bar_y >= 0 && bar_y < app.top_bar_height && x >= path_x && x < path_x + path_w;
     if (!in_nav_field) {
@@ -564,7 +578,7 @@ void handle_click(AppState& app, int x, int y, int button) {
   }
 
   // ── Sidebar drag start ──
-  if (app.sidebar_expanded && button == 0x110) {
+  if (app.sidebar_w() > 0 && button == 0x110) {
     int edge_x = app.sidebar_width;
     if (x >= edge_x - 4 && x <= edge_x + 4) {
       app.sidebar_dragging = true;
@@ -1626,7 +1640,8 @@ void handle_click(AppState& app, int x, int y, int button) {
       if (x >= (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) && x < (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) + (app.active_pane ? app.r_sort_menu_w : app.sort_menu_w) &&
           y >= (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) && y < (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) + (app.active_pane ? app.r_sort_menu_h : app.sort_menu_h)) {
         int rel_y = y - (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) - kSortMenuPad;
-        int idx = rel_y / kSortMenuItemH;
+        int idx = rel_y / kSortMenuItemH +
+                  (app.active_pane ? app.r_sort_menu_scroll : app.sort_menu_scroll);
         if (idx >= 0 && idx < sort_menu_row_count()) {
           const SortMenuRow& row = sort_menu_row(idx);
           bool changed = false;
@@ -1814,7 +1829,7 @@ void handle_click(AppState& app, int x, int y, int button) {
 
       // Settings gear button
       {
-        int gap4 = static_cast<int>(4.0 * zf);
+        int gap4 = static_cast<int>(6.0 * zf);
         int gear_w = static_cast<int>(36.0 * zf);
         int gear_x = in_sort_btn_x + in_sort_btn_w + gap4;
         if (x >= gear_x && x < gear_x + gear_w) {
@@ -1856,9 +1871,18 @@ void handle_click(AppState& app, int x, int y, int button) {
       }
 
       // Navigation arrows (back, forward only)
-      int bx = (app.sidebar_expanded ? app.sidebar_width : 0) + static_cast<int>(20.0 * zf);
+      int bx = app.nav_origin_x();
       int btn_w = static_cast<int>(36.0 * zf);
-      int gap4 = static_cast<int>(4.0 * zf);
+      int gap4 = static_cast<int>(6.0 * zf);
+      // Sidebar fold toggle (drawn before the arrows when folded)
+      if (app.sidebar_folded && app.sidebar_toggle_w > 0 &&
+          x >= app.sidebar_toggle_x &&
+          x < app.sidebar_toggle_x + app.sidebar_toggle_w) {
+        app.sidebar_folded_revealed = !app.sidebar_folded_revealed;
+        app.sidebar_hover_idx = -1;
+        draw(app);
+        return;
+      }
       if (x >= bx && x < bx + btn_w && !app.cur_tab().nav_history.empty()) {
         navigate_back(app);
         draw(app);
@@ -1940,6 +1964,7 @@ void handle_click(AppState& app, int x, int y, int button) {
         if (!was_open)
           (app.active_pane ? app.r_sort_menu_open : app.sort_menu_open) = true;
         (app.active_pane ? app.r_sort_menu_hover : app.sort_menu_hover) = -1;
+        (app.active_pane ? app.r_sort_menu_scroll : app.sort_menu_scroll) = 0;
         draw(app);
         return;
       }
@@ -2062,16 +2087,15 @@ void handle_click(AppState& app, int x, int y, int button) {
         auto& pe_sel_end = app.active_pane ? app.r_path_edit_sel_end : app.path_edit_sel_end;
         auto& pe_dragging = app.active_pane ? app.r_path_edit_dragging : app.path_edit_dragging;
         double zf = app.zoom_pct / 100.0;
-        int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
         int arrow_w = static_cast<int>(36.0 * zf);
-        int gap4 = static_cast<int>(4.0 * zf);
+        int gap4 = static_cast<int>(6.0 * zf);
         int mx6 = static_cast<int>(24.0 * zf);
         int path_pad = static_cast<int>(12.0 * zf);
         int house_w = static_cast<int>(16.0 * zf);
         int gap12 = static_cast<int>(12.0 * zf);
-        int nav_origin = sidebar_w + static_cast<int>(20.0 * zf);
+        int nav_origin = app.nav_origin_x();
         int path_x_inner = nav_origin + 2 * arrow_w + gap4 + mx6 + path_pad + house_w + gap12;
-        int path_w_inner = in_search_btn_x - static_cast<int>(4.0 * zf) - path_x_inner;
+        int path_w_inner = in_search_btn_x - static_cast<int>(6.0 * zf) - path_x_inner;
         int text_x = path_x_inner;
         int field_right = path_x_inner + path_w_inner - static_cast<int>(14.0 * zf);
         if (x >= path_x_inner && x < field_right) {
@@ -2139,16 +2163,15 @@ void handle_click(AppState& app, int x, int y, int button) {
       (app.active_pane ? app.r_path_editing : app.path_editing) = true;
       {
         double zf = app.zoom_pct / 100.0;
-        int s_w = app.sidebar_expanded ? app.sidebar_width : 0;
         int arrow_w = static_cast<int>(36.0 * zf);
-        int gap4 = static_cast<int>(4.0 * zf);
+        int gap4 = static_cast<int>(6.0 * zf);
         int mx6 = static_cast<int>(24.0 * zf);
         int path_pad = static_cast<int>(12.0 * zf);
         int house_w = static_cast<int>(16.0 * zf);
         int gap12 = static_cast<int>(12.0 * zf);
-        int nav_origin = s_w + static_cast<int>(20.0 * zf);
+        int nav_origin = app.nav_origin_x();
         int path_x = nav_origin + 2 * arrow_w + gap4 + mx6 + path_pad + house_w + gap12;
-        int path_w = in_search_btn_x - static_cast<int>(4.0 * zf) - path_x;
+int path_w = in_search_btn_x - static_cast<int>(6.0 * zf) - path_x;
         int text_x = path_x;
         cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
         cairo_t* cr_tmp = cairo_create(tmp);
@@ -2270,23 +2293,28 @@ void handle_click(AppState& app, int x, int y, int button) {
         app.computer_scroll_smooth_current = 0;
         app.computer_scroll_smooth_target = 0;
         app.computer_needs_refresh = true;
+        app.sidebar_folded_revealed = false;
         draw(app);
         return;
       } else if (loc.kind == SidebarLocation::Kind::Drive && !loc.drive_id.empty()) {
         if (loc.is_mounted) {
           double zf = app.zoom_pct / 100.0;
-          int icon_left = app.sidebar_width - static_cast<int>(22.0 * zf);
+          int icon_left = app.effective_sidebar_width() - static_cast<int>(22.0 * zf);
           // Only unmount when clicking the mount indicator icon (right side of the item)
           if (x >= icon_left) {
             unmount_drive(app, sb_idx);
           } else {
             navigate_to(app, loc.path);
+            app.sidebar_folded_revealed = false;
           }
         } else {
           mount_drive(app, sb_idx);
         }
       } else {
         navigate_to(app, loc.path);
+        // Keep the flap open for favorites so reorder drags still work
+        if (loc.kind != SidebarLocation::Kind::Favorite)
+          app.sidebar_folded_revealed = false;
       }
       // Set up potential drag for reordering favorites
       if (loc.kind == SidebarLocation::Kind::Favorite) {
@@ -2309,6 +2337,15 @@ void handle_click(AppState& app, int x, int y, int button) {
       return;
     }
 
+    // ── Flap swallow ──
+    // Inside the revealed overlay but not on a sidebar item: swallow the click
+    // so it doesn't act on the content hidden beneath the flap.
+    if (app.sidebar_folded && app.sidebar_folded_revealed && button == 0x110 &&
+        x < app.effective_sidebar_width() && y >= app.content_top_y()) {
+      draw(app);
+      return;
+    }
+
     // ── Column header click (list view) ──
     if (app.cur_tab().view_mode == ViewMode::List && y >= app.top_bar_height + app.tab_bar_height &&
         y < app.top_bar_height + app.tab_bar_height + app.entry_height) {
@@ -2326,7 +2363,7 @@ void handle_click(AppState& app, int x, int y, int button) {
         draw(app);
         return;
       }
-      int s_w = app.sidebar_expanded ? app.sidebar_width : 0;
+      int s_w = app.sidebar_w();
       double zf = app.zoom_pct / 100.0;
       int text_x = s_w + static_cast<int>(28.0 * zf);
       int content_w = app.width - s_w;
@@ -2754,7 +2791,7 @@ void handle_pointer_move(AppState& app, int x, int y) {
 
   // ── Split pane divider drag ──
   if (app.split_view) {
-    int s_w = app.sidebar_expanded ? app.sidebar_width : 0;
+    int s_w = app.sidebar_w();
     int content_w = app.width - s_w - (app.info_panel_open ? app.info_panel_width : 0);
     int split = app.split_divider_x;
     if (split <= 0) split = content_w / 2;
@@ -2896,7 +2933,7 @@ void handle_pointer_move(AppState& app, int x, int y) {
   }
 
   // ── Sidebar resize edge hover ──
-  if (app.sidebar_expanded) {
+  if (app.sidebar_w() > 0) {
     int edge_x = app.sidebar_width;
     if (x >= edge_x - 4 && x <= edge_x + 4) {
       if (!app.sidebar_hover_resize) {
@@ -3009,6 +3046,52 @@ void handle_pointer_move(AppState& app, int x, int y) {
       draw(app);
     }
     return;
+  }
+
+  // ── Create dialog button hover ──
+  if (app.create_dialog_open) {
+    int dlg_w = 340;
+    int dlg_h = 160;
+    int dlg_x = (app.width - dlg_w) / 2;
+    int dlg_y = (app.height - dlg_h) / 2;
+    int btn_y = dlg_y + dlg_h - 50;
+    int btn_h = 32;
+    int btn_w = 90;
+    int cancel_x = dlg_x + dlg_w - 220;
+    int create_x = dlg_x + dlg_w - 110;
+    int new_hover_btn = -1;
+    if (x >= create_x && x < create_x + btn_w && y >= btn_y && y < btn_y + btn_h)
+      new_hover_btn = 0;
+    else if (x >= cancel_x && x < cancel_x + btn_w && y >= btn_y && y < btn_y + btn_h)
+      new_hover_btn = 1;
+    if (new_hover_btn != app.create_hover_btn) {
+      app.create_hover_btn = new_hover_btn;
+      draw(app);
+      return;
+    }
+  }
+
+  // ── Rename dialog button hover ──
+  if (app.rename_ui_open) {
+    int dlg_w = 400;
+    int dlg_h = 190;
+    int dlg_x = (app.width - dlg_w) / 2;
+    int dlg_y = (app.height - dlg_h) / 2;
+    int btn_y = dlg_y + dlg_h - 52;
+    int btn_h = 34;
+    int btn_w = 90;
+    int cancel_x = dlg_x + dlg_w - 230;
+    int rename_x = dlg_x + dlg_w - 120;
+    int new_hover_btn = -1;
+    if (x >= rename_x && x < rename_x + btn_w && y >= btn_y && y < btn_y + btn_h)
+      new_hover_btn = 0;
+    else if (x >= cancel_x && x < cancel_x + btn_w && y >= btn_y && y < btn_y + btn_h)
+      new_hover_btn = 1;
+    if (new_hover_btn != app.rename_ui_hover_btn) {
+      app.rename_ui_hover_btn = new_hover_btn;
+      draw(app);
+      return;
+    }
   }
 
   // ── Batch rename dialog hover ──
@@ -3211,8 +3294,13 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
     double zf = app.zoom_pct / 100.0;
     int btn_w = static_cast<int>(36.0 * zf);
-    int gap4 = static_cast<int>(4.0 * zf);
-    int bx = (app.sidebar_expanded ? app.sidebar_width : 0) + static_cast<int>(20.0 * zf);
+    int gap4 = static_cast<int>(6.0 * zf);
+    int bx = app.nav_origin_x();
+    // Sidebar fold toggle hover (drawn before the arrows when folded)
+    bool toggle_h = (bar_y < app.top_bar_height && app.sidebar_folded &&
+                     app.sidebar_toggle_w > 0 &&
+                     x >= app.sidebar_toggle_x &&
+                     x < app.sidebar_toggle_x + app.sidebar_toggle_w);
     bool bh = (bar_y < app.top_bar_height && x >= bx && x < bx + btn_w);
     bx += btn_w + gap4;
     bool fh = (bar_y < app.top_bar_height && x >= bx && x < bx + btn_w);
@@ -3266,6 +3354,7 @@ void handle_pointer_move(AppState& app, int x, int y) {
 
     if (bh != (app.active_pane ? app.r_arrow_back_hover : app.arrow_back_hover) ||
         fh != (app.active_pane ? app.r_arrow_forward_hover : app.arrow_forward_hover) ||
+        toggle_h != app.sidebar_toggle_hover ||
         vh != (app.active_pane ? app.r_view_mode_btn_hover : app.view_mode_btn_hover) ||
         search_h != (app.active_pane ? app.r_search_btn_hover : app.search_btn_hover) ||
         folder_search_h != (app.active_pane ? app.r_folder_search_btn_hover : app.folder_search_btn_hover) ||
@@ -3281,6 +3370,7 @@ void handle_pointer_move(AppState& app, int x, int y) {
         max_h != app.win_btn_max_hover) {
       (app.active_pane ? app.r_arrow_back_hover : app.arrow_back_hover) = bh;
       (app.active_pane ? app.r_arrow_forward_hover : app.arrow_forward_hover) = fh;
+      app.sidebar_toggle_hover = toggle_h;
       (app.active_pane ? app.r_view_mode_btn_hover : app.view_mode_btn_hover) = vh;
       (app.active_pane ? app.r_search_btn_hover : app.search_btn_hover) = search_h;
       (app.active_pane ? app.r_folder_search_btn_hover : app.folder_search_btn_hover) = folder_search_h;
@@ -3319,8 +3409,9 @@ void handle_pointer_move(AppState& app, int x, int y) {
     int new_hover = -1;
     if (x >= (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) && x < (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) + (app.active_pane ? app.r_sort_menu_w : app.sort_menu_w) &&
         y >= (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) && y < (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) + (app.active_pane ? app.r_sort_menu_h : app.sort_menu_h)) {
-      int rel_y = y - (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) - 6;
-      int idx = rel_y / 30;
+      int rel_y = y - (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) - kSortMenuPad;
+      int idx = rel_y / kSortMenuItemH +
+                (app.active_pane ? app.r_sort_menu_scroll : app.sort_menu_scroll);
       if (idx >= 0 && idx < sort_menu_row_count() &&
           sort_menu_row(idx).kind != SortMenuRow::Kind::Separator &&
           sort_menu_row(idx).kind != SortMenuRow::Kind::GroupCaption)
@@ -3409,16 +3500,15 @@ void handle_pointer_move(AppState& app, int x, int y) {
     auto& pm_pe_sel_start = app.active_pane ? app.r_path_edit_sel_start : app.path_edit_sel_start;
     auto& pm_pe_sel_end = app.active_pane ? app.r_path_edit_sel_end : app.path_edit_sel_end;
     double zf = app.zoom_pct / 100.0;
-    int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
     int arrow_w = static_cast<int>(36.0 * zf);
-    int gap4 = static_cast<int>(4.0 * zf);
+    int gap4 = static_cast<int>(6.0 * zf);
     int mx6 = static_cast<int>(24.0 * zf);
     int path_pad = static_cast<int>(12.0 * zf);
     int house_w = static_cast<int>(16.0 * zf);
     int gap12 = static_cast<int>(12.0 * zf);
-    int nav_origin = sidebar_w + static_cast<int>(20.0 * zf);
+    int nav_origin = app.nav_origin_x();
     int path_x_inner = nav_origin + 2 * arrow_w + gap4 + mx6 + path_pad + house_w + gap12;
-    int path_w_inner = pm_search_btn_x - static_cast<int>(4.0 * zf) - path_x_inner;
+    int path_w_inner = pm_search_btn_x - static_cast<int>(6.0 * zf) - path_x_inner;
     int text_x = path_x_inner;
     cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
     cairo_t* cr_tmp = cairo_create(tmp);
@@ -3574,7 +3664,7 @@ void handle_pointer_move(AppState& app, int x, int y) {
   // ── Column divider hover ──
   if (!(app.active_pane ? app.r_path_editing : app.path_editing) && app.cur_tab().view_mode == ViewMode::List && y >= app.top_bar_height + app.tab_bar_height &&
       y < app.top_bar_height + app.tab_bar_height + app.entry_height) {
-    int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
+    int sidebar_w = app.sidebar_w();
     double zf = app.zoom_pct / 100.0;
     int icon_size = static_cast<int>(24.0 * zf);
     int text_x = sidebar_w + icon_size + static_cast<int>(12.0 * zf);
@@ -3602,7 +3692,7 @@ void handle_pointer_move(AppState& app, int x, int y) {
 
   // ── Column divider drag ──
   if (app.col_resizing >= 0 && app.cur_tab().view_mode == ViewMode::List) {
-    int sidebar_w = app.sidebar_expanded ? app.sidebar_width : 0;
+    int sidebar_w = app.sidebar_w();
     int content_w = app.width - sidebar_w;
     double frac = static_cast<double>(x - sidebar_w) / static_cast<double>(std::max(1, content_w));
     frac = std::clamp(frac, 0.05, 0.85);
@@ -3628,7 +3718,7 @@ void handle_pointer_move(AppState& app, int x, int y) {
     if (loc.kind == SidebarLocation::Kind::Drive && loc.is_mounted) {
       double zf = 1.2;
       int ind_sz = static_cast<int>(18.0 * zf);
-      int ind_x = app.sidebar_width - static_cast<int>(24.0 * zf);
+      int ind_x = app.effective_sidebar_width() - static_cast<int>(24.0 * zf);
       if (x >= ind_x - 4 && x <= ind_x + ind_sz + 4)
         app.sidebar_mount_hover_idx = sb_idx;
     }
@@ -3775,6 +3865,26 @@ static int entry_bottom(AppState const& app, int vi) {
 }
 
 void handle_scroll(AppState& app, int x, int, double, double dy) {
+  // ── Sort menu wheel scroll ──
+  if (app.r_sort_menu_open || app.sort_menu_open) {
+    auto& smx = app.active_pane ? app.r_sort_menu_x : app.sort_menu_x;
+    auto& smy = app.active_pane ? app.r_sort_menu_y : app.sort_menu_y;
+    auto& smw = app.active_pane ? app.r_sort_menu_w : app.sort_menu_w;
+    auto& smh = app.active_pane ? app.r_sort_menu_h : app.sort_menu_h;
+    if (x >= smx && x < smx + smw && app.pointerY >= smy && app.pointerY < smy + smh) {
+      int& sc = app.active_pane ? app.r_sort_menu_scroll : app.sort_menu_scroll;
+      int n = sort_menu_row_count();
+      int visible = std::clamp((smh - kSortMenuPad * 2) / kSortMenuItemH, 1, n);
+      int max_scroll = std::max(0, n - visible);
+      int ns = std::clamp(sc + (dy > 0 ? 1 : -1), 0, max_scroll);
+      if (ns != sc) {
+        sc = ns;
+        draw(app);
+      }
+      return;
+    }
+  }
+
   if (app.open_with_open) {
     int total = static_cast<int>(app.open_with_apps.size());
     int rec_count = app.open_with_exact_count;
@@ -3785,7 +3895,7 @@ void handle_scroll(AppState& app, int x, int, double, double dy) {
     int list_h = std::min(total_content_h, 320);
     int max_scroll = std::max(0, total_content_h - list_h);
     if (max_scroll > 0) {
-      int delta = static_cast<int>(-dy * 40);
+      int delta = static_cast<int>(-dy * 1.5);
       int new_scroll = std::clamp(app.open_with_scroll + delta, 0, max_scroll);
       if (new_scroll != app.open_with_scroll) {
         app.open_with_scroll = new_scroll;
@@ -3818,11 +3928,11 @@ void handle_scroll(AppState& app, int x, int, double, double dy) {
     return;
   }
 
-  if (x < (app.sidebar_expanded ? app.sidebar_width : 0)) {
+  if (x < app.effective_sidebar_width()) {
     int panel_h = (app.op_progress && app.op_progress->active) ? 100 : 0;
     int available = app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height - panel_h;
     int max_scroll = std::max(0, app.sidebar_content_h - available);
-    app.sidebar_scroll_px = std::clamp(app.sidebar_scroll_px - static_cast<int>(dy * 3), 0, max_scroll);
+    app.sidebar_scroll_px = std::clamp(app.sidebar_scroll_px - static_cast<int>(dy * 1.2), 0, max_scroll);
     draw(app);
     return;
   }
@@ -3831,13 +3941,13 @@ void handle_scroll(AppState& app, int x, int, double, double dy) {
   if (app.cur_tab().view_mode == ViewMode::Computer) {
     int max_h = std::max(0, app.computer_content_h - (app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height));
     was_settled = std::abs(app.computer_scroll_smooth_current - app.computer_scroll_smooth_target) <= 0.5;
-    int target = std::clamp(static_cast<int>(std::lround(app.computer_scroll_smooth_target)) - static_cast<int>(dy * 40), 0, max_h);
+    int target = std::clamp(static_cast<int>(std::lround(app.computer_scroll_smooth_target)) - static_cast<int>(dy * 1.5), 0, max_h);
     app.computer_scroll_smooth_target = static_cast<double>(target);
     if (was_settled) app.computer_scroll_smooth_current = static_cast<double>(app.computer_scroll_px);
   } else {
     int max_h = std::max(0, app.cur_tab().content_h - (app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height));
     was_settled = std::abs(app.cur_tab().scroll_smooth_current - app.cur_tab().scroll_smooth_target) <= 0.5;
-    int target = std::clamp(static_cast<int>(std::lround(app.cur_tab().scroll_smooth_target)) - static_cast<int>(dy * 40), 0, max_h);
+    int target = std::clamp(static_cast<int>(std::lround(app.cur_tab().scroll_smooth_target)) - static_cast<int>(dy * 1.5), 0, max_h);
     app.cur_tab().scroll_smooth_target = static_cast<double>(target);
     if (was_settled) app.cur_tab().scroll_smooth_current = static_cast<double>(app.cur_tab().scroll_px);
   }
@@ -5195,6 +5305,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     app.create_is_folder = true;
     app.create_buf = "New Folder";
     app.create_cursor_pos = static_cast<int>(app.create_buf.size());
+    app.create_hover_btn = -1;
     draw(app);
     return true;
   }
@@ -5787,6 +5898,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       app.rename_ui_buf = entry.name;
       app.rename_ui_cursor_pos = static_cast<int>(entry.name.size());
       app.rename_ui_entry_path = entry.path;
+      app.rename_ui_hover_btn = -1;
       draw(app);
       return true;
     }

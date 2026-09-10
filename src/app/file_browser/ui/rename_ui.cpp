@@ -7,6 +7,22 @@
 
 namespace eh::file_browser {
 
+static void blit_icon(cairo_t* cr, cairo_surface_t* svg, double x, double y,
+                      double size, double r, double g, double b, double a = 1.0) {
+  if (!svg) return;
+  double sw = static_cast<double>(cairo_image_surface_get_width(svg));
+  double sh = static_cast<double>(cairo_image_surface_get_height(svg));
+  double sc = size / std::max(sw, sh);
+  cairo_save(cr);
+  cairo_set_source_rgba(cr, r, g, b, a);
+  cairo_rectangle(cr, x, y, size, size);
+  cairo_clip(cr);
+  cairo_translate(cr, x, y);
+  cairo_scale(cr, sc, sc);
+  cairo_mask_surface(cr, svg, 0, 0);
+  cairo_restore(cr);
+}
+
 void draw_rename_ui(AppState& app, cairo_t* cr) {
   int w = app.width;
   int h = app.height;
@@ -18,20 +34,34 @@ void draw_rename_ui(AppState& app, cairo_t* cr) {
   cairo_rectangle(cr, 0, 0, w, h);
   cairo_fill(cr);
 
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, 1.0);
-  draw_rounded_rect(cr, dlg_x, dlg_y, dlg_w, dlg_h, 12);
+  // Layered soft shadow (consistent with the redesigned menus)
+  for (int s = 4; s >= 1; --s) {
+    double a = 0.09 * (1.0 - s / 5.0);
+    cairo_set_source_rgba(cr, 0, 0, 0, a);
+    draw_rounded_rect(cr, dlg_x + s, dlg_y + s, dlg_w, dlg_h, 10);
+    cairo_fill(cr);
+  }
+
+  double tint_r = (app.surface_r * 0.65 + app.accent_r * 0.35) * 0.9;
+  double tint_g = (app.surface_g * 0.65 + app.accent_g * 0.35) * 0.9;
+  double tint_b = (app.surface_b * 0.65 + app.accent_b * 0.35) * 0.9;
+  cairo_set_source_rgba(cr, tint_r, tint_g, tint_b, 1.0);
+  draw_rounded_rect(cr, dlg_x, dlg_y, dlg_w, dlg_h, 10);
   cairo_fill(cr);
 
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.2);
+  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
   cairo_set_line_width(cr, 1);
-  draw_rounded_rect(cr, dlg_x + 0.5, dlg_y + 0.5, dlg_w - 1, dlg_h - 1, 11.5);
+  draw_rounded_rect(cr, dlg_x + 0.5, dlg_y + 0.5, dlg_w - 1, dlg_h - 1, 9.5);
   cairo_stroke(cr);
 
+  // Header: edit icon + title
+  blit_icon(cr, app.edit_svg, dlg_x + 20, dlg_y + 14, 16,
+            app.text_secondary_r, app.text_secondary_g, app.text_secondary_b);
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                           CAIRO_FONT_WEIGHT_BOLD);
-  cairo_set_font_size(cr, 16);
+  cairo_set_font_size(cr, 15);
   cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, dlg_x + 24, dlg_y + 32);
+  cairo_move_to(cr, dlg_x + 44, dlg_y + 30);
   cairo_show_text(cr, "Rename");
 
   auto slash = app.rename_ui_entry_path.rfind('/');
@@ -40,11 +70,13 @@ void draw_rename_ui(AppState& app, cairo_t* cr) {
     : "";
   if (dir_str.size() > 50)
     dir_str = "..." + dir_str.substr(dir_str.size() - 47);
+  blit_icon(cr, app.icon_folder_svg, dlg_x + 22, dlg_y + 41, 13,
+            app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 0.7);
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                           CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 11);
   cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.45);
-  cairo_move_to(cr, dlg_x + 24, dlg_y + 50);
+  cairo_move_to(cr, dlg_x + 42, dlg_y + 50);
   cairo_show_text(cr, dir_str.c_str());
 
   int input_x = dlg_x + 24;
@@ -52,8 +84,12 @@ void draw_rename_ui(AppState& app, cairo_t* cr) {
   int input_w = dlg_w - 48;
   int input_h = 36;
   cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.5);
-  draw_rounded_rect(cr, input_x, input_y, input_w, input_h, 8);
+  draw_rounded_rect(cr, input_x, input_y, input_w, input_h, 6);
   cairo_fill(cr);
+  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.3);
+  cairo_set_line_width(cr, 1);
+  draw_rounded_rect(cr, input_x + 0.5, input_y + 0.5, input_w - 1, input_h - 1, 5.5);
+  cairo_stroke(cr);
 
   cairo_set_font_size(cr, 14);
   cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
@@ -99,9 +135,15 @@ void draw_rename_ui(AppState& app, cairo_t* cr) {
   int cancel_x = dlg_x + dlg_w - 230;
   int rename_x = dlg_x + dlg_w - 120;
 
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, 0.55);
-  draw_rounded_rect(cr, cancel_x, btn_y, btn_w, btn_h, 8);
+  // Cancel (secondary)
+  double cancel_alpha = (app.rename_ui_hover_btn == 1) ? 0.75 : 0.55;
+  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, cancel_alpha);
+  draw_rounded_rect(cr, cancel_x, btn_y, btn_w, btn_h, 6);
   cairo_fill(cr);
+  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
+  cairo_set_line_width(cr, 1);
+  draw_rounded_rect(cr, cancel_x + 0.5, btn_y + 0.5, btn_w - 1, btn_h - 1, 5.5);
+  cairo_stroke(cr);
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                           CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 13);
@@ -111,8 +153,10 @@ void draw_rename_ui(AppState& app, cairo_t* cr) {
   cairo_move_to(cr, cancel_x + (btn_w - te.x_advance) / 2, btn_y + btn_h / 2 + te.height * 0.35);
   cairo_show_text(cr, "Cancel");
 
-  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.9);
-  draw_rounded_rect(cr, rename_x, btn_y, btn_w, btn_h, 8);
+  // Rename (primary)
+  double rename_alpha = (app.rename_ui_hover_btn == 0) ? 1.0 : 0.9;
+  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, rename_alpha);
+  draw_rounded_rect(cr, rename_x, btn_y, btn_w, btn_h, 6);
   cairo_fill(cr);
   cairo_set_source_rgba(cr, 1, 1, 1, 1.0);
   cairo_text_extents(cr, "Rename", &te);
@@ -181,15 +225,25 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
   int dlg_h = 24 + 28 + input_area_h + list_h + 56;
   int dlg_x = (w - dlg_w) / 2;
   int dlg_y = (h - dlg_h) / 2;
-  double sa = app.surface_opacity_pct / 100.0;
 
   // Backdrop
   cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
   cairo_rectangle(cr, 0, 0, w, h);
   cairo_fill(cr);
 
+  // Layered soft shadow (consistent with the redesigned menus)
+  for (int s = 4; s >= 1; --s) {
+    double a = 0.09 * (1.0 - s / 5.0);
+    cairo_set_source_rgba(cr, 0, 0, 0, a);
+    draw_rounded_rect(cr, dlg_x + s, dlg_y + s, dlg_w, dlg_h, 12);
+    cairo_fill(cr);
+  }
+
   // Card bg
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, 1.0);
+  double tint_r = (app.surface_r * 0.65 + app.accent_r * 0.35) * 0.9;
+  double tint_g = (app.surface_g * 0.65 + app.accent_g * 0.35) * 0.9;
+  double tint_b = (app.surface_b * 0.65 + app.accent_b * 0.35) * 0.9;
+  cairo_set_source_rgba(cr, tint_r, tint_g, tint_b, 1.0);
   draw_rounded_rect(cr, dlg_x, dlg_y, dlg_w, dlg_h, 12);
   cairo_fill(cr);
 
@@ -202,12 +256,14 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
   int cx = dlg_x + 20;
   int cy = dlg_y + 14;
 
-  // ── Title ──
+  // ── Title (with edit icon) ──
+  blit_icon(cr, app.edit_svg, cx, cy, 16,
+            app.text_secondary_r, app.text_secondary_g, app.text_secondary_b);
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                           CAIRO_FONT_WEIGHT_BOLD);
   cairo_set_font_size(cr, 15);
   cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, cx, cy + 14);
+  cairo_move_to(cr, cx + 24, cy + 14);
   char title[64];
   std::snprintf(title, sizeof(title), "Rename %d File%s", n, n == 1 ? "" : "s");
   cairo_show_text(cr, title);
@@ -218,7 +274,7 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
   int tab_w = 210;
   cairo_set_font_size(cr, 12);
 
-  auto draw_tab = [&](int tbx, bool active, const char* label) {
+  auto draw_tab = [&](int tbx, bool active, const char* label, cairo_surface_t* icon) {
     if (active) {
       cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.2);
       draw_rounded_rect(cr, tbx, tab_y, tab_w, tab_h, 6);
@@ -234,17 +290,23 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
       }
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.5);
     }
+    if (icon)
+      blit_icon(cr, icon, tbx + 12, tab_y + (tab_h - 14) / 2.0, 14,
+                active ? app.accent_r : app.text_secondary_r,
+                active ? app.accent_g : app.text_secondary_g,
+                active ? app.accent_b : app.text_secondary_b,
+                active ? 0.9 : 0.7);
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                             CAIRO_FONT_WEIGHT_NORMAL);
     cairo_text_extents_t te;
     cairo_text_extents(cr, label, &te);
-    cairo_move_to(cr, tbx + (tab_w - static_cast<int>(te.x_advance)) / 2,
+    cairo_move_to(cr, tbx + (tab_w - static_cast<int>(te.x_advance)) / 2 + 10,
                   tab_y + tab_h / 2 + static_cast<int>(te.height * 0.35));
     cairo_show_text(cr, label);
   };
 
-  draw_tab(cx, app.batch_rename_mode == 0, "Rename using a template");
-  draw_tab(cx + tab_w + 8, app.batch_rename_mode == 1, "Find and replace text");
+  draw_tab(cx, app.batch_rename_mode == 0, "Rename using a template", app.edit_svg);
+  draw_tab(cx + tab_w + 8, app.batch_rename_mode == 1, "Find and replace text", app.search_svg);
 
   int input_y = tab_y + tab_h + 10;
   int field_w = is_template ? 360 : 240;
@@ -298,7 +360,16 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
       static const char* add_options[] = {"1, 2, 3...", "01, 02, 03...", "001, 002, 003..."};
       int dd_h = 3 * dd_item_h + 4;
 
-      cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, sa);
+      for (int s = 3; s >= 0; --s) {
+        double a = 0.08 * (1.0 - s / 4.0);
+        cairo_set_source_rgba(cr, 0, 0, 0, a);
+        draw_rounded_rect(cr, dd_x + s * 2, dd_y + s * 2, dd_w, dd_h, 6);
+        cairo_fill(cr);
+      }
+      double tint_r = app.surface_r * 0.65 + app.accent_r * 0.35;
+      double tint_g = app.surface_g * 0.65 + app.accent_g * 0.35;
+      double tint_b = app.surface_b * 0.65 + app.accent_b * 0.35;
+      cairo_set_source_rgba(cr, tint_r, tint_g, tint_b, 1.0);
       draw_rounded_rect(cr, dd_x, dd_y, dd_w, dd_h, 6);
       cairo_fill(cr);
       cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.3);
@@ -311,7 +382,7 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
         int iy = dd_y + 2 + i * dd_item_h;
         if (app.batch_rename_add_hover == i) {
           cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.2);
-          cairo_rectangle(cr, dd_x + 2, iy, dd_w - 4, dd_item_h);
+          draw_rounded_rect(cr, dd_x + 4, iy + 1, dd_w - 8, dd_item_h - 2, 4);
           cairo_fill(cr);
         }
         cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.85);
@@ -427,9 +498,8 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
     cairo_show_text(cr, display.c_str());
 
     // Arrow in the middle
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.2);
-    cairo_move_to(cr, mid_x - 6, row_y + 14);
-    cairo_show_text(cr, "\u2192");
+    blit_icon(cr, app.arrow_right_svg, mid_x - 6, row_y + 8, 12,
+              app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 0.5);
 
     // New name (right side)
     bool changed = (e.new_name != e.old_name);
@@ -460,6 +530,10 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
   cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, cancel_alpha);
   draw_rounded_rect(cr, cancel_x, btn_y, btn_w, btn_h, 8);
   cairo_fill(cr);
+  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
+  cairo_set_line_width(cr, 1);
+  draw_rounded_rect(cr, cancel_x + 0.5, btn_y + 0.5, btn_w - 1, btn_h - 1, 7.5);
+  cairo_stroke(cr);
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                           CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 13);

@@ -5,8 +5,8 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
-#include <set>
 #include <thread>
+#include <unordered_map>
 
 namespace eh::file_browser {
 
@@ -15,7 +15,7 @@ namespace {
 std::mutex g_mtx;
 std::condition_variable g_cv;
 std::deque<std::pair<std::string, int>> g_queue;
-std::set<std::string> g_enqueued;
+std::unordered_map<std::string, int> g_pending;  // path -> largest size queued
 std::vector<ThumbBgResult> g_results;
 AppState* g_app = nullptr;
 bool g_running = false;
@@ -36,11 +36,14 @@ void worker_loop() {
 
     lk.lock();
     ThumbBgResult r;
-    r.path = std::move(path);
+    r.path = path;
     r.size = size;
     r.surface = s;
     g_results.push_back(std::move(r));
-    g_enqueued.erase(r.path);
+    // A larger decode for this path may still be queued (hover-preview
+    // upgrade) — keep the pending marker until the biggest one has landed.
+    auto pit = g_pending.find(r.path);
+    if (pit == g_pending.end() || size >= pit->second) g_pending.erase(r.path);
   }
 }
 
@@ -67,8 +70,17 @@ void thumb_pool_stop() {
 void thumb_pool_enqueue(AppState& app, const std::string& path, int size) {
   (void)app;
   std::lock_guard<std::mutex> lk(g_mtx);
-  if (!g_running || g_enqueued.count(path)) return;
-  g_enqueued.insert(path);
+  if (!g_running) return;
+  auto it = g_pending.find(path);
+  if (it != g_pending.end()) {
+    // Already queued/in-flight — only allow a strictly larger request
+    // through so the hover preview's hi-res decode isn't dropped behind a
+    // pending grid thumbnail.
+    if (size <= it->second) return;
+    it->second = size;
+  } else {
+    g_pending.emplace(path, size);
+  }
   g_queue.emplace_back(path, size);
   g_cv.notify_one();
 }

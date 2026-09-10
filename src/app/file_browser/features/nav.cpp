@@ -673,6 +673,29 @@ AppState::~AppState() {
   if (search_svg) cairo_surface_destroy(search_svg);
   if (folder_search_svg) cairo_surface_destroy(folder_search_svg);
   if (mounted_svg) cairo_surface_destroy(mounted_svg);
+  if (sidebar_toggle_svg) cairo_surface_destroy(sidebar_toggle_svg);
+  if (sort_chevron_svg) cairo_surface_destroy(sort_chevron_svg);
+  if (checkmark_svg) cairo_surface_destroy(checkmark_svg);
+  if (arrow_down_svg) cairo_surface_destroy(arrow_down_svg);
+  if (arrow_downward_svg) cairo_surface_destroy(arrow_downward_svg);
+  if (icon_hash_svg) cairo_surface_destroy(icon_hash_svg);
+  if (icon_bars_svg) cairo_surface_destroy(icon_bars_svg);
+  if (icon_clock_svg) cairo_surface_destroy(icon_clock_svg);
+  if (icon_file_text_svg) cairo_surface_destroy(icon_file_text_svg);
+  if (icon_person_svg) cairo_surface_destroy(icon_person_svg);
+  if (icon_people_svg) cairo_surface_destroy(icon_people_svg);
+  if (icon_shield_svg) cairo_surface_destroy(icon_shield_svg);
+  if (icon_file_svg) cairo_surface_destroy(icon_file_svg);
+  if (icon_link_svg) cairo_surface_destroy(icon_link_svg);
+  if (icon_folder_svg) cairo_surface_destroy(icon_folder_svg);
+  if (icon_eyeoff_svg) cairo_surface_destroy(icon_eyeoff_svg);
+  if (icon_list_svg) cairo_surface_destroy(icon_list_svg);
+  if (icon_aa_svg) cairo_surface_destroy(icon_aa_svg);
+  if (icon_minus_svg) cairo_surface_destroy(icon_minus_svg);
+  if (edit_svg) cairo_surface_destroy(edit_svg);
+  if (lock_svg) cairo_surface_destroy(lock_svg);
+  if (trash_svg) cairo_surface_destroy(trash_svg);
+  if (monitor_svg) cairo_surface_destroy(monitor_svg);
   if (icon_desktop_svg) cairo_surface_destroy(icon_desktop_svg);
   if (icon_documents_svg) cairo_surface_destroy(icon_documents_svg);
   if (icon_downloads_svg) cairo_surface_destroy(icon_downloads_svg);
@@ -2008,8 +2031,21 @@ void thumb_cache_install(AppState& app, const std::string& path, int size,
                          cairo_surface_t* s) {
   if (!s) return;
   auto dup = app.thumb_cache.find(path);
-  if (dup != app.thumb_cache.end()) {          // already have one — keep it
-    cairo_surface_destroy(s);
+  if (dup != app.thumb_cache.end()) {
+    // Already have one — keep the larger decode (e.g. a hover-preview's
+    // hi-res request replacing the grid's low-res thumb).
+    int ew = cairo_image_surface_get_width(dup->second);
+    int eh = cairo_image_surface_get_height(dup->second);
+    int nw = cairo_image_surface_get_width(s);
+    int nh = cairo_image_surface_get_height(s);
+    if (std::max(nw, nh) > std::max(ew, eh)) {
+      cairo_surface_destroy(dup->second);
+      dup->second = s;
+      app.thumb_lru.push_front(path);
+    } else {
+      cairo_surface_destroy(s);
+    }
+    (void)size;
     return;
   }
   app.thumb_cache[path] = s;
@@ -2868,18 +2904,41 @@ static void destroy_preview_popup(AppState& app);
 static bool create_preview_popup(AppState& app);
 static void commit_preview_popup(AppState& app);
 
-// Aspect-fit the hover popup around a full-res frame (same math as images)
-// VIDEO: original sizing, untouched — do not modify without asking.
+// Aspect-fit the hover popup around a full-res frame. The media card draws
+// the image over the whole body (pw × (ph − footer)), so this mirrors that
+// exactly: frame aspect dictates body size, then the footer band is added.
+// That keeps the drawn frame (contain, centered) filling the entire body
+// with nothing cropped — a cover-fit would otherwise clip wide frames.
 static void size_hover_popup_to_frame(int& popup_w, int& popup_h,
                                       int tw, int th) {
   int max_w = 700;
   int max_h = 800;
-  int margin = 12;        // whitespace around image within image area
-  int bottom_h = 50;      // filename + info area
-  double scale = std::min({static_cast<double>(max_w - margin * 2) / tw,
-                          static_cast<double>(max_h - margin * 2 - bottom_h) / th, 1.0});
-  popup_w = std::max(150, static_cast<int>(tw * scale + margin * 2));
-  popup_h = std::max(150, static_cast<int>(th * scale + margin * 2 + bottom_h));
+  const int footer = 26;     // filename/info band at the bottom
+  double scale = std::min({static_cast<double>(max_w) / tw,
+                          static_cast<double>(max_h - footer) / th, 1.0});
+  popup_w = std::max(150, static_cast<int>(tw * scale));
+  popup_h = std::max(150, static_cast<int>(th * scale + footer));
+}
+
+// Scale the popup *uniformly* so it always matches the image's aspect ratio
+// once preview_scale / the screen forces a smaller fit — otherwise the full-
+// bleed image would letterbox or crop.
+static void fit_hover_popup_to_screen(AppState& app, int& popup_w, int& popup_h) {
+  const double sc = std::clamp(app.preview_scale, 1.0, 10.0);
+  popup_w = static_cast<int>(static_cast<double>(popup_w) * sc);
+  popup_h = static_cast<int>(static_cast<double>(popup_h) * sc);
+  const int max_w = std::max(120, app.width - 32);
+  const int max_h = std::max(120, app.height - app.status_bar_height - 48);
+  if (popup_w > max_w || popup_h > max_h) {
+    const double s = std::min(static_cast<double>(max_w) / popup_w,
+                              static_cast<double>(max_h) / popup_h);
+    if (s < 1.0) {
+      popup_w = static_cast<int>(static_cast<double>(popup_w) * s);
+      popup_h = static_cast<int>(static_cast<double>(popup_h) * s);
+    }
+  }
+  popup_w = std::max(120, popup_w);
+  popup_h = std::max(120, popup_h);
 }
 
 // Position the hover popup centered on mouse X, above mouse Y, clamped on screen
@@ -2896,7 +2955,7 @@ static void place_hover_popup(AppState& app, int mx, int my,
   int popup_x = mx - popup_w / 2;
   int popup_y = my - popup_h - 20; // above cursor with 20px gap
 
-  int content_x = app.sidebar_expanded ? app.sidebar_width : 0;
+  int content_x = app.sidebar_w();
   int content_y = app.top_bar_height + app.tab_bar_height;
   if (popup_x < content_x + 10) popup_x = content_x + 10;
   if (popup_x + popup_w > app.width - 10)
@@ -2925,11 +2984,7 @@ void resize_active_image_preview(AppState& app) {
   if (tw <= 0 || th <= 0) return;
   int popup_w = 260, popup_h = 240;
   size_hover_popup_to_frame(popup_w, popup_h, tw, th);
-  const double sc = std::clamp(app.preview_scale, 1.0, 10.0);
-  popup_w = std::clamp(static_cast<int>(popup_w * sc), 120,
-                       std::max(120, app.width - 32));
-  popup_h = std::clamp(static_cast<int>(popup_h * sc), 120,
-                       std::max(120, app.height - app.status_bar_height - 48));
+  fit_hover_popup_to_screen(app, popup_w, popup_h);
   place_hover_popup(app, static_cast<int>(app.pointerX),
                     static_cast<int>(app.pointerY), popup_w, popup_h);
   if (create_preview_popup(app))
@@ -3045,11 +3100,7 @@ void check_hover_preview(AppState& app) {
             int th = cairo_image_surface_get_height(app.preview_thumb);
             if (tw > 0 && th > 0) {
               size_hover_popup_to_frame(popup_w, popup_h, tw, th);
-              const double sc = std::clamp(app.preview_scale, 1.0, 10.0);
-              popup_w = std::clamp(static_cast<int>(popup_w * sc), 120,
-                                   std::max(120, app.width - 32));
-              popup_h = std::clamp(static_cast<int>(popup_h * sc), 120,
-                                   std::max(120, app.height - app.status_bar_height - 48));
+              fit_hover_popup_to_screen(app, popup_w, popup_h);
             }
           }
 
@@ -3096,6 +3147,7 @@ void check_hover_preview(AppState& app) {
                 int popup_w = 260;
                 int popup_h = 240;
                 size_hover_popup_to_frame(popup_w, popup_h, tw, th);
+                fit_hover_popup_to_screen(app, popup_w, popup_h);
                 place_hover_popup(app, static_cast<int>(app.pointerX),
                                   static_cast<int>(app.pointerY),
                                   popup_w, popup_h);
@@ -3114,30 +3166,37 @@ void check_hover_preview(AppState& app) {
             }
             break;
           }
-        } else if (!app.preview_thumb &&
+        } else if (!app.preview_req_path.empty() &&
                    entry.path == app.preview_req_path) {
           // Background decode requested at hover start — upgrade as soon as
-          // the pool's result lands in the thumbnail cache.
+          // the pool's result lands in the thumbnail cache. The cache keeps
+          // the largest decode (grid lows are replaced by the hi-res preview
+          // request), so accept whatever appears; keep waiting while the
+          // final-size decode hasn't landed yet so a genuinely small source
+          // image (native < req) still previews at its true size.
           auto it = app.thumb_cache.find(entry.path);
           if (it != app.thumb_cache.end()) {
             cairo_surface_t* s2 = it->second;
             int tw = cairo_image_surface_get_width(s2);
             int th = cairo_image_surface_get_height(s2);
-            bool big_enough =
+            bool final_size =
                 std::max(tw, th) >= (app.preview_req_px * 3) / 4;
-            if (big_enough) {
-              if (preview_dbg()) fprintf(stderr, "[preview] accept '%s' %dx%d\n", entry.path.c_str(), tw, th);
+            bool larger = true;
+            if (app.preview_thumb) {
+              int ow = cairo_image_surface_get_width(app.preview_thumb);
+              int oh = cairo_image_surface_get_height(app.preview_thumb);
+              larger = std::max(tw, th) > std::max(ow, oh);
+            }
+            if (larger) {
+              if (preview_dbg()) fprintf(stderr, "[preview] accept '%s' %dx%d%s\n", entry.path.c_str(), tw, th, final_size ? " (final)" : "");
               cairo_surface_reference(s2);
+              if (app.preview_thumb) cairo_surface_destroy(app.preview_thumb);
               app.preview_thumb = s2;
               if (entry.type == FileType::Image && tw > 0 && th > 0) {
                 int popup_w = 260;
                 int popup_h = 240;
                 size_hover_popup_to_frame(popup_w, popup_h, tw, th);
-                const double sc = std::clamp(app.preview_scale, 1.0, 10.0);
-                popup_w = std::clamp(static_cast<int>(popup_w * sc), 120,
-                                     std::max(120, app.width - 32));
-                popup_h = std::clamp(static_cast<int>(popup_h * sc), 120,
-                                     std::max(120, app.height - app.status_bar_height - 48));
+                fit_hover_popup_to_screen(app, popup_w, popup_h);
                 place_hover_popup(app, static_cast<int>(app.pointerX),
                                   static_cast<int>(app.pointerY),
                                   popup_w, popup_h);
@@ -3145,7 +3204,7 @@ void check_hover_preview(AppState& app) {
                   commit_preview_popup(app);
               }
               app.pendingRedraw = true;
-              app.preview_req_path.clear();
+              if (final_size) app.preview_req_path.clear();
             }
           }
         }
@@ -3336,7 +3395,7 @@ void check_hover_tooltip(AppState& app) {
     int my = static_cast<int>(app.pointerY);
     int tx = mx + 16;
     int ty = my + 18;
-    int content_x = app.sidebar_expanded ? app.sidebar_width : 0;
+    int content_x = app.sidebar_w();
     int content_y = app.top_bar_height + app.tab_bar_height;
     if (tx + card_w > app.width - 10) tx = app.width - card_w - 10;
     if (tx < content_x + 10) tx = content_x + 10;
