@@ -1,9 +1,11 @@
 #include "app/file_browser/embed/embed.hpp"
 
+#include <clocale>
 #include <cstdio>
 #include <cstring>
 
 int main(int argc, char** argv) {
+  setlocale(LC_ALL, "");
   if (argc > 1 && std::strcmp(argv[1], "--select-directory") == 0) {
     std::string path;
     int ret = eh::file_browser::run_select_directory(path);

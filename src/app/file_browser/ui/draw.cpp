@@ -5747,6 +5747,65 @@ void hit_test_marquee(AppState& app) {
 
 // ── context menu drawing ─────────────────────────────────────────
 
+namespace {
+
+constexpr int kMenuRowH = 34;
+constexpr int kMenuSepH = 9;
+
+int menu_items_height(const std::vector<AppState::ContextMenuItem>& items) {
+  int h = 0;
+  for (const auto& item : items) {
+    h += (item.action == AppState::ContextMenuAction::Separator && item.sub_items.empty())
+             ? kMenuSepH
+             : kMenuRowH;
+  }
+  return h;
+}
+
+void clamp_popup_rect(AppState& app, int& x, int& y, int w, int h) {
+  if (x + w > app.width - 8) x = app.width - w - 8;
+  if (y + h > app.height - 8) y = app.height - h - 8;
+  if (x < 8) x = 8;
+  if (y < 8) y = 8;
+}
+
+struct ContextMenuGeometry {
+  int cm_x = 0, cm_y = 0, cm_w = 240, cm_h = 0;
+};
+
+ContextMenuGeometry context_menu_geometry(AppState& app) {
+  ContextMenuGeometry g;
+  g.cm_x = app.context_menu_x;
+  g.cm_y = app.context_menu_y;
+  g.cm_h = menu_items_height(app.context_menu_items);
+  clamp_popup_rect(app, g.cm_x, g.cm_y, g.cm_w, g.cm_h);
+  return g;
+}
+
+struct SubmenuGeometry {
+  int sub_x = 0, sub_y = 0, sm_w = 200, sm_h = 0;
+};
+
+SubmenuGeometry submenu_geometry(AppState& app, int hover) {
+  SubmenuGeometry g;
+  const auto& items = app.context_menu_items;
+  const ContextMenuGeometry m = context_menu_geometry(app);
+  g.sm_h = menu_items_height(items[static_cast<size_t>(hover)].sub_items);
+  g.sub_x = m.cm_x + m.cm_w + 3;
+  if (g.sub_x + g.sm_w > app.width - 8) g.sub_x = m.cm_x - g.sm_w - 3;
+  g.sub_y = m.cm_y;
+  for (int j = 0; j < hover; ++j) {
+    g.sub_y += (items[static_cast<size_t>(j)].action == AppState::ContextMenuAction::Separator &&
+                items[static_cast<size_t>(j)].sub_items.empty())
+                   ? kMenuSepH
+                   : kMenuRowH;
+  }
+  clamp_popup_rect(app, g.sub_x, g.sub_y, g.sm_w, g.sm_h);
+  return g;
+}
+
+} // namespace
+
 static void draw_submenu_popup(AppState& app, cairo_t* cr, const std::vector<AppState::ContextMenuItem>& items,
                                 int px, int py, int* out_w, int* out_h) {
   int sm_w = 200;
@@ -5822,19 +5881,11 @@ static void draw_submenu_popup(AppState& app, cairo_t* cr, const std::vector<App
 }
 
 void draw_context_menu(AppState& app, cairo_t* cr) {
-  int cm_x = app.context_menu_x;
-  int cm_y = app.context_menu_y;
-  int cm_w = 240;
-  int cm_h = 0;
-  for (const auto& item : app.context_menu_items) {
-    cm_h += (item.action == AppState::ContextMenuAction::Separator && item.sub_items.empty()) ? 9 : 34;
-  }
-
-  // Clamp to screen
-  if (cm_x + cm_w > app.width - 8) cm_x = app.width - cm_w - 8;
-  if (cm_y + cm_h > app.height - 8) cm_y = app.height - cm_h - 8;
-  if (cm_x < 8) cm_x = 8;
-  if (cm_y < 8) cm_y = 8;
+  const ContextMenuGeometry g = context_menu_geometry(app);
+  int cm_x = g.cm_x;
+  int cm_y = g.cm_y;
+  int cm_w = g.cm_w;
+  int cm_h = g.cm_h;
 
   // Drop shadow (3 layers, heavier)
   for (int s = 3; s >= 0; --s) {
@@ -5919,13 +5970,8 @@ void draw_context_menu(AppState& app, cairo_t* cr) {
       static_cast<size_t>(app.context_menu_hover) < app.context_menu_items.size()) {
     const auto& item = app.context_menu_items[app.context_menu_hover];
     if (!item.sub_items.empty()) {
-      int sub_x = cm_x + cm_w + 3;
-      int sub_y = cm_y;
-      for (int j = 0; j < app.context_menu_hover; ++j) {
-        sub_y += (app.context_menu_items[j].action == AppState::ContextMenuAction::Separator && app.context_menu_items[j].sub_items.empty()) ? 9 : 34;
-      }
-      int sm_w = 0, sm_h = 0;
-      draw_submenu_popup(app, cr, item.sub_items, sub_x, sub_y, &sm_w, &sm_h);
+      const SubmenuGeometry sg = submenu_geometry(app, app.context_menu_hover);
+      draw_submenu_popup(app, cr, item.sub_items, sg.sub_x, sg.sub_y, nullptr, nullptr);
     }
   }
 }
@@ -6148,38 +6194,21 @@ bool hit_test_fav_section(AppState& app, int x, int y) {
 
 int hit_test_context_menu(AppState& app, int x, int y) {
   if (!app.context_menu_open) return -1;
-  int cm_x = app.context_menu_x;
-  int cm_y = app.context_menu_y;
-  int cm_w = 240;
-  int cm_h = 0;
-  for (const auto& item : app.context_menu_items) {
-    cm_h += (item.action == AppState::ContextMenuAction::Separator && item.sub_items.empty()) ? 9 : 34;
-  }
-
-  // Clamp to screen (must match draw_context_menu)
-  if (cm_x + cm_w > app.width - 8) cm_x = app.width - cm_w - 8;
-  if (cm_y + cm_h > app.height - 8) cm_y = app.height - cm_h - 8;
-  if (cm_x < 8) cm_x = 8;
-  if (cm_y < 8) cm_y = 8;
+  const ContextMenuGeometry g = context_menu_geometry(app);
+  int cm_x = g.cm_x;
+  int cm_y = g.cm_y;
+  int cm_w = g.cm_w;
+  int cm_h = g.cm_h;
 
   // Check submenu first if hovered item has one
   if (app.context_menu_hover >= 0 &&
       static_cast<size_t>(app.context_menu_hover) < app.context_menu_items.size() &&
       !app.context_menu_items[app.context_menu_hover].sub_items.empty()) {
-    int sub_x = cm_x + cm_w + 3;
-    int sub_y = cm_y;
-    for (int j = 0; j < app.context_menu_hover; ++j) {
-      sub_y += (app.context_menu_items[j].action == AppState::ContextMenuAction::Separator && app.context_menu_items[j].sub_items.empty()) ? 9 : 34;
-    }
-    int sm_w = 200;
-    int sm_h = 0;
+    const SubmenuGeometry sg = submenu_geometry(app, app.context_menu_hover);
     const auto& subs = app.context_menu_items[app.context_menu_hover].sub_items;
-    for (const auto& si : subs) {
-      sm_h += (si.action == AppState::ContextMenuAction::Separator && si.sub_items.empty()) ? 9 : 34;
-    }
-    if (x >= sub_x && x < sub_x + sm_w && y >= sub_y && y < sub_y + sm_h) {
+    if (x >= sg.sub_x && x < sg.sub_x + sg.sm_w && y >= sg.sub_y && y < sg.sub_y + sg.sm_h) {
       // Hit on submenu - return index encoded as negative offset from -10
-      int rel_y = y - sub_y;
+      int rel_y = y - sg.sub_y;
       for (size_t i = 0; i < subs.size(); ++i) {
         int h = (subs[i].action == AppState::ContextMenuAction::Separator && subs[i].sub_items.empty()) ? 9 : 34;
         if (rel_y < h) {

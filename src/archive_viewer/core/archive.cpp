@@ -101,8 +101,10 @@ std::vector<ArchiveEntry> scan_archive(const std::string& path) {
 
   struct archive_entry* ae = nullptr;
   while (reader.read_next(&ae)) {
+    const char* name = archive_entry_pathname(ae);
+    if (!name) continue;
     ArchiveEntry e;
-    e.path = archive_entry_pathname(ae);
+    e.path = name;
     e.size = static_cast<uint64_t>(archive_entry_size(ae));
     e.mtime = archive_entry_mtime(ae);
     e.is_dir = archive_entry_filetype(ae) == AE_IFDIR;
@@ -295,8 +297,22 @@ ExtractResult do_extract(struct archive* a,
   int r;
   bool any_fail = false;
 
-  while ((r = archive_read_next_header(a, &ae)) == ARCHIVE_OK) {
-    std::string entry_path = archive_entry_pathname(ae);
+  while (true) {
+    r = archive_read_next_header(a, &ae);
+    if (r == ARCHIVE_EOF) break;
+    if (r == ARCHIVE_RETRY) continue;
+    if (r < ARCHIVE_WARN) {
+      any_fail = true;
+      if (result.error_msg.empty()) result.error_msg = archive_error_string(a);
+      break;
+    }
+
+    const char* pn = archive_entry_pathname(ae);
+    std::string entry_path = pn ? pn : "";
+    if (entry_path.empty()) {
+      archive_read_data_skip(a);
+      continue;
+    }
 
     // Skip encrypted entries
     if (archive_entry_is_encrypted(ae)) {
@@ -860,9 +876,19 @@ bool convert_archive(const std::string& src,
   bool any_fail = false;
   struct archive_entry* ae = nullptr;
 
-  while ((r = archive_read_next_header(a_in, &ae)) == ARCHIVE_OK) {
-    // Run safe_path on entry to catch traversal
-    std::string clean = safe_path(archive_entry_pathname(ae));
+  while (true) {
+    r = archive_read_next_header(a_in, &ae);
+    if (r == ARCHIVE_EOF) break;
+    if (r == ARCHIVE_RETRY) continue;
+    if (r < ARCHIVE_WARN) {
+      if (error_out && !any_fail) *error_out = archive_error_string(a_in);
+      any_fail = true;
+      break;
+    }
+
+    const char* pn = archive_entry_pathname(ae);
+    std::string raw = pn ? pn : "";
+    std::string clean = safe_path(raw);
     if (clean.empty()) {
       archive_read_data_skip(a_in);
       continue;
@@ -924,8 +950,21 @@ std::vector<EntryHash> hash_entries(const std::string& archive_path,
   }
 
   struct archive_entry* ae = nullptr;
-  while ((r = archive_read_next_header(a, &ae)) == ARCHIVE_OK) {
+  while (true) {
+    r = archive_read_next_header(a, &ae);
+    if (r == ARCHIVE_EOF) break;
+    if (r == ARCHIVE_RETRY) continue;
+    if (r < ARCHIVE_WARN) {
+      if (error_out && error_out->empty()) *error_out = archive_error_string(a);
+      break;
+    }
     if (archive_entry_filetype(ae) == AE_IFDIR) {
+      archive_read_data_skip(a);
+      continue;
+    }
+
+    const char* name = archive_entry_pathname(ae);
+    if (!name) {
       archive_read_data_skip(a);
       continue;
     }
@@ -948,7 +987,7 @@ std::vector<EntryHash> hash_entries(const std::string& archive_path,
     for (unsigned int i = 0; i < hash_len; ++i)
       std::snprintf(hex + i * 2, 3, "%02x", hash[i]);
 
-    result.push_back({archive_entry_pathname(ae), std::string(hex)});
+    result.push_back({name, std::string(hex)});
   }
 
   if (r != ARCHIVE_EOF && error_out) {

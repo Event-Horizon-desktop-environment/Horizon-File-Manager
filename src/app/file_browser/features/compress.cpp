@@ -354,8 +354,17 @@ static bool do_libarchive_extract_inner(const std::string& archive_path,
   int r;
 
   std::vector<std::pair<std::string, int64_t>> entries;
-  while ((r = archive_read_next_header(a, &ae)) == ARCHIVE_OK) {
-    entries.emplace_back(archive_entry_pathname(ae), archive_entry_size(ae));
+  while (true) {
+    r = archive_read_next_header(a, &ae);
+    if (r == ARCHIVE_EOF) break;
+    if (r == ARCHIVE_RETRY) continue;
+    if (r < ARCHIVE_WARN) break;
+    const char* pn = archive_entry_pathname(ae);
+    if (!pn) {
+      archive_read_data_skip(a);
+      continue;
+    }
+    entries.emplace_back(pn, archive_entry_size(ae));
   }
 
   if (entries.empty() && r != ARCHIVE_EOF) {
@@ -402,10 +411,16 @@ static bool do_libarchive_extract_inner(const std::string& archive_path,
   int processed = 0;
   ae = nullptr;
 
-  while ((r = archive_read_next_header(a, &ae)) == ARCHIVE_OK) {
+  while (true) {
+    r = archive_read_next_header(a, &ae);
+    if (r == ARCHIVE_EOF) break;
+    if (r == ARCHIVE_RETRY) continue;
+    if (r < ARCHIVE_WARN) break;
     if (prog->cancel.load()) break;
 
-    std::string entry_path = archive_entry_pathname(ae);
+    const char* pn = archive_entry_pathname(ae);
+    std::string entry_path = pn ? pn : "";
+    if (entry_path.empty()) { archive_read_data_skip(a); continue; }
     std::string clean = sanitize_archive_path(entry_path);
     if (clean.empty()) { archive_read_data_skip(a); continue; }
 

@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <clocale>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -1936,6 +1937,7 @@ void ArchiveState::open_archive(const std::string& path) {
 
 int run_gui(const std::string& archive_path,
             const std::vector<std::string>& create_files) {
+  setlocale(LC_ALL, "");
   ArchiveState s;
   ArchiveState* s_ptr = &s;
   s.archive_path = archive_path;

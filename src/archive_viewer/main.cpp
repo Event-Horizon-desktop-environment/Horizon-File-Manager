@@ -4,6 +4,7 @@
 #endif
 
 #include <algorithm>
+#include <clocale>
 #include <cinttypes>
 #include <cstdio>
 #include <cstring>
@@ -282,6 +283,7 @@ int cmd_batch_convert(int argc, char** argv) {
 } // namespace
 
 int main(int argc, char** argv) {
+  setlocale(LC_ALL, "");
   if (argc < 2) {
     print_usage(argv[0]);
     return 1;
