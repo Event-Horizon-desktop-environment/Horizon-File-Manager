@@ -1,5 +1,6 @@
 #include "../app.hpp"
 #include "../trace.hpp"
+#include "../features/sidebar.hpp"
 #include "../features/view_zoom.hpp"
 #include "app/file_browser/features/thumb_pool.hpp"
 #include "app/file_browser/features/dir_stats.hpp"
@@ -27,27 +28,10 @@
 #include <sys/statvfs.h>
 #include <unistd.h>
 
-// ── icon debug logger ──────────────────────────────────────────────
-static std::mutex g_icon_log_mtx;
-static void icon_log(const char* fmt, ...) {
-  static FILE* f = nullptr;
-  std::lock_guard<std::mutex> lock(g_icon_log_mtx);
-  if (!f) {
-    const char* home = std::getenv("HOME");
-    if (!home) return;
-    std::string path = std::string(home) + "/horizon-files-icons.log";
-    f = fopen(path.c_str(), "w");
-    if (!f) return;
-    fprintf(f, "icon log started\n");
-    fflush(f);
-  }
-  va_list ap;
-  va_start(ap, fmt);
-  vfprintf(f, fmt, ap);
-  va_end(ap);
-  fprintf(f, "\n");
-  fflush(f);
-}
+#include "draw_helpers.hpp"
+#include "draw_file_icons.hpp"
+#include "draw_thumbnails.hpp"
+#include "layout.hpp"
 
 #include "platform/common/icon_cache/icon_cache.hpp"
 #include "app/file_browser/features/svg_preview.hpp"
@@ -56,6 +40,7 @@ static void icon_log(const char* fmt, ...) {
 #include "app/file_browser/features/epub_preview.hpp"
 #include "app/file_browser/features/image_preview.hpp"
 #include "app/file_browser/features/thumbnail_cache.hpp"
+#include "app/file_browser/ui/pixblit.hpp"
 
 namespace fs = std::filesystem;
 
@@ -87,20 +72,6 @@ void preview_log(const char* fmt, ...) {
   fflush(f);
 }
 
-static bool trash_has_files() {
-  const char* home = std::getenv("HOME");
-  if (!home) return false;
-  fs::path trash_files = fs::path(home) / ".local/share/Trash/files";
-  std::error_code ec;
-  fs::directory_iterator it(trash_files, ec);
-  if (ec) return false;
-  for (auto& entry : it) {
-    (void)entry;
-    return true;
-  }
-  return false;
-}
-
 // ── drawing helpers ──────────────────────────────────────────────
 
 void draw_rounded_rect(cairo_t* cr, double x, double y, double w, double h,
@@ -113,56 +84,9 @@ void draw_rounded_rect(cairo_t* cr, double x, double y, double w, double h,
   cairo_close_path(cr);
 }
 
-// Strength used to blend every popup surface toward the wallpaper-derived
-// accent, so popups take colors from the active wallpaper palette.
-static constexpr double kPopupWallpaperTint = 0.35;
 
-// Dim the tinted surface slightly so popup cards read a bit darker.
-static constexpr double kPopupTintDarken = 0.9;
 
-static void wallpaper_tint_surface(const AppState& app, double strength,
-                                   double& out_r, double& out_g, double& out_b) {
-  out_r = (app.surface_r * (1.0 - strength) + app.accent_r * strength) * kPopupTintDarken;
-  out_g = (app.surface_g * (1.0 - strength) + app.accent_g * strength) * kPopupTintDarken;
-  out_b = (app.surface_b * (1.0 - strength) + app.accent_b * strength) * kPopupTintDarken;
-}
 
-// Layered soft shadow + solid card + hairline border shared by every popup.
-// Cards are always fully opaque (no transparency anywhere in dialogs).
-static void draw_dialog_card(AppState& app, cairo_t* cr, double x, double y,
-                             double w, double h, double r) {
-  for (int s = 4; s >= 1; --s) {
-    cairo_set_source_rgba(cr, 0, 0, 0, 0.09 * (1.0 - s / 5.0));
-    draw_rounded_rect(cr, x + s, y + s, w, h, r);
-    cairo_fill(cr);
-  }
-  double tint_r, tint_g, tint_b;
-  wallpaper_tint_surface(app, kPopupWallpaperTint, tint_r, tint_g, tint_b);
-  cairo_set_source_rgba(cr, tint_r, tint_g, tint_b, 1.0);
-  draw_rounded_rect(cr, x, y, w, h, r);
-  cairo_fill(cr);
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
-  cairo_set_line_width(cr, 1);
-  draw_rounded_rect(cr, x + 0.5, y + 0.5, w - 1, h - 1, r - 0.5);
-  cairo_stroke(cr);
-}
-
-// Blit a monochrome SVG glyph tinted to the given color (mask paint).
-static void blit_icon(cairo_t* cr, cairo_surface_t* svg, double x, double y,
-                      double size, double r, double g, double b, double a = 1.0) {
-  if (!svg) return;
-  double sw = static_cast<double>(cairo_image_surface_get_width(svg));
-  double sh = static_cast<double>(cairo_image_surface_get_height(svg));
-  double sc = size / std::max(sw, sh);
-  cairo_save(cr);
-  cairo_set_source_rgba(cr, r, g, b, a);
-  cairo_rectangle(cr, x, y, size, size);
-  cairo_clip(cr);
-  cairo_translate(cr, x, y);
-  cairo_scale(cr, sc, sc);
-  cairo_mask_surface(cr, svg, 0, 0);
-  cairo_restore(cr);
-}
 
 void draw_scrollbar(AppState& app, cairo_t* cr, int x, int y, int h,
                     int content_h, int view_h, int scroll_px, double r,
@@ -189,870 +113,9 @@ void draw_scrollbar(AppState& app, cairo_t* cr, int x, int y, int h,
   cairo_fill(cr);
 }
 
-// ── thumbnail cache ──────────────────────────────────────────────
 
-cairo_surface_t* eh_thumb_decode(const std::string& path, int size,
-                                 bool* used_video);
 
-cairo_surface_t* get_thumbnail(AppState& app, const std::string& path,
-                                        int size) {
-  auto it = app.thumb_cache.find(path);
-  if (it != app.thumb_cache.end())
-    return it->second;  // hot-path: no O(n) LRU reorder
 
-  // Check disk cache before decoding
-  if (cairo_surface_t* s = load_cached_thumbnail(path, size)) {
-    preview_log("get_thumbnail: DISK CACHE HIT path=%s size=%d", path.c_str(), size);
-    int sh = cairo_image_surface_get_height(s);
-    int stride = cairo_image_surface_get_stride(s);
-    app.thumb_cache_bytes += static_cast<std::size_t>(sh * stride);
-    app.thumb_cache[path] = s;
-    app.thumb_lru.push_front(path);
-    return s;
-  }
-
-  bool used_video = false;
-  cairo_surface_t* s =
-      eh::file_browser::thumb_decode_sync(path, size, &used_video);
-  if (!s) {
-    preview_log("get_thumbnail: FAIL path=%s size=%d video=%d", path.c_str(),
-                size, (int)used_video);
-    return nullptr;
-  }
-
-  while (app.thumb_cache_bytes >= AppState::kThumbCacheMaxBytes &&
-         !app.thumb_lru.empty()) {
-    auto evict = app.thumb_lru.back();
-    auto ev = app.thumb_cache.find(evict);
-    if (ev != app.thumb_cache.end()) {
-      int eh = cairo_image_surface_get_height(ev->second);
-      int estr = cairo_image_surface_get_stride(ev->second);
-      app.thumb_cache_bytes -= static_cast<std::size_t>(eh * estr);
-      cairo_surface_destroy(ev->second);
-      app.thumb_cache.erase(ev);
-    }
-    app.thumb_lru.pop_back();
-  }
-
-  int sh = cairo_image_surface_get_height(s);
-  int stride = cairo_image_surface_get_stride(s);
-  app.thumb_cache_bytes += static_cast<std::size_t>(sh * stride);
-  app.thumb_cache[path] = s;
-  app.thumb_lru.push_front(path);
-  // Save to disk cache for next time (skip video — already handled by ffmpegthumbnailer)
-  if (!used_video)
-    save_thumbnail_cache(path, size, s);
-  return s;
-}
-
-// Pure thumbnail decode: disk cache first, then type-specific loader;
-// saves back to disk cache (except video). No shared state touched — safe
-// on any thread.
-cairo_surface_t* thumb_decode_sync(const std::string& path, int size,
-                                   bool* used_video) {
-  *used_video = is_video_extension(path);
-  if (cairo_surface_t* cached = load_cached_thumbnail(path, size)) return cached;
-
-  cairo_surface_t* s = nullptr;
-  if      (*used_video)            s = load_video_thumbnail(path, size);
-  else if (is_svg_extension(path)) s = load_svg_thumbnail(path, size);
-  else if (is_pdf_extension(path)) s = load_pdf_thumbnail(path, size);
-  else if (is_epub_extension(path)) s = load_epub_thumbnail(path, size);
-  else if (is_image_extension(path)) s = load_image_thumbnail(path, size);
-
-  if (s && !*used_video) save_thumbnail_cache(path, size, s);
-  return s;
-}
-
-// Paint-path rule (Dolphin/Nemo): NEVER decode here. Cache hit returns the
-// surface; a miss queues background decoding and draws the generic icon
-// this frame. The frame loop installs finished surfaces between paints.
-static cairo_surface_t* get_thumbnail_lazy(AppState& app, int vi,
-                                            const std::string& path,
-                                            int size) {
-  auto it = app.thumb_cache.find(path);
-  if (it != app.thumb_cache.end())
-    return it->second;  // No LRU reorder here: std::list::remove is O(n) and
-                        // this runs for every visible row on every frame.
-                        // Recency is tracked at install time instead.
-  thumb_pool_enqueue(app, path, size);
-  return nullptr;
-}
-
-static bool is_pdf_ext(const std::string& path) {
-  if (path.size() < 5) return false;
-  const char* s = path.c_str();
-  size_t i = path.size() - 4;
-  return (s[i] == '.' || s[i] == '.') &&
-         (s[i+1] == 'p' || s[i+1] == 'P') &&
-         (s[i+2] == 'd' || s[i+2] == 'D') &&
-         (s[i+3] == 'f' || s[i+3] == 'F');
-}
-
-static const char* icon_name_for_file_type(FileType ft, const std::string* file_path = nullptr) {
-  if (ft == FileType::Document && file_path && is_pdf_ext(*file_path)) {
-    icon_log("[icon] PDF detected: path=%s -> icon=application-pdf", file_path->c_str());
-    return "application-pdf";
-  }
-  const char* name;
-  switch (ft) {
-    case FileType::Folder:     name = "folder"; break;
-    case FileType::Image:      name = "image-x-generic"; break;
-    case FileType::Audio:      name = "audio-x-generic"; break;
-    case FileType::Video:      name = "video-x-generic"; break;
-    case FileType::Text:       name = "text-x-generic"; break;
-    case FileType::Markdown:   name = "text-x-markdown"; break;
-    case FileType::Code:       name = "text-x-code"; break;
-    case FileType::Document:   name = "x-office-document"; break;
-    case FileType::Font:       name = "font-x-generic"; break;
-    case FileType::Archive:    name = "application-x-archive"; break;
-    case FileType::Executable: name = "application-x-executable"; break;
-    case FileType::Web:        name = "text-html"; break;
-    default:                   name = "text-x-generic"; break;
-  }
-  icon_log("[icon] ft=%d path=%s -> icon=%s", static_cast<int>(ft),
-           file_path ? file_path->c_str() : "(null)", name);
-  return name;
-}
-
-// Small status badge drawn over a file icon's lower-left corner.
-// kind: 0 = symlink (accent arrow), 1 = read-only (padlock), 2 = no access,
-//       3 = locked by root (amber padlock with keyhole)
-static void draw_emblem_badge(AppState& app, cairo_t* cr, double cx, double cy,
-                              double r, int kind) {
-  // Backing disc
-  if (kind == 0) {
-    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 1.0);
-  } else if (kind == 1) {
-    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
-                          app.text_secondary_b, 1.0);
-  } else if (kind == 3) {
-    cairo_set_source_rgba(cr, 0.95, 0.62, 0.10, 1.0);
-  } else {
-    cairo_set_source_rgba(cr, 0.85, 0.25, 0.25, 1.0);
-  }
-  cairo_arc(cr, cx, cy, r, 0, 2 * M_PI);
-  cairo_fill(cr);
-  cairo_set_line_width(cr, std::max(1.0, r * 0.14));
-  cairo_set_source_rgba(cr, 1, 1, 1, 0.9);
-
-  if (kind == 0) {
-    // Diagonal arrow (symlink)
-    double a = r * 0.45;
-    cairo_move_to(cr, cx - a, cy + a);
-    cairo_line_to(cr, cx + a * 0.8, cy - a * 0.8);
-    cairo_stroke(cr);
-    // Arrowhead
-    cairo_move_to(cr, cx + a * 0.8, cy - a * 0.8);
-    cairo_line_to(cr, cx + a * 0.8 - a * 0.55, cy - a * 0.8);
-    cairo_stroke(cr);
-    cairo_move_to(cr, cx + a * 0.8, cy - a * 0.8);
-    cairo_line_to(cr, cx + a * 0.8, cy - a * 0.8 + a * 0.55);
-    cairo_stroke(cr);
-  } else if (kind == 1 || kind == 3) {
-    // Padlock: shackle arc + body (+ keyhole for root lock)
-    double bw = r * 0.9, bh = r * 0.7;
-    cairo_rectangle(cr, cx - bw / 2, cy - bh * 0.1, bw, bh);
-    cairo_fill(cr);
-    cairo_set_line_width(cr, std::max(1.0, r * 0.18));
-    cairo_arc(cr, cx, cy - bh * 0.1, bw * 0.32, M_PI, 2 * M_PI);
-    cairo_stroke(cr);
-    if (kind == 3) {
-      cairo_set_source_rgba(cr, 0, 0, 0, 0.55);
-      cairo_arc(cr, cx, cy + bh * 0.25, std::max(0.8, r * 0.13), 0, 2 * M_PI);
-      cairo_fill(cr);
-    }
-  } else {
-    // "No entry" bar
-    double bw = r * 1.1, bh = r * 0.28;
-    cairo_rectangle(cr, cx - bw / 2, cy - bh / 2, bw, bh);
-    cairo_fill(cr);
-  }
-}
-
-static void draw_file_icon_body(AppState& app, cairo_t* cr, int x, int y,
-                                  int size, FileType ft, bool selected,
-                                  const std::string& icon_name = {},
-                                  cairo_surface_t* thumb = nullptr,
-                                  const std::string* file_path = nullptr) {
-  // Types that support thumbnails: draw thumb first if available
-  bool has_thumb = thumb != nullptr;
-  bool thumb_type = (ft == FileType::Image || ft == FileType::Video);
-  bool doc_thumb = (ft == FileType::Document && thumb && file_path
-                    && (is_pdf_extension(*file_path) || is_epub_extension(*file_path)));
-
-  if ((thumb_type || doc_thumb) && has_thumb) {
-    double iw = static_cast<double>(cairo_image_surface_get_width(thumb));
-    double ih = static_cast<double>(cairo_image_surface_get_height(thumb));
-    if (iw > 0 && ih > 0) {
-      double scale = size / std::max(1.0, std::max(iw, ih));
-      cairo_save(cr);
-      // White page background behind PDF thumbnails
-      if (file_path && is_pdf_extension(*file_path)) {
-        double bw = iw * scale;
-        double bh = ih * scale;
-        double bx = x + (size - bw) / 2;
-        double by = y + (size - bh) / 2;
-        cairo_rectangle(cr, bx, by, bw, bh);
-        cairo_set_source_rgba(cr, 1, 1, 1, 1);
-        cairo_fill(cr);
-      }
-      double rad = 6;
-      cairo_new_path(cr);
-      cairo_arc(cr, x + rad, y + rad, rad, M_PI, 3 * M_PI / 2);
-      cairo_arc(cr, x + size - rad, y + rad, rad, 3 * M_PI / 2, 2 * M_PI);
-      cairo_arc(cr, x + size - rad, y + size - rad, rad, 0, M_PI / 2);
-      cairo_arc(cr, x + rad, y + size - rad, rad, M_PI / 2, M_PI);
-      cairo_close_path(cr);
-      cairo_clip(cr);
-      cairo_translate(cr, x, y);
-      cairo_scale(cr, scale, scale);
-      cairo_set_source_surface(
-          cr, thumb, (size / scale - iw) / 2, (size / scale - ih) / 2);
-      cairo_paint(cr);
-      cairo_restore(cr);
-      return;
-    }
-  }
-
-  // Fallback to per-entry icon name (MIME-type-derived) if set
-  if (!icon_name.empty()) {
-    const auto* ic = app.icons.tray_icon(icon_name, size);
-    if (ic && ic->surface) {
-      double iw = static_cast<double>(ic->width);
-      double ih = static_cast<double>(ic->height);
-      if (iw > 0 && ih > 0) {
-        double scale = size / std::max(1.0, std::max(iw, ih));
-        cairo_save(cr);
-        cairo_translate(cr, x, y);
-        cairo_scale(cr, scale, scale);
-        cairo_set_source_surface(cr, ic->surface,
-                                 (size / scale - iw) / 2,
-                                 (size / scale - ih) / 2);
-        cairo_paint(cr);
-        cairo_restore(cr);
-        return;
-      }
-    }
-  }
-
-  const char* icon_name_resolved = icon_name_for_file_type(ft, file_path);
-  const auto* ic = app.icons.tray_icon(icon_name_resolved, size);
-  if (ic && ic->surface) {
-    double iw = static_cast<double>(ic->width);
-    double ih = static_cast<double>(ic->height);
-    if (iw > 0 && ih > 0) {
-      icon_log("[icon] FOUND in theme: name=%s %dx%d", icon_name_resolved, ic->width, ic->height);
-      double scale = size / std::max(1.0, std::max(iw, ih));
-      cairo_save(cr);
-      cairo_translate(cr, x, y);
-      cairo_scale(cr, scale, scale);
-      cairo_set_source_surface(cr, ic->surface,
-                               (size / scale - iw) / 2,
-                               (size / scale - ih) / 2);
-      cairo_paint(cr);
-      cairo_restore(cr);
-      return;
-    }
-  }
-  icon_log("[icon] NOT FOUND in theme: name=%s -> using fallback color", icon_name_resolved);
-
-  double r, g, b;
-  switch (ft) {
-    case FileType::Folder:     r = 0.85; g = 0.65; b = 0.20; break;
-    case FileType::Image:      r = 0.20; g = 0.75; b = 0.40; break;
-    case FileType::Audio:      r = 0.30; g = 0.55; b = 0.90; break;
-    case FileType::Video:      r = 0.70; g = 0.35; b = 0.80; break;
-    case FileType::Text:       r = 0.50; g = 0.50; b = 0.55; break;
-    case FileType::Markdown:   r = 0.25; g = 0.50; b = 0.70; break;
-    case FileType::Code:       r = 0.30; g = 0.60; b = 0.55; break;
-    case FileType::Document:   r = 0.20; g = 0.45; b = 0.75; break;
-    case FileType::Font:       r = 0.55; g = 0.35; b = 0.70; break;
-    case FileType::Archive:    r = 0.70; g = 0.50; b = 0.20; break;
-    case FileType::Executable: r = 0.60; g = 0.40; b = 0.25; break;
-    case FileType::Web:        r = 0.30; g = 0.55; b = 0.85; break;
-    default:                   r = 0.40; g = 0.40; b = 0.45; break;
-  }
-  if (selected) { r = r * 1.3; g = g * 1.3; b = b * 1.3; }
-
-  cairo_save(cr);
-  double rad = size * 0.2;
-  cairo_new_path(cr);
-  cairo_arc(cr, x + rad, y + rad, rad, M_PI, 3 * M_PI / 2);
-  cairo_arc(cr, x + size - rad, y + rad, rad, 3 * M_PI / 2, 2 * M_PI);
-  cairo_arc(cr, x + size - rad, y + size - rad, rad, 0, M_PI / 2);
-  cairo_arc(cr, x + rad, y + size - rad, rad, M_PI / 2, M_PI);
-  cairo_close_path(cr);
-  cairo_set_source_rgba(cr, r, g, b, 1.0);
-  cairo_fill(cr);
-
-  const char* label = "?";
-  switch (ft) {
-    case FileType::Folder:     label = "F"; break;
-    case FileType::Image:      label = "I"; break;
-    case FileType::Audio:      label = "A"; break;
-    case FileType::Video:      label = "V"; break;
-    case FileType::Text:       label = "T"; break;
-    case FileType::Markdown:   label = "M"; break;
-    case FileType::Code:       label = "C"; break;
-    case FileType::Document:   label = "D"; break;
-    case FileType::Font:       label = "f"; break;
-    case FileType::Archive:    label = "Z"; break;
-    case FileType::Executable: label = "X"; break;
-    case FileType::Web:        label = "W"; break;
-    default:                   label = "?"; break;
-  }
-  cairo_set_source_rgba(cr, 1, 1, 1, 1.0);
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_BOLD);
-  cairo_set_font_size(cr, size * 0.45);
-  cairo_text_extents_t te;
-  cairo_text_extents(cr, label, &te);
-  cairo_move_to(cr, x + (size - te.width) / 2 - te.x_bearing,
-                y + (size + te.height) / 2 - te.y_bearing);
-  cairo_show_text(cr, label);
-  cairo_restore(cr);
-}
-
-// Icon + status emblems (symlink / read-only / no access / root lock)
-static void draw_file_icon_cairo(AppState& app, cairo_t* cr, int x, int y,
-                                  int size, FileType ft, bool selected,
-                                  const std::string& icon_name = {},
-                                  cairo_surface_t* thumb = nullptr,
-                                  const std::string* file_path = nullptr,
-                                  const FileEntry* entry = nullptr) {
-  draw_file_icon_body(app, cr, x, y, size, ft, selected, icon_name, thumb, file_path);
-  if (!entry) return;
-
-  // Skip emblems on tiny icons
-  if (size < 24) return;
-
-  double r = std::max(5.0, size * 0.11);
-  double pad = r * 0.4;
-  double cy = y + size - r - pad;
-  double cx = x + r + pad;
-  int drawn = 0;
-
-  // Root-owned entries the current user cannot modify
-  bool locked_by_root = entry->owned_by_root && geteuid() != 0;
-
-  if (entry->is_symlink) {
-    draw_emblem_badge(app, cr, cx + drawn * (r * 2 + pad * 1.6), cy, r, 0);
-    ++drawn;
-  }
-  if (locked_by_root) {
-    draw_emblem_badge(app, cr, cx + drawn * (r * 2 + pad * 1.6), cy, r, 3);
-    ++drawn;
-  } else if (entry->readable && !entry->writable) {
-    draw_emblem_badge(app, cr, cx + drawn * (r * 2 + pad * 1.6), cy, r, 1);
-    ++drawn;
-  }
-  if (!entry->readable || (entry->is_dir && entry->mode &&
-                           !(entry->mode & S_IXUSR))) {
-    draw_emblem_badge(app, cr, cx + drawn * (r * 2 + pad * 1.6), cy, r, 2);
-  }
-}
-
-static std::string format_size(uint64_t bytes) {
-  if (bytes < 1024) return std::to_string(bytes) + " B";
-  if (bytes < 1024 * 1024) return std::to_string(bytes / 1024) + " KB";
-  if (bytes < 1024ULL * 1024 * 1024)
-    return std::to_string(bytes / (1024 * 1024)) + " MB";
-  return std::to_string(bytes / (1024ULL * 1024 * 1024)) + " GB";
-}
-
-// ── sidebar ──────────────────────────────────────────────────────
-
-void size_sidebar_to_content(AppState& app, cairo_t* cr) {
-  if (!app.sidebar_expanded || app.sidebar_locations.empty()) return;
-  constexpr double kSbZf = 1.2; // must match draw_sidebar's pinned scale
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                         CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 13.0 * kSbZf);
-  double label_x = (16 + 20 + 12) * kSbZf;
-  double widest = 0;
-  for (const auto& loc : app.sidebar_locations) {
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, loc.label.c_str(), &te);
-    widest = std::max(widest, static_cast<double>(te.x_advance));
-  }
-  // icon + gap + widest label + mount-indicator/usage reserve + edge padding
-  int needed = static_cast<int>(label_x + widest + 40.0 * kSbZf + 16.0 * kSbZf);
-  // Leave room for the info/ops panels and a usable content column so the
-  // three can never combine into an overlap on narrow windows.
-  int reserve = (app.info_panel_open ? app.info_panel_width : 0) +
-                (app.ops_panel_slide > 0.01
-                     ? static_cast<int>(app.ops_panel_width * app.ops_panel_slide)
-                     : 0);
-  int cap = std::max(160, std::min(std::max(340, app.width * 3 / 5),
-                                   app.width - reserve - 240));
-  int want = std::max(app.sidebar_width, needed);
-  app.sidebar_width = std::min(want, cap);
-}
-
-void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
-                  int) {
-  // One-shot: log first-paint sub-phases to find cold-start hot spots.
-  struct SubMark { const char* n; };
-  auto sub_t0 = std::chrono::steady_clock::now();
-  auto sub = [&, tag = ""](const char* n) mutable {
-    static int calls = 0;
-    if (calls++ > 6) return;   // only the first paint's marks
-    double ms = std::chrono::duration<double, std::milli>(
-                    std::chrono::steady_clock::now() - sub_t0).count();
-    if (trace::enabled().load(std::memory_order_relaxed))
-      trace::log("SIDEBAR FIRST %s %.2f ms", n, ms);
-    sub_t0 = std::chrono::steady_clock::now();
-    (void)tag;
-  };
-  double zf = app.zoom_pct / 100.0;
-  int total = static_cast<int>(app.sidebar_locations.size());
-  // Find section boundaries in sidebar_locations order:
-  //   Places (Home..Trash) → Favorites → Drives (Root, Drive)
-  int places_end = 0;
-  while (places_end < total &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Favorite &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Root &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Drive)
-    ++places_end;
-
-  int fav_start = places_end;
-  while (fav_start < total &&
-         app.sidebar_locations[fav_start].kind == SidebarLocation::Kind::Favorite)
-    ++fav_start;
-
-  int drives_start = fav_start;
-
-  // Compute total sidebar content height for scroll clamping
-  // Items keep a fixed readable size and overflow scrolls
-  {
-    int p_count = places_end;
-    int f_count = fav_start - places_end;
-    int d_count = total - drives_start;
-    int item_h = static_cast<int>(36 * 1.2);
-    int drive_extra_h = static_cast<int>(16 * 1.2);
-    int header_h = static_cast<int>(24 * 1.2);
-    int div_total = static_cast<int>(17 * 1.2);
-    int drives_h = 0;
-    for (int i = drives_start; i < total; ++i) {
-      const auto& loc = app.sidebar_locations[i];
-      drives_h += item_h;
-      if ((loc.kind == SidebarLocation::Kind::Drive ||
-           loc.kind == SidebarLocation::Kind::Root) &&
-          loc.total_bytes > 0 && loc.is_mounted)
-        drives_h += drive_extra_h;
-    }
-    int total_needed = header_h + p_count * item_h +
-                       div_total + header_h + f_count * item_h +
-                       div_total + header_h + drives_h;
-    int available = app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height;
-    app.sidebar_content_h = total_needed;
-    // Clamp scroll to prevent blank space below last item
-    int max_scroll = std::max(0, total_needed - available);
-    if (app.sidebar_scroll_px > max_scroll)
-      app.sidebar_scroll_px = max_scroll;
-  }
-  zf = 1.2;
-
-  // HTML has py-6 (24px) padding at top of sidebar
-  int y = top_y - app.sidebar_scroll_px + static_cast<int>(24.0 * zf);
-
-  auto draw_item = [&](int idx) {
-    const auto& loc = app.sidebar_locations[idx];
-    bool has_usage = (loc.kind == SidebarLocation::Kind::Drive ||
-                      loc.kind == SidebarLocation::Kind::Root) &&
-                     loc.total_bytes > 0 && loc.is_mounted;
-    int item_h = has_usage ? static_cast<int>(52.0 * zf) : static_cast<int>(36.0 * zf);
-    bool hovered = (idx == app.sidebar_hover_idx);
-    bool drop_target = app.drop_target_is_sidebar && idx == app.drop_target_sidebar_idx;
-
-    int sb_margin = static_cast<int>(8.0 * zf); // px-4 in HTML
-
-    if (drop_target) {
-      double pulse = 0.16 + 0.06 * std::sin(
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              std::chrono::steady_clock::now().time_since_epoch()).count() * 0.006);
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, pulse);
-      draw_rounded_rect(cr, sb_margin, y, sidebar_w - sb_margin * 2, item_h,
-                        static_cast<int>(12.0 * zf)); // rounded-2xl
-      cairo_fill(cr);
-      app.pendingRedraw = true;
-    } else if (hovered) {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
-      draw_rounded_rect(cr, sb_margin, y, sidebar_w - sb_margin * 2, item_h,
-                        static_cast<int>(12.0 * zf)); // rounded-2xl
-      cairo_fill(cr);
-    }
-
-    // Icon (w-5 = 20px)
-    int icon_sz = static_cast<int>(20.0 * zf);
-    int icon_x = static_cast<int>(16.0 * zf); // px-4
-
-    cairo_surface_t* cs = nullptr;
-    switch (loc.kind) {
-      case SidebarLocation::Kind::Desktop:   cs = app.icon_desktop_svg; break;
-      case SidebarLocation::Kind::Documents: cs = app.icon_documents_svg; break;
-      case SidebarLocation::Kind::Downloads: cs = app.icon_downloads_svg; break;
-      case SidebarLocation::Kind::Music:     cs = app.icon_music_svg; break;
-      case SidebarLocation::Kind::Pictures:  cs = app.icon_pictures_svg; break;
-      case SidebarLocation::Kind::Videos:    cs = app.icon_videos_svg; break;
-      default: break;
-    }
-
-    auto draw_icon_at = [&](int ix, int iy) {
-      const char* icon_name = loc.icon_name.c_str();
-      std::string trash_icon;
-      if (loc.kind == SidebarLocation::Kind::Trash) {
-        trash_icon = trash_has_files() ? "user-trash-full" : "user-trash";
-        icon_name = trash_icon.c_str();
-      }
-      // Theme-first: honor the system icon pack (e.g. MacTahoe). The bundled
-      // monochrome stencils below are only a fallback for themes that lack
-      // these names — they used to take precedence, painting flat
-      // text-colored glyphs no matter which icon theme was active.
-      //
-      // Async resolve: never decode theme SVGs on the paint thread.
-      // The placeholder letter shows for a frame or two, then the real
-      // icon pops in (catch-up frames are scheduled right after startup).
-      const auto* ic = [&]{
-        auto ti0 = std::chrono::steady_clock::now();
-        const auto* r = app.icons.tray_icon(icon_name, icon_sz);
-        static std::atomic<int> tic{0};
-        if (tic.fetch_add(1, std::memory_order_relaxed) < 12 &&
-            trace::enabled().load(std::memory_order_relaxed))
-          trace::log("SIDEBAR tray[%s] %.2f ms", icon_name,
-                     std::chrono::duration<double, std::milli>(
-                         std::chrono::steady_clock::now() - ti0).count());
-        return r;
-      }();
-      if (ic && ic->surface) {
-        double iw = static_cast<double>(ic->width);
-        double ih = static_cast<double>(ic->height);
-        double scale = icon_sz / std::max(1.0, std::max(iw, ih));
-        cairo_save(cr);
-        cairo_translate(cr, ix, iy);
-        cairo_scale(cr, scale, scale);
-        cairo_set_source_surface(cr, ic->surface, (icon_sz / scale - iw) / 2,
-                                  (icon_sz / scale - ih) / 2);
-        cairo_paint(cr);
-        cairo_restore(cr);
-        return;
-      }
-      if (cs) {
-        double iw = static_cast<double>(cairo_image_surface_get_width(cs));
-        double ih = static_cast<double>(cairo_image_surface_get_height(cs));
-        double scale = icon_sz / std::max(1.0, std::max(iw, ih));
-        cairo_save(cr);
-        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-        cairo_translate(cr, ix, iy);
-        cairo_scale(cr, scale, scale);
-        cairo_rectangle(cr, 0, 0, icon_sz / scale, icon_sz / scale);
-        cairo_clip(cr);
-        cairo_mask_surface(cr, cs, (icon_sz / scale - iw) / 2, (icon_sz / scale - ih) / 2);
-        cairo_restore(cr);
-        return;
-      }
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                              CAIRO_FONT_WEIGHT_NORMAL);
-      cairo_set_font_size(cr, 16.0 * zf);
-      cairo_move_to(cr, ix, iy + icon_sz);
-      char fallback[2] = { loc.label.empty() ? '?' : loc.label[0], '\0' };
-      cairo_show_text(cr, fallback);
-    };
-
-    // For items with extra usage row, center icon in the main row (top 36px)
-    int main_row_h = static_cast<int>(36.0 * zf);
-    {
-      auto mi0 = std::chrono::steady_clock::now();
-      draw_icon_at(icon_x, y + (main_row_h - icon_sz) / 2);
-      static std::atomic<int> mic{0};
-      if (mic.fetch_add(1, std::memory_order_relaxed) < 12 &&
-          trace::enabled().load(std::memory_order_relaxed)) {
-        trace::log("SIDEBAR icon[%s] %.2f ms", loc.label.c_str(),
-                   std::chrono::duration<double, std::milli>(
-                       std::chrono::steady_clock::now() - mi0)
-                       .count());
-      }
-    }
-
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                            CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 13.0 * zf); // text-sm = 14px, close enough
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-
-    // gap-3 = 12px between icon and label
-    int label_x = icon_x + icon_sz + static_cast<int>(12.0 * zf);
-
-    bool is_drive_kind =
-        loc.kind == SidebarLocation::Kind::Drive ||
-        loc.kind == SidebarLocation::Kind::Root;
-    // Drives leave room for the mount indicator; other rows a small margin.
-    int max_label_w = sidebar_w - label_x -
-                      static_cast<int>((is_drive_kind ? 40.0 : 14.0) * zf);
-    std::string shown = loc.label;
-    {
-      cairo_text_extents_t te;
-      cairo_text_extents(cr, shown.c_str(), &te);
-      if (te.x_advance > max_label_w) {
-        while (!shown.empty()) {
-          cairo_text_extents(cr, (shown + "...").c_str(), &te);
-          if (te.x_advance <= max_label_w) break;
-          shown.pop_back();
-        }
-        shown += "...";
-      }
-    }
-    cairo_move_to(cr, label_x,
-                  y + main_row_h / 2 + static_cast<int>(4.0 * zf));
-    cairo_show_text(cr, shown.c_str());
-
-    // Mount indicator for drives
-    if (loc.kind == SidebarLocation::Kind::Drive) {
-      if (loc.is_mounted && app.mounted_svg) {
-        int ind_sz = static_cast<int>(18.0 * zf);
-        int ind_x = sidebar_w - static_cast<int>(24.0 * zf);
-        int ind_y = y + (main_row_h - ind_sz) / 2;
-        // Hover background
-        if (idx == app.sidebar_mount_hover_idx) {
-          cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
-                                 app.text_secondary_b, 0.12);
-          double rad = ind_sz * 0.5 + 4;
-          cairo_arc(cr, ind_x + ind_sz / 2.0, ind_y + ind_sz / 2.0, rad, 0, 2 * M_PI);
-          cairo_fill(cr);
-        }
-        double iw = static_cast<double>(cairo_image_surface_get_width(app.mounted_svg));
-        double ih = static_cast<double>(cairo_image_surface_get_height(app.mounted_svg));
-        double scale = ind_sz / std::max(1.0, std::max(iw, ih));
-        cairo_save(cr);
-        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-        cairo_rectangle(cr, ind_x, ind_y, ind_sz, ind_sz);
-        cairo_clip(cr);
-        cairo_translate(cr, ind_x, ind_y);
-        cairo_scale(cr, scale, scale);
-        cairo_translate(cr, (ind_sz / scale - iw) / 2, (ind_sz / scale - ih) / 2);
-        cairo_mask_surface(cr, app.mounted_svg, 0, 0);
-        cairo_restore(cr);
-      }
-    }
-
-    // Usage progress bar for drives with data
-    if (has_usage) {
-      int usage_y = y + main_row_h;
-      int bar_x = icon_x;
-      int bar_w = sidebar_w - bar_x - static_cast<int>(12.0 * zf);
-      int bar_h = static_cast<int>(4.0 * zf);
-      int bar_y = usage_y + static_cast<int>(10.0 * zf);
-
-      // Usage text (elided to the bar width)
-      uint64_t used = loc.total_bytes - loc.free_bytes;
-      std::string usage_text = format_size(used) + " / " + format_size(loc.total_bytes);
-      {
-        cairo_text_extents_t ute;
-        cairo_text_extents(cr, usage_text.c_str(), &ute);
-        if (ute.x_advance > bar_w) {
-          while (!usage_text.empty()) {
-            cairo_text_extents(cr, (usage_text + "...").c_str(), &ute);
-            if (ute.x_advance <= bar_w) break;
-            usage_text.pop_back();
-          }
-          usage_text += "...";
-        }
-      }
-      cairo_set_font_size(cr, 10.0 * zf);
-      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
-                             app.text_secondary_b, 0.8);
-      cairo_move_to(cr, bar_x, bar_y - static_cast<int>(4.0 * zf));
-      cairo_show_text(cr, usage_text.c_str());
-
-      double frac = std::min(1.0, static_cast<double>(used) /
-                                   static_cast<double>(loc.total_bytes));
-
-      // Track
-      cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.3);
-      draw_rounded_rect(cr, bar_x, bar_y, bar_w, bar_h, static_cast<int>(2.0 * zf));
-      cairo_fill(cr);
-
-      // Fill
-      if (frac > 0.01) {
-        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.85);
-        draw_rounded_rect(cr, bar_x, bar_y, static_cast<double>(bar_w) * frac,
-                          bar_h, static_cast<int>(2.0 * zf));
-        cairo_fill(cr);
-      }
-    }
-
-    y += item_h;
-  };
-
-  auto draw_header = [&](const char* text) {
-    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
-                           app.text_secondary_b, 1.0);
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                             CAIRO_FONT_WEIGHT_BOLD);
-    cairo_set_font_size(cr, 11.0 * zf); // text-xs
-    cairo_move_to(cr, static_cast<int>(16.0 * zf), y + static_cast<int>(14.0 * zf));
-    cairo_show_text(cr, text);
-    y += static_cast<int>(24.0 * zf);
-  };
-
-  auto draw_divider = [&]() {
-    y += static_cast<int>(16.0 * zf);
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.15);
-    int div_margin = static_cast<int>(16.0 * zf);
-    cairo_rectangle(cr, div_margin, y, sidebar_w - div_margin * 2, 1);
-    cairo_fill(cr);
-    y += 1 + static_cast<int>(16.0 * zf);
-  };
-
-  sub("pre");
-  // ── PLACES ──
-  draw_header("PLACES");
-  for (int i = 0; i < std::min(places_end, total); ++i)
-    draw_item(i);
-
-  sub("places");
-  // ── FAVORITES ──
-  if (fav_start > places_end) {
-    draw_divider();
-    draw_header("FAVORITES");
-
-    // Draw "drop to add" indicator when dragging over the section
-    bool fav_hover = app.drop_target_fav_section;
-
-    int item_h = static_cast<int>(36.0 * zf);
-    bool dragging = app.sidebar_fav_dragging;
-    int drag_sb_idx = dragging ? places_end + app.sidebar_fav_drag_from : -1;
-
-    for (int i = places_end; i < std::min(fav_start, total); ++i) {
-      // Draw insertion line before this item if slot matches
-      if (dragging) {
-        int slot = i - places_end;
-        if (slot == app.sidebar_fav_drag_to_visual && slot != app.sidebar_fav_drag_from) {
-          cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.6);
-          cairo_set_line_width(cr, 2.0);
-          int div_margin = static_cast<int>(16.0 * zf);
-          cairo_move_to(cr, div_margin, y);
-          cairo_line_to(cr, sidebar_w - div_margin, y);
-          cairo_stroke(cr);
-        }
-      }
-      if (dragging && i == drag_sb_idx) {
-        // Draw the dragged item dimmed
-        cairo_push_group(cr);
-        draw_item(i);
-        cairo_pop_group_to_source(cr);
-        cairo_paint_with_alpha(cr, 0.35);
-      } else {
-        draw_item(i);
-      }
-    }
-    // Insertion line at the end of the list
-    if (dragging) {
-      int last_slot = fav_start - places_end;
-      if (last_slot == app.sidebar_fav_drag_to_visual && last_slot != app.sidebar_fav_drag_from) {
-        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.6);
-        cairo_set_line_width(cr, 2.0);
-        int div_margin = static_cast<int>(16.0 * zf);
-        cairo_move_to(cr, div_margin, y);
-        cairo_line_to(cr, sidebar_w - div_margin, y);
-        cairo_stroke(cr);
-      }
-    }
-
-    // Ghost — translucent preview of the dragged item following the cursor
-    if (dragging && drag_sb_idx >= places_end && drag_sb_idx < fav_start) {
-      int ghost_y = app.sidebar_fav_drag_current_y - item_h / 2;
-      int saved_y = y;
-      y = ghost_y;
-      // Accent background
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.12);
-      int sb_margin = static_cast<int>(6.0 * zf);
-      draw_rounded_rect(cr, sb_margin, y, sidebar_w - sb_margin * 2, item_h, sb_margin);
-      cairo_fill(cr);
-      // Accent border
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.5);
-      cairo_set_line_width(cr, 1.5);
-      draw_rounded_rect(cr, sb_margin, y, sidebar_w - sb_margin * 2, item_h, sb_margin);
-      cairo_stroke(cr);
-      // Item content
-      cairo_push_group(cr);
-      draw_item(drag_sb_idx);
-      cairo_pop_group_to_source(cr);
-      cairo_paint_with_alpha(cr, 0.85);
-      y = saved_y;
-    }
-
-    // If dragging over Favorites (external drop), draw a "+" indicator at the bottom
-    if (fav_hover) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.20);
-      int sb_margin = static_cast<int>(6.0 * zf);
-      draw_rounded_rect(cr, sb_margin, y, sidebar_w - sb_margin * 2, item_h, sb_margin);
-      cairo_fill(cr);
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.7);
-      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-      cairo_set_font_size(cr, 18.0 * zf);
-      cairo_move_to(cr, static_cast<int>(16.0 * zf), y + item_h / 2 + static_cast<int>(6.0 * zf));
-      cairo_show_text(cr, "+");
-      cairo_move_to(cr, static_cast<int>(38.0 * zf), y + item_h / 2 + static_cast<int>(5.0 * zf));
-      cairo_set_font_size(cr, 13.0 * zf);
-      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 0.7);
-      cairo_show_text(cr, "Add to Favorites");
-      y += item_h;
-    }
-  } else if (app.drop_target_fav_section) {
-    // Empty Favorites section — draw placeholder indicator
-    draw_divider();
-    draw_header("FAVORITES");
-    int item_h = static_cast<int>(36.0 * zf);
-    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.20);
-    int sb_margin = static_cast<int>(6.0 * zf);
-    draw_rounded_rect(cr, sb_margin, y, sidebar_w - sb_margin * 2, item_h, sb_margin);
-    cairo_fill(cr);
-    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.7);
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-    cairo_set_font_size(cr, 18.0 * zf);
-    cairo_move_to(cr, static_cast<int>(16.0 * zf), y + item_h / 2 + static_cast<int>(6.0 * zf));
-    cairo_show_text(cr, "+");
-    cairo_move_to(cr, static_cast<int>(38.0 * zf), y + item_h / 2 + static_cast<int>(5.0 * zf));
-    cairo_set_font_size(cr, 13.0 * zf);
-    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 0.7);
-    cairo_show_text(cr, "Add to Favorites");
-    y += item_h;
-  }
-
-  sub("favorites");
-  // ── DRIVES ──
-  if (drives_start < total) {
-    draw_divider();
-    draw_header("DRIVES");
-    for (int i = drives_start; i < total; ++i)
-      draw_item(i);
-  }
-}
-
-// ── top bar ──────────────────────────────────────────────────────
-
-static void draw_house_icon(cairo_t* cr, int x, int y, int size) {
-  cairo_save(cr);
-  cairo_translate(cr, static_cast<double>(x), static_cast<double>(y));
-  double s = static_cast<double>(size) / 12.0;
-  cairo_set_line_width(cr, 2.0 * s);
-  cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
-  cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
-  // Roof
-  cairo_move_to(cr, 0 * s, 6 * s);
-  cairo_line_to(cr, 6 * s, 0 * s);
-  cairo_line_to(cr, 12 * s, 6 * s);
-  cairo_stroke(cr);
-  // Walls
-  cairo_rectangle(cr, 2 * s, 5 * s, 8 * s, 7 * s);
-  cairo_stroke(cr);
-  // Door
-  cairo_rectangle(cr, 4 * s, 7 * s, 4 * s, 5 * s);
-  cairo_stroke(cr);
-  cairo_restore(cr);
-}
 
 // ── filter label arrays ──────────────────────────────────────────
 
@@ -1082,950 +145,6 @@ static constexpr const char* kFilterDateShort[] = {
   "Any", "Today", "Week", "Month", "Year",
 };
 
-void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int pane_w) {
-  double zf = app.zoom_pct / 100.0;
-
-  int sidebar_w;
-  int content_right;
-  if (pane_w > 0) {
-    sidebar_w = pane_x;
-    content_right = pane_x + pane_w;
-  } else {
-    sidebar_w = app.sidebar_w();
-    content_right = w;
-  }
-
-  // Window controls position (traffic lights always on the right)
-  if (pane_w == 0) {
-    app.win_btn_x = 0;
-    app.win_btn_w = static_cast<int>(16.0 * zf);
-  }
-
-  // In split view, the global bar only draws window controls (per-pane bars draw everything else)
-  if (!app.split_view || pane_w > 0) {
-
-  // ── Navigation arrows (back, forward) ──
-  int x = sidebar_w + static_cast<int>(20.0 * zf); // px-5
-
-  // ── Sidebar fold toggle button ──
-  // Appears at the far left when the sidebar is folded into a flap overlay.
-  if (app.sidebar_folded && pane_w == 0) {
-    int slot_w = static_cast<int>(36.0 * zf);
-    bool t_hover = app.sidebar_toggle_hover;
-    bool t_active = app.sidebar_folded_revealed;
-    app.sidebar_toggle_x = x;
-    app.sidebar_toggle_w = slot_w;
-    if (t_hover || t_active) {
-      cairo_save(cr);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
-                            t_active ? 0.14 : 0.08);
-      draw_rounded_rect(cr, x, (top_h - slot_w) / 2, slot_w, slot_w,
-                        static_cast<int>(6.0 * zf));
-      cairo_fill(cr);
-      cairo_restore(cr);
-    }
-    if (app.sidebar_toggle_svg) {
-      double svg_w = static_cast<double>(
-          cairo_image_surface_get_width(app.sidebar_toggle_svg));
-      double svg_h = static_cast<double>(
-          cairo_image_surface_get_height(app.sidebar_toggle_svg));
-      int sz = static_cast<int>(18.0 * zf);
-      int ox = x + (slot_w - sz) / 2;
-      int oy = (top_h - sz) / 2;
-      double display_scale = sz / std::max(svg_w, svg_h);
-      cairo_save(cr);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-      cairo_rectangle(cr, ox, oy, sz, sz);
-      cairo_clip(cr);
-      cairo_translate(cr, ox, oy);
-      cairo_scale(cr, display_scale, display_scale);
-      cairo_mask_surface(cr, app.sidebar_toggle_svg, 0, 0);
-      cairo_restore(cr);
-    } else {
-      // fallback: three-block "panel" glyph mirroring layout.svg
-      int sz = static_cast<int>(18.0 * zf);
-      int oy = (top_h - sz) / 2;
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-      cairo_set_line_width(cr, 1.4 * zf);
-      int gap = static_cast<int>(3.0 * zf);
-      for (int i = 0; i < 3; ++i) {
-        double yy = oy + i * (sz / 3.0) + gap;
-        cairo_move_to(cr, x + 9.0 * zf, yy);
-        cairo_line_to(cr, x + slot_w - 9.0 * zf, yy);
-        cairo_stroke(cr);
-      }
-    }
-    x += slot_w + static_cast<int>(6.0 * zf);
-  } else {
-    app.sidebar_toggle_x = 0;
-    app.sidebar_toggle_w = 0;
-  }
-
-  auto draw_arrow = [&](int idx, cairo_surface_t* svg, const char* fallback, bool hovered) {
-    int slot_w = static_cast<int>(36.0 * zf);
-    if (hovered) {
-      cairo_save(cr);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
-      draw_rounded_rect(cr, x, (top_h - slot_w) / 2, slot_w, slot_w,
-                        static_cast<int>(6.0 * zf));
-      cairo_fill(cr);
-      cairo_restore(cr);
-    }
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    if (svg) {
-      double svg_w = static_cast<double>(cairo_image_surface_get_width(svg));
-      double svg_h = static_cast<double>(cairo_image_surface_get_height(svg));
-      int sz = static_cast<int>(18.0 * zf);
-      int ox = x + (slot_w - sz) / 2;
-      int oy = (top_h - sz) / 2;
-      double display_scale = sz / std::max(svg_w, svg_h);
-      cairo_save(cr);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-      cairo_rectangle(cr, ox, oy, sz, sz);
-      cairo_clip(cr);
-      cairo_translate(cr, ox, oy);
-      cairo_scale(cr, display_scale, display_scale);
-      cairo_mask_surface(cr, svg, 0, 0);
-      cairo_restore(cr);
-    } else {
-      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                              CAIRO_FONT_WEIGHT_NORMAL);
-      cairo_set_font_size(cr, 18.0 * zf);
-      cairo_text_extents_t te;
-      cairo_text_extents(cr, fallback, &te);
-      cairo_move_to(cr, x + (slot_w - te.width) / 2, top_h / 2 + te.height / 2);
-      cairo_show_text(cr, fallback);
-    }
-    // Store position for hit testing
-    if (idx == 0) (app.active_pane ? app.r_arrow_back_x : app.arrow_back_x) = x;
-    else (app.active_pane ? app.r_arrow_forward_x : app.arrow_forward_x) = x;
-    x += slot_w + static_cast<int>(6.0 * zf); // 6px spacing (Nautilus 51 header bar)
-  };
-
-  draw_arrow(0, app.arrow_left_svg, "<", app.active_pane ? app.r_arrow_back_hover : app.arrow_back_hover);
-  draw_arrow(1, app.arrow_right_svg, ">", app.active_pane ? app.r_arrow_forward_hover : app.arrow_forward_hover);
-
-  int path_left = x;
-  int path_margin = static_cast<int>(24.0 * zf); // mx-6
-
-  // ── Right-side controls ──
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 13.0 * zf);
-
-  // Sort chevron: narrow dropdown segment of the compound "View Options"
-  // control (flush with the view toggle, like Nautilus 51's Adw.SplitButton).
-  int sort_w = static_cast<int>(28.0 * zf);
-
-  // Button sizes (at 100% zoom)
-  int gap = static_cast<int>(6.0 * zf); // 6px spacing (Nautilus 51 header bar)
-  int right_margin = static_cast<int>(16.0 * zf); // reduced from px-5 for tighter right side
-
-  // View toggle: single button ~40px
-  int view_toggle_w = static_cast<int>(40.0 * zf);
-
-  // Gear: px-3(12) + icon(12) + px-3(12)
-  int gear_w = static_cast<int>(36.0 * zf);
-
-  // Traffic lights: 3 * 12px + gap-2(8) * 2
-  int traffic_w = static_cast<int>(52.0 * zf);
-
-  // Folder-search button (folder + magnifying glass): same size as search
-  int folder_search_btn_w = static_cast<int>(40.0 * zf);
-
-  // Search button: same size as view toggle
-  int search_btn_w = static_cast<int>(40.0 * zf);
-
-  // Layout from right edge
-  int right = content_right - right_margin;
-  int traffic_x = right - traffic_w;
-  int gear_x = traffic_x - static_cast<int>(8.0 * zf) - gear_w;
-
-  int sort_x = gear_x - gap - sort_w;
-  // View toggle + sort chevron are one flush compound control (0 gap),
-  // separated internally by a 1px divider (Adw.SplitButton style).
-  int view_toggle_x = sort_x - view_toggle_w;
-  int search_btn_x = view_toggle_x - gap - search_btn_w;
-  int folder_search_btn_x = search_btn_x - gap - folder_search_btn_w;
-
-  (app.active_pane ? app.r_search_btn_x : app.search_btn_x) = search_btn_x;
-  (app.active_pane ? app.r_search_btn_w : app.search_btn_w) = search_btn_w;
-  (app.active_pane ? app.r_folder_search_btn_x : app.folder_search_btn_x) = folder_search_btn_x;
-  (app.active_pane ? app.r_folder_search_btn_w : app.folder_search_btn_w) = folder_search_btn_w;
-  (app.active_pane ? app.r_view_btn_x : app.view_btn_x) = view_toggle_x;
-  (app.active_pane ? app.r_view_btn_w : app.view_btn_w) = view_toggle_w;
-  (app.active_pane ? app.r_sort_btn_x : app.sort_btn_x) = sort_x;
-  (app.active_pane ? app.r_sort_btn_w : app.sort_btn_w) = sort_w;
-
-  // Path bar fills remaining space
-  int path_x = path_left + path_margin;
-  int path_w = folder_search_btn_x - gap - path_x;
-  if (path_w < 60) path_w = 60;
-
-  int path_h = top_h - static_cast<int>(16.0 * zf);
-  int path_y = (top_h - path_h) / 2;
-
-  // ── Compound "View Options" control (Nautilus 51 Adw.SplitButton style) ──
-  // View toggle + sort chevron share one linked pill (rounded outer corners,
-  // square inner edge) with a 1px divider between the two halves.
-  {
-    bool vhv = app.active_pane ? app.r_view_mode_btn_hover : app.view_mode_btn_hover;
-    bool sort_hv = app.active_pane ? app.r_sort_btn_hover : app.sort_btn_hover;
-    bool sort_active = app.active_pane ? app.r_sort_menu_open : app.sort_menu_open;
-    if (vhv || sort_hv || sort_active) {
-      cairo_save(cr);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
-                            sort_active ? 0.14 : 0.08);
-      draw_rounded_rect(cr, view_toggle_x, path_y,
-                        sort_x + sort_w - view_toggle_x, path_h,
-                        static_cast<int>(8.0 * zf));
-      cairo_fill(cr);
-      cairo_restore(cr);
-    }
-    double div_x = sort_x + 0.5;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.14);
-    cairo_set_line_width(cr, 1.0);
-    cairo_move_to(cr, div_x, path_y + static_cast<int>(5.0 * zf));
-    cairo_line_to(cr, div_x, path_y + path_h - static_cast<int>(5.0 * zf));
-    cairo_stroke(cr);
-  }
-
-  // ── Gradient bar background + semi-glassy design (inner glassy rim, not outer)
-  // The glassy effect is an inner bright frame/rim just inside the bar's rounded edge,
-  // with stronger top highlight (Tahoe-Dark style inset white box-shadows).
-  {
-    int bar_radius = static_cast<int>(12.0 * zf);
-
-    // Base fill: dark translucent (Tahoe headerbar-ish), high see-through so the inner glass shows
-    cairo_pattern_t* grad = cairo_pattern_create_linear(0, path_y, 0, path_y + path_h);
-    cairo_pattern_add_color_stop_rgba(grad, 0.0, app.surface_r, app.surface_g, app.surface_b, 0.30);
-    cairo_pattern_add_color_stop_rgba(grad, 1.0, app.bg_r, app.bg_g, app.bg_b, 0.30);
-    cairo_set_source(cr, grad);
-    draw_rounded_rect(cr, path_x, path_y, path_w, path_h, bar_radius);
-    cairo_fill(cr);
-    cairo_pattern_destroy(grad);
-
-    // Very subtle outer separation only (no strong outer halo/glow — glassy part is inner)
-    {
-      cairo_set_source_rgba(cr, 0, 0, 0, 0.12);
-      cairo_set_line_width(cr, 1.0);
-      draw_rounded_rect(cr, path_x + 0.5, path_y + 0.5, path_w - 1.0, path_h - 1.0,
-                        static_cast<double>(bar_radius));
-      cairo_stroke(cr);
-    }
-
-    // Inner semi-glassy bright rim — clean inner glassy frame (no bevel at all).
-    // Positioned inset from the outer edge. Stronger top highlight + matching (softer) bottom
-    // to close the inner glassy ring around the content.
-    {
-      cairo_pattern_t* rim = cairo_pattern_create_linear(0, path_y, 0, path_y + path_h);
-      cairo_pattern_add_color_stop_rgba(rim, 0.00, app.text_r, app.text_g, app.text_b, 0.28);  // top inner highlight
-      cairo_pattern_add_color_stop_rgba(rim, 0.18, app.text_r, app.text_g, app.text_b, 0.14);
-      cairo_pattern_add_color_stop_rgba(rim, 0.42, app.text_r, app.text_g, app.text_b, 0.03);
-      cairo_pattern_add_color_stop_rgba(rim, 1.00, app.text_r, app.text_g, app.text_b, 0.09);  // small bottom to close the inner frame
-      cairo_set_source(cr, rim);
-      cairo_set_line_width(cr, 1.35);
-
-      // Inset so the glassy rim is clearly *inside* the bar, forming the inner frame around the content
-      double inner_inset = 2.8;
-      draw_rounded_rect(cr,
-                        path_x + inner_inset,
-                        path_y + inner_inset,
-                        path_w - inner_inset * 2,
-                        path_h - inner_inset * 2,
-                        static_cast<double>(bar_radius) - inner_inset + 0.5);
-      cairo_stroke(cr);
-      cairo_pattern_destroy(rim);
-    }
-
-    // Extra top-inner highlight band (pure glass catch)
-    {
-      cairo_pattern_t* top_hl = cairo_pattern_create_linear(0, path_y + 2, 0, path_y + path_h * 0.4);
-      cairo_pattern_add_color_stop_rgba(top_hl, 0.0, app.text_r, app.text_g, app.text_b, 0.09);
-      cairo_pattern_add_color_stop_rgba(top_hl, 1.0, app.text_r, app.text_g, app.text_b, 0.0);
-      cairo_set_source(cr, top_hl);
-      cairo_set_line_width(cr, 0.7);
-      double hl_inset = 3.8;
-      draw_rounded_rect(cr,
-                        path_x + hl_inset,
-                        path_y + hl_inset,
-                        path_w - hl_inset * 2,
-                        path_h - hl_inset * 2,
-                        static_cast<double>(bar_radius) - hl_inset + 1);
-      cairo_stroke(cr);
-      cairo_pattern_destroy(top_hl);
-    }
-
-    // Bottom-inner highlight band (symmetric to top, softer) to complete the inner glassy frame
-    {
-      cairo_pattern_t* bottom_hl = cairo_pattern_create_linear(0, path_y + path_h * 0.55, 0, path_y + path_h - 2);
-      cairo_pattern_add_color_stop_rgba(bottom_hl, 0.0, app.text_r, app.text_g, app.text_b, 0.0);
-      cairo_pattern_add_color_stop_rgba(bottom_hl, 1.0, app.text_r, app.text_g, app.text_b, 0.07);  // softer than top
-      cairo_set_source(cr, bottom_hl);
-      cairo_set_line_width(cr, 0.7);
-      double hl_inset = 3.8;
-      draw_rounded_rect(cr,
-                        path_x + hl_inset,
-                        path_y + hl_inset,
-                        path_w - hl_inset * 2,
-                        path_h - hl_inset * 2,
-                        static_cast<double>(bar_radius) - hl_inset + 1);
-      cairo_stroke(cr);
-      cairo_pattern_destroy(bottom_hl);
-    }
-  }
-
-  // ── Three-dot menu on the far right ──
-  int dots_btn_w = static_cast<int>(24.0 * zf);
-  int dots_x = path_x + path_w - dots_btn_w + static_cast<int>(2.0 * zf);
-  int dots_y = path_y;
-  (app.active_pane ? app.r_dots_btn_x : app.dots_btn_x) = dots_x;
-  (app.active_pane ? app.r_dots_btn_y : app.dots_btn_y) = dots_y;
-  (app.active_pane ? app.r_dots_btn_w : app.dots_btn_w) = dots_btn_w;
-  (app.active_pane ? app.r_dots_btn_h : app.dots_btn_h) = path_h;
-  // Three dots (⋮) — bold SVG, circle fallback
-  {
-    bool dhover = (app.active_pane ? app.r_dots_btn_hover : app.dots_btn_hover);
-    if (app.three_dots_svg) {
-      int dsz = static_cast<int>(14.0 * zf);
-      int dox = dots_x + (dots_btn_w - dsz) / 2;
-      int doy = path_y + (path_h - dsz) / 2;
-      double svg_w = static_cast<double>(cairo_image_surface_get_width(app.three_dots_svg));
-      double svg_h = static_cast<double>(cairo_image_surface_get_height(app.three_dots_svg));
-      double display_scale = dsz / std::max(svg_w, svg_h);
-      cairo_save(cr);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
-                            dhover ? 0.95 : 0.65);
-      cairo_rectangle(cr, dox, doy, dsz, dsz);
-      cairo_clip(cr);
-      cairo_translate(cr, dox, doy);
-      cairo_scale(cr, display_scale, display_scale);
-      cairo_mask_surface(cr, app.three_dots_svg, 0, 0);
-      cairo_restore(cr);
-    } else {
-      double dot_r = 1.1 * zf;
-      double gap = 2.8 * zf;
-      double cx = dots_x + dots_btn_w / 2.0;
-      double cy0 = path_y + path_h / 2.0 - gap - dot_r;
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
-                              dhover ? 0.85 : 0.5);
-      for (int i = 0; i < 3; ++i) {
-        cairo_arc(cr, cx, cy0 + i * (2.0 * dot_r + gap), dot_r, 0.0, 2.0 * M_PI);
-        cairo_fill(cr);
-      }
-    }
-  }
-
-  // ── Path content (house icon + breadcrumbs or editing) ──
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 13.0 * zf);
-
-  int text_x = path_x + static_cast<int>(12.0 * zf);
-  int text_y = top_h / 2 + static_cast<int>(4.0 * zf);
-
-  // Draw location icon (home / music / video / documents — bold SVG,
-  // vector house fallback). Sidebar icons are untouched.
-  int icon_sz = static_cast<int>(12.0 * zf);
-  int icon_y = (top_h - icon_sz) / 2;
-  {
-    cairo_surface_t* nav_svg = app.home_nav_svg;
-    std::string hp = home_dir();
-    const std::string& cp = app.cur_tab().current_path;
-    if (cp == hp + "/Music")           nav_svg = app.music_nav_svg;
-    else if (cp == hp + "/Videos")     nav_svg = app.video_nav_svg;
-    else if (cp == hp + "/Documents")  nav_svg = app.documents_nav_svg;
-    if (nav_svg) {
-      double svg_w = static_cast<double>(cairo_image_surface_get_width(nav_svg));
-      double svg_h = static_cast<double>(cairo_image_surface_get_height(nav_svg));
-      double display_scale = icon_sz / std::max(svg_w, svg_h);
-      cairo_save(cr);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.85);
-      cairo_rectangle(cr, text_x, icon_y, icon_sz, icon_sz);
-      cairo_clip(cr);
-      cairo_translate(cr, text_x, icon_y);
-      cairo_scale(cr, display_scale, display_scale);
-      cairo_mask_surface(cr, nav_svg, 0, 0);
-      cairo_restore(cr);
-    } else {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.75);
-      draw_house_icon(cr, text_x, icon_y, icon_sz);
-    }
-  }
-
-  int path_text_x = text_x + icon_sz + static_cast<int>(12.0 * zf); // gap-3
-  int path_text_w = path_w - (path_text_x - path_x) - dots_btn_w - static_cast<int>(16.0 * zf);
-
-  if ((app.active_pane ? app.r_search_active : app.search_active) || (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active)) {
-    // ── Search bar ──
-    int search_left = path_text_x;
-    int search_right = path_x + path_w - dots_btn_w - static_cast<int>(8.0 * zf);
-    int search_w = search_right - search_left;
-    int search_icon_size = static_cast<int>(14.0 * zf);
-    int search_icon_x = search_left;
-    int search_text_left = search_left + search_icon_size + static_cast<int>(8.0 * zf);
-    (app.active_pane ? app.r_search_bar_x : app.search_bar_x) = search_left;
-    (app.active_pane ? app.r_search_bar_w : app.search_bar_w) = search_w;
-
-    // Draw magnifying glass icon (SVG or fallback text)
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    if (app.search_svg) {
-      double svg_w = static_cast<double>(cairo_image_surface_get_width(app.search_svg));
-      double svg_h = static_cast<double>(cairo_image_surface_get_height(app.search_svg));
-      int sz = search_icon_size;
-      int ox = search_icon_x;
-      int oy = (top_h - sz) / 2;
-      double display_scale = sz / std::max(svg_w, svg_h);
-      cairo_save(cr);
-      cairo_rectangle(cr, ox, oy, sz, sz);
-      cairo_clip(cr);
-      cairo_translate(cr, ox, oy);
-      cairo_scale(cr, display_scale, display_scale);
-      cairo_mask_surface(cr, app.search_svg, 0, 0);
-      cairo_restore(cr);
-    } else {
-      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-      cairo_set_font_size(cr, search_icon_size * 0.8);
-      cairo_move_to(cr, search_icon_x + 2.0, (top_h + search_icon_size * 0.4) / 2);
-      cairo_show_text(cr, "\u2315");
-    }
-
-    // Search text
-    std::string display = (app.active_pane ? app.r_search_query : app.search_query);
-    bool has_text = !(app.active_pane ? app.r_search_query : app.search_query).empty();
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                            CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 13.0 * zf);
-
-    if (has_text) {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    } else {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.35);
-      cairo_move_to(cr, search_text_left, text_y);
-      cairo_show_text(cr, (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active) ? "Recursive search..." : "Search...");
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    }
-    cairo_move_to(cr, search_text_left, text_y);
-    cairo_show_text(cr, display.c_str());
-
-    // Cursor (text-height, centered)
-    {
-      std::string before = (app.active_pane ? app.r_search_query : app.search_query).substr(0, static_cast<std::size_t>(app.active_pane ? app.r_search_cursor : app.search_cursor));
-      cairo_text_extents_t cur_te;
-      cairo_text_extents(cr, before.c_str(), &cur_te);
-      int cursor_x = search_text_left + static_cast<int>(cur_te.width);
-      int cursor_h = static_cast<int>(14.0 * zf);
-      int cursor_y = (top_h - cursor_h) / 2;
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.8);
-      cairo_rectangle(cr, cursor_x, cursor_y, 1, cursor_h);
-      cairo_fill(cr);
-    }
-
-    // ── Filter button + clear button (right-to-left layout) ──
-    int right_cursor = search_right;
-    int btn_gap = static_cast<int>(6.0 * zf);
-
-    // Clear button (×)
-    if (has_text) {
-      std::string clear_str = "×";
-      cairo_text_extents_t clear_te;
-      cairo_text_extents(cr, clear_str.c_str(), &clear_te);
-      int clear_w = static_cast<int>(clear_te.width) + static_cast<int>(12.0 * zf);
-      right_cursor -= clear_w;
-      (app.active_pane ? app.r_search_clear_x : app.search_clear_x) = right_cursor;
-      (app.active_pane ? app.r_search_clear_w : app.search_clear_w) = clear_w;
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.5);
-      cairo_move_to(cr, right_cursor + (clear_w - clear_te.width) / 2, text_y);
-      cairo_show_text(cr, clear_str.c_str());
-    } else {
-      (app.active_pane ? app.r_search_clear_x : app.search_clear_x) = 0;
-      (app.active_pane ? app.r_search_clear_w : app.search_clear_w) = 0;
-    }
-
-    // Single Filter button (glassy outline style like location bar)
-    {
-      bool any_active = (app.active_pane ? app.r_filter_type_idx : app.filter_type_idx) > 0 || (app.active_pane ? app.r_filter_size_idx : app.filter_size_idx) > 0 || (app.active_pane ? app.r_filter_date_idx : app.filter_date_idx) > 0;
-      std::string label = any_active ? "Filtered" : "Filter";
-      cairo_text_extents_t te;
-      cairo_text_extents(cr, label.c_str(), &te);
-      int bw = static_cast<int>(te.width) + static_cast<int>(20.0 * zf);
-      int bh = static_cast<int>(24.0 * zf);
-      int by = (top_h - bh) / 2;
-      right_cursor -= (btn_gap + bw);
-      (app.active_pane ? app.r_filter_btn_x : app.filter_btn_x) = right_cursor;
-      (app.active_pane ? app.r_filter_btn_w : app.filter_btn_w) = bw;
-      bool hv = app.active_pane ? app.r_filter_btn_hover : app.filter_btn_hover;
-      int btn_r = static_cast<int>(6.0 * zf);
-
-      // Glassy gradient background
-      cairo_pattern_t* grad = cairo_pattern_create_linear(0, by, 0, by + bh);
-      cairo_pattern_add_color_stop_rgba(grad, 0.0, app.surface_r, app.surface_g, app.surface_b, any_active ? 0.45 : 0.25);
-      cairo_pattern_add_color_stop_rgba(grad, 1.0, app.bg_r, app.bg_g, app.bg_b, any_active ? 0.45 : 0.25);
-      cairo_set_source(cr, grad);
-      draw_rounded_rect(cr, right_cursor, by, bw, bh, btn_r);
-      cairo_fill(cr);
-      cairo_pattern_destroy(grad);
-
-      // Outer dark border
-      cairo_set_source_rgba(cr, 0, 0, 0, hv ? 0.20 : 0.12);
-      cairo_set_line_width(cr, 1.0);
-      draw_rounded_rect(cr, right_cursor + 0.5, by + 0.5, bw - 1.0, bh - 1.0, btn_r);
-      cairo_stroke(cr);
-
-      // Inner glassy bright rim
-      cairo_pattern_t* rim = cairo_pattern_create_linear(0, by, 0, by + bh);
-      cairo_pattern_add_color_stop_rgba(rim, 0.00, app.text_r, app.text_g, app.text_b, hv ? 0.30 : any_active ? 0.25 : 0.18);
-      cairo_pattern_add_color_stop_rgba(rim, 0.30, app.text_r, app.text_g, app.text_b, hv ? 0.18 : any_active ? 0.14 : 0.08);
-      cairo_pattern_add_color_stop_rgba(rim, 1.00, app.text_r, app.text_g, app.text_b, hv ? 0.14 : any_active ? 0.10 : 0.05);
-      cairo_set_source(cr, rim);
-      cairo_set_line_width(cr, 1.0);
-      double inset = 2.0;
-      draw_rounded_rect(cr, right_cursor + inset, by + inset, bw - inset * 2, bh - inset * 2,
-                        static_cast<double>(btn_r) - inset + 0.5);
-      cairo_stroke(cr);
-      cairo_pattern_destroy(rim);
-
-      // Text
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, any_active ? 1.0 : hv ? 0.9 : 0.7);
-      cairo_move_to(cr, right_cursor + (bw - te.width) / 2, text_y);
-      cairo_show_text(cr, label.c_str());
-    }
-
-    // ── Query-mode segment, case toggle, lock (left of Filter) ──
-    {
-      auto& dw_mode = app.active_pane ? app.r_search_mode : app.search_mode;
-      auto& dw_case = app.active_pane ? app.r_search_case_sensitive : app.search_case_sensitive;
-      auto& dw_lock = app.active_pane ? app.r_search_locked : app.search_locked;
-      auto& dw_mode_x = app.active_pane ? app.r_search_mode_x : app.search_mode_x;
-      auto& dw_mode_w = app.active_pane ? app.r_search_mode_w : app.search_mode_w;
-      auto& dw_case_x = app.active_pane ? app.r_search_case_x : app.search_case_x;
-      auto& dw_case_w = app.active_pane ? app.r_search_case_w : app.search_case_w;
-      auto& dw_lock_x = app.active_pane ? app.r_search_lock_x : app.search_lock_x;
-      auto& dw_lock_w = app.active_pane ? app.r_search_lock_w : app.search_lock_w;
-
-      int bh2 = static_cast<int>(22.0 * zf);
-      int by2 = (top_h - bh2) / 2;
-      int seg_w = static_cast<int>(34.0 * zf);
-      int seg_count = 4;
-      int seg_total = seg_w * seg_count;
-
-      // Lock button (rightmost of this group)
-      dw_lock_w = static_cast<int>(26.0 * zf);
-      right_cursor -= (btn_gap + dw_lock_w);
-      dw_lock_x = right_cursor;
-      {
-        bool hv2 = app.active_pane ? app.r_search_lock_hover : app.search_lock_hover;
-        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
-                              dw_lock ? 0.95 : hv2 ? 0.6 : 0.35);
-        double cx = right_cursor + dw_lock_w / 2.0;
-        double cy = top_h / 2.0;
-        double s = 5.0 * zf;
-        cairo_set_line_width(cr, 1.4);
-        cairo_rectangle(cr, cx - s * 0.75, cy - s * 0.1, s * 1.5, s * 1.1);
-        if (dw_lock) cairo_fill(cr); else cairo_stroke(cr);
-        cairo_arc(cr, cx, cy - s * 0.1, s * 0.45, M_PI, 2 * M_PI);
-        cairo_stroke(cr);
-      }
-
-      // Case toggle ("Aa")
-      dw_case_w = static_cast<int>(28.0 * zf);
-      right_cursor -= dw_case_w;
-      dw_case_x = right_cursor;
-      {
-        bool hv2 = app.active_pane ? app.r_search_case_hover : app.search_case_hover;
-        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
-                              dw_case ? 0.95 : hv2 ? 0.6 : 0.35);
-        cairo_text_extents_t te2;
-        cairo_text_extents(cr, "Aa", &te2);
-        cairo_move_to(cr, right_cursor + (dw_case_w - te2.width) / 2, text_y);
-        cairo_show_text(cr, "Aa");
-      }
-      right_cursor -= btn_gap;
-
-      // Mode segment control
-      dw_mode_w = seg_total;
-      right_cursor -= seg_total;
-      dw_mode_x = right_cursor;
-      {
-        static constexpr const char* kSegLabels[] = {"abc", "*", ".*", "txt"};
-        bool hv2 = app.active_pane ? app.r_search_mode_hover : app.search_mode_hover;
-        int hov_btn = app.active_pane ? app.r_search_mode_hover_btn : app.search_mode_hover_btn;
-        for (int si = 0; si < seg_count; ++si) {
-          bool sel = dw_mode == si;
-          int sx = right_cursor + si * seg_w;
-          if (sel) {
-            cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.28);
-            draw_rounded_rect(cr, sx + 1, by2, seg_w - 2, bh2, 5);
-            cairo_fill(cr);
-          } else if (hv2 && si == hov_btn) {
-            cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.10);
-            draw_rounded_rect(cr, sx + 1, by2, seg_w - 2, bh2, 5);
-            cairo_fill(cr);
-          }
-          cairo_text_extents_t te2;
-          cairo_text_extents(cr, kSegLabels[si], &te2);
-          cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
-                                sel ? 1.0 : 0.45);
-          cairo_move_to(cr, sx + (seg_w - te2.width) / 2, text_y);
-          cairo_show_text(cr, kSegLabels[si]);
-        }
-        cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.35);
-        cairo_set_line_width(cr, 1);
-        draw_rounded_rect(cr, right_cursor + 0.5, by2 + 0.5, seg_total - 1, bh2 - 1, 5);
-        cairo_stroke(cr);
-      }
-      right_cursor -= btn_gap;
-
-      // Red invalid underline for malformed regex
-      bool regex_bad = !(app.active_pane ? app.r_search_regex_valid : app.search_regex_valid);
-      if (regex_bad && has_text) {
-        cairo_set_source_rgba(cr, 0.9, 0.25, 0.25, 0.9);
-        cairo_set_line_width(cr, 1.5);
-        cairo_move_to(cr, search_text_left, text_y + static_cast<int>(4.0 * zf));
-        cairo_line_to(cr, search_text_left + static_cast<int>(60.0 * zf),
-                      text_y + static_cast<int>(4.0 * zf));
-        cairo_stroke(cr);
-      }
-    }
-  } else if (app.active_pane ? app.r_path_editing : app.path_editing) {
-    // ── Editable location bar ──
-    auto& dw_pe_buf = app.active_pane ? app.r_path_edit_buf : app.path_edit_buf;
-    auto& dw_pe_cursor = app.active_pane ? app.r_path_edit_cursor : app.path_edit_cursor;
-    auto& dw_pe_sel_start = app.active_pane ? app.r_path_edit_sel_start : app.path_edit_sel_start;
-    auto& dw_pe_sel_end = app.active_pane ? app.r_path_edit_sel_end : app.path_edit_sel_end;
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, dw_pe_buf.c_str(), &te);
-    std::string display = dw_pe_buf;
-    int scroll_offset = 0;
-    if (te.width > path_text_w) {
-      int keep = static_cast<int>(display.size()) * path_text_w /
-                 std::max(1, static_cast<int>(te.width));
-      if (keep > 3 && keep < static_cast<int>(display.size())) {
-        int trim = static_cast<int>(display.size()) - keep + 3;
-        scroll_offset = trim;
-        display = "..." + display.substr(static_cast<std::size_t>(trim));
-      }
-    }
-
-    cairo_font_extents_t fe;
-    cairo_font_extents(cr, &fe);
-    double text_h = fe.ascent + fe.descent;
-    double text_top = text_y - fe.ascent;
-
-    if (dw_pe_sel_start >= 0 && dw_pe_sel_start != dw_pe_sel_end) {
-      int sel_a = std::min(dw_pe_sel_start, dw_pe_sel_end);
-      int sel_b = std::max(dw_pe_sel_start, dw_pe_sel_end);
-      int disp_sel_a = std::max(0, sel_a - scroll_offset) + (scroll_offset > 0 ? 3 : 0);
-      int disp_sel_b = std::max(0, sel_b - scroll_offset) + (scroll_offset > 0 ? 3 : 0);
-      disp_sel_a = std::min(disp_sel_a, static_cast<int>(display.size()));
-      disp_sel_b = std::min(disp_sel_b, static_cast<int>(display.size()));
-      if (disp_sel_a < disp_sel_b) {
-        cairo_text_extents_t sel_te;
-        std::string before_sel = display.substr(0, disp_sel_a);
-        std::string sel_text = display.substr(disp_sel_a, disp_sel_b - disp_sel_a);
-        cairo_text_extents(cr, before_sel.c_str(), &sel_te);
-        double sel_x = path_text_x + sel_te.width;
-        cairo_text_extents(cr, sel_text.c_str(), &sel_te);
-        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.35);
-        cairo_rectangle(cr, sel_x, text_top, sel_te.width, text_h);
-        cairo_fill(cr);
-      }
-    }
-
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    cairo_move_to(cr, path_text_x, text_y);
-    cairo_show_text(cr, display.c_str());
-
-    if (dw_pe_sel_start < 0 || dw_pe_sel_start == dw_pe_sel_end) {
-      cairo_text_extents_t cur_te;
-      int disp_cursor = std::max(0, dw_pe_cursor - scroll_offset) +
-                        (scroll_offset > 0 ? 3 : 0);
-      disp_cursor = std::min(disp_cursor, static_cast<int>(display.size()));
-      std::string before = display.substr(0, static_cast<std::size_t>(disp_cursor));
-      cairo_text_extents(cr, before.c_str(), &cur_te);
-      int cursor_x = path_text_x + static_cast<int>(cur_te.width);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.8);
-      cairo_rectangle(cr, cursor_x, text_top, 1, text_h);
-      cairo_fill(cr);
-    }
-  } else {
-    // ── Simple location label (single friendly name + house, matching Design.png aesthetic) ──
-    (app.active_pane ? app.r_breadcrumbs : app.breadcrumbs).clear();
-    (app.active_pane ? app.r_breadcrumb_hover : app.breadcrumb_hover) = -1;
-
-    // Compute friendly display name (Home / Pictures / current folder basename etc.)
-    std::string label;
-    std::string cur = app.cur_tab().current_path;
-    if (!cur.empty() && cur[0] == '/') {
-      std::string h = home_dir();
-      if (cur == h || cur == h + "/") {
-        label = "Home";
-      } else {
-        bool found = false;
-        for (const auto& loc : app.sidebar_locations) {
-          if (!loc.path.empty() && loc.path == cur) {
-            label = loc.label;
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          auto pos = cur.rfind('/');
-          label = (pos != std::string::npos && pos + 1 < cur.size()) ? cur.substr(pos + 1) : cur;
-          if (label.empty()) label = "/";
-        }
-      }
-    } else {
-      label = cur.empty() ? "Home" : cur;
-    }
-
-    cairo_set_font_size(cr, 13.0 * zf);
-
-    // Measure + elide if needed
-    cairo_text_extents_t label_te;
-    std::string display_label = label;
-    cairo_text_extents(cr, display_label.c_str(), &label_te);
-    if (label_te.x_advance > path_text_w - 4) {
-      while (!display_label.empty() && label_te.x_advance > path_text_w - 16) {
-        display_label.pop_back();
-        cairo_text_extents(cr, (display_label + "…").c_str(), &label_te);
-      }
-      display_label += "…";
-      cairo_text_extents(cr, display_label.c_str(), &label_te);
-    }
-    int label_w = static_cast<int>(label_te.x_advance + 4.0 * zf);
-    if (label_w > path_text_w) label_w = path_text_w;
-
-    bool label_hovered = ((app.active_pane ? app.r_breadcrumb_hover : app.breadcrumb_hover) == 0);
-    if (label_hovered) {
-      cairo_save(cr);
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.12);
-      draw_rounded_rect(cr, path_text_x - 2, path_y + 2, label_w + 4, path_h - 4,
-                        static_cast<int>(5.0 * zf));
-      cairo_fill(cr);
-      cairo_restore(cr);
-    }
-
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, label_hovered ? 1.0 : 0.92);
-    cairo_move_to(cr, path_text_x, text_y);
-    cairo_show_text(cr, display_label.c_str());
-
-    // One breadcrumb entry for hit testing / hover (clicking it is a no-op; empty space in the bar enters edit)
-    BreadcrumbSegment seg;
-    seg.label = display_label;
-    seg.path = cur;
-    seg.x = path_text_x;
-    seg.w = label_w;
-    (app.active_pane ? app.r_breadcrumbs : app.breadcrumbs).push_back(seg);
-  }
-
-  // ── View-mode toggle (cycles List→Grid→Compact→Tree→List) ──
-  {
-    // Icon previews the mode the next click switches TO.
-    cairo_surface_t* svg = nullptr;
-    const char* fallback = "\u25A6";
-    switch (app.cur_tab().view_mode) {
-      case ViewMode::List:    svg = app.view_grid_svg;    fallback = "\u25A6"; break; // next: Grid
-      case ViewMode::Grid:    svg = app.view_compact_svg; fallback = "\u2261"; break; // next: Compact
-      case ViewMode::Compact: svg = app.view_tree_svg;    fallback = "\u25B3"; break; // next: Tree
-      case ViewMode::Tree:    svg = app.view_list_svg;    fallback = "\u25A3"; break; // next: List
-      default:                svg = app.view_grid_svg;    fallback = "\u25A6"; break;
-    }
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    int sz = static_cast<int>(16.0 * zf);
-    int ox = view_toggle_x + (view_toggle_w - sz) / 2;
-    int oy = (top_h - sz) / 2;
-    if (svg) {
-      double svg_w = static_cast<double>(cairo_image_surface_get_width(svg));
-      double svg_h = static_cast<double>(cairo_image_surface_get_height(svg));
-      double display_scale = sz / std::max(svg_w, svg_h);
-      cairo_save(cr);
-      cairo_rectangle(cr, ox, oy, sz, sz);
-      cairo_clip(cr);
-      cairo_translate(cr, ox, oy);
-      cairo_scale(cr, display_scale, display_scale);
-      cairo_mask_surface(cr, svg, 0, 0);
-      cairo_restore(cr);
-    } else {
-      cairo_text_extents_t te;
-      cairo_text_extents(cr, fallback, &te);
-      cairo_move_to(cr, ox + (sz - te.width) / 2, oy + sz / 2 + te.height / 2);
-      cairo_show_text(cr, fallback);
-    }
-  }
-
-  // ── Folder-search button (folder + magnifying glass) ──
-  {
-    bool hv = app.active_pane ? app.r_folder_search_btn_hover : app.folder_search_btn_hover;
-    bool active = (app.active_pane ? app.r_search_active : app.search_active);
-    if (hv || active) {
-      cairo_save(cr);
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, active ? 0.25 : 0.08);
-      draw_rounded_rect(cr, folder_search_btn_x, path_y, folder_search_btn_w, path_h,
-                        static_cast<int>(8.0 * zf));
-      cairo_fill(cr);
-      cairo_restore(cr);
-    }
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    int sz = static_cast<int>(16.0 * zf);
-    int ox = folder_search_btn_x + (folder_search_btn_w - sz) / 2;
-    int oy = (top_h - sz) / 2;
-    cairo_surface_t* fs_svg = app.folder_search_svg;
-    if (fs_svg) {
-      double svg_w = static_cast<double>(cairo_image_surface_get_width(fs_svg));
-      double svg_h = static_cast<double>(cairo_image_surface_get_height(fs_svg));
-      double display_scale = sz / std::max(svg_w, svg_h);
-      cairo_save(cr);
-      cairo_rectangle(cr, ox, oy, sz, sz);
-      cairo_clip(cr);
-      cairo_translate(cr, ox, oy);
-      cairo_scale(cr, display_scale, display_scale);
-      cairo_mask_surface(cr, fs_svg, 0, 0);
-      cairo_restore(cr);
-    } else {
-      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-      cairo_set_font_size(cr, 13.0 * zf);
-      cairo_move_to(cr, folder_search_btn_x + (folder_search_btn_w - 6.0 * zf) / 2,
-                     top_h / 2 + static_cast<int>(4.0 * zf));
-      cairo_show_text(cr, "F");
-    }
-  }
-
-  // ── Search button (magnifying glass) ──
-  {
-    bool hv = app.active_pane ? app.r_search_btn_hover : app.search_btn_hover;
-    bool active = (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active);
-    if (hv || active) {
-      cairo_save(cr);
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, active ? 0.25 : 0.08);
-      draw_rounded_rect(cr, search_btn_x, path_y, search_btn_w, path_h,
-                        static_cast<int>(8.0 * zf));
-      cairo_fill(cr);
-      cairo_restore(cr);
-    }
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    if (app.search_svg) {
-      double svg_w = static_cast<double>(cairo_image_surface_get_width(app.search_svg));
-      double svg_h = static_cast<double>(cairo_image_surface_get_height(app.search_svg));
-      int sz = static_cast<int>(14.0 * zf);
-      int ox = search_btn_x + (search_btn_w - sz) / 2;
-      int oy = (top_h - sz) / 2;
-      double display_scale = sz / std::max(svg_w, svg_h);
-      cairo_save(cr);
-      cairo_rectangle(cr, ox, oy, sz, sz);
-      cairo_clip(cr);
-      cairo_translate(cr, ox, oy);
-      cairo_scale(cr, display_scale, display_scale);
-      cairo_mask_surface(cr, app.search_svg, 0, 0);
-      cairo_restore(cr);
-    } else {
-      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-      cairo_set_font_size(cr, 13.0 * zf);
-      cairo_move_to(cr, search_btn_x + (search_btn_w - 6.0 * zf) / 2,
-                     top_h / 2 + static_cast<int>(4.0 * zf));
-      cairo_show_text(cr, "S");
-    }
-  }
-
-  // ── Sort chevron (dropdown segment of the compound View Options control) ──
-  {
-    int csz = static_cast<int>(18.0 * zf); // same as the other toolbar icons
-    int cx = sort_x + (sort_w - csz) / 2;
-    int cy = (top_h - csz) / 2;
-    if (app.sort_chevron_svg) {
-      double csvg_w = static_cast<double>(cairo_image_surface_get_width(app.sort_chevron_svg));
-      double csvg_h = static_cast<double>(cairo_image_surface_get_height(app.sort_chevron_svg));
-      double display_scale = csz / std::max(csvg_w, csvg_h);
-      cairo_save(cr);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-      cairo_rectangle(cr, cx, cy, csz, csz);
-      cairo_clip(cr);
-      cairo_translate(cr, cx, cy);
-      cairo_scale(cr, display_scale, display_scale);
-      cairo_mask_surface(cr, app.sort_chevron_svg, 0, 0);
-      cairo_restore(cr);
-    } else {
-      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                              CAIRO_FONT_WEIGHT_NORMAL);
-      cairo_set_font_size(cr, 12.0 * zf);
-      cairo_move_to(cr, cx, top_h / 2 + static_cast<int>(4.0 * zf));
-      cairo_show_text(cr, "\u25bc");
-    }
-  }
-
-  // ── Settings gear button ──
-  {
-    bool hv = app.active_pane ? app.r_settings_btn_hover : app.settings_btn_hover;
-    if (hv) {
-      cairo_save(cr);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
-      draw_rounded_rect(cr, gear_x, path_y, gear_w, path_h,
-                        static_cast<int>(8.0 * zf));
-      cairo_fill(cr);
-      cairo_restore(cr);
-    }
-    int gz = static_cast<int>(15.0 * zf);
-    int gox = gear_x + (gear_w - gz) / 2;
-    int goy = (top_h - gz) / 2;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    if (app.settings_gear_svg) {
-      double svg_w = static_cast<double>(cairo_image_surface_get_width(app.settings_gear_svg));
-      double svg_h = static_cast<double>(cairo_image_surface_get_height(app.settings_gear_svg));
-      double display_scale = gz / std::max(svg_w, svg_h);
-      cairo_save(cr);
-      cairo_rectangle(cr, gox, goy, gz, gz);
-      cairo_clip(cr);
-      cairo_translate(cr, gox, goy);
-      cairo_scale(cr, display_scale, display_scale);
-      cairo_mask_surface(cr, app.settings_gear_svg, 0, 0);
-      cairo_restore(cr);
-    } else {
-      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                              CAIRO_FONT_WEIGHT_NORMAL);
-      cairo_set_font_size(cr, 16.0 * zf);
-      cairo_move_to(cr, gear_x + (gear_w - 14.0 * zf) / 2,
-                     top_h / 2 + static_cast<int>(5.0 * zf));
-      cairo_show_text(cr, "\u2699");
-    }
-  }
-
-  } // end split-view guard (skip full bar when split_view && global)
-
-  // ── macOS-style traffic lights (always right) ──
-  if (pane_w == 0) {
-    // Recalculate traffic_x since it's inside the split-view guard above
-    int right_margin = static_cast<int>(16.0 * zf);
-    int traffic_w = static_cast<int>(52.0 * zf);
-    int right = content_right - right_margin;
-    int traffic_x = right - traffic_w;
-    int light_d = static_cast<int>(12.0 * zf);
-    int light_gap = static_cast<int>(8.0 * zf); // gap-2
-    int light_y = (top_h - light_d) / 2;
-
-    auto draw_light = [&](int lx, bool hover, double r, double g, double b) {
-      double rad = light_d / 2.0;
-      if (hover) {
-        cairo_set_source_rgba(cr, r, g, b, 0.4);
-        cairo_arc(cr, lx + rad, light_y + rad, rad + 2, 0, 2 * M_PI);
-        cairo_fill(cr);
-      }
-      cairo_set_source_rgba(cr, r, g, b, 1.0);
-      cairo_arc(cr, lx + rad, light_y + rad, rad, 0, 2 * M_PI);
-      cairo_fill(cr);
-    };
-
-    // Maximize (green)
-    draw_light(traffic_x, app.win_btn_max_hover, 0.18, 0.80, 0.44);
-    // Minimize (yellow)
-    draw_light(traffic_x + light_d + light_gap, app.win_btn_min_hover, 0.95, 0.76, 0.04);
-    // Close (red)
-    draw_light(traffic_x + (light_d + light_gap) * 2, app.win_btn_close_hover, 0.91, 0.30, 0.24);
-
-    // Store window control positions for hit testing
-    app.win_btn_x = traffic_x;
-    app.win_btn_w = light_d + light_gap;
-  }
-}
 
 // ── filter dropdown with expandable sections ─────────────────────
 
@@ -3017,17 +1136,28 @@ void draw_hover_preview(AppState& app, cairo_t* cr) {
   double color_adj = 0.9;
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 12);
-  if (name.size() > 30) {
-    auto dot = name.rfind('.');
-    if (dot != std::string::npos && dot > 0) {
-      std::string ext = name.substr(dot);
-      int keep = 27 - static_cast<int>(ext.size());
-      if (keep > 0)
-        name = name.substr(0, static_cast<size_t>(keep)) + "..." + ext;
-      else
-        name = name.substr(0, 27) + "...";
-    } else {
-      name = name.substr(0, 27) + "...";
+  // Fit the full name to the popup width with a real ellipsis, keeping the
+  // extension so the type stays visible — long names must read in full.
+  {
+    const int avail = std::max(40, pw - 24);
+    cairo_text_extents_t mte;
+    cairo_text_extents(cr, name.c_str(), &mte);
+    if (mte.width > avail) {
+      std::string ext;
+      auto dot = name.rfind('.');
+      if (dot != std::string::npos && dot + 1 < name.size()) {
+        ext = name.substr(dot);      // includes the '.'
+        name = name.substr(0, dot);  // stem only
+      }
+      std::size_t k = name.size();
+      bool fit = false;
+      while (k > 0) {
+        std::string cand = name.substr(0, k) + "..." + ext;
+        cairo_text_extents(cr, cand.c_str(), &mte);
+        if (mte.width <= avail) { name = cand; fit = true; break; }
+        --k;
+      }
+      if (!fit) name = "..." + ext; // even one char + ext is too wide
     }
   }
   cairo_set_source_rgba(cr, app.text_r * color_adj, app.text_g * color_adj, app.text_b * color_adj, 0.9);
@@ -3927,36 +2057,197 @@ void draw_list_view(AppState& app, cairo_t* cr, int content_x,
 
 // ── grid view ────────────────────────────────────────────────────
 
+// Per-frame Pango shaping/layout is the dominant non-pixman cost in grid
+// view (harfbuzz+pango+layout allocations). The same ~N visible labels
+// repeat every frame, so rasterize each label once (already in its theme
+// color, premultiplied ARGB) and re-blit it 1:1 per frame. Baking the
+// color in (instead of mask-tinting white each frame) lets the per-frame
+// blit use pixman's src-over fast path rather than a 3-surface mask
+// composite. Keyed on the exact shaping inputs + quantized color so theme
+// switches naturally start a new working set (old keys LRU out).
+struct LabelRasterKey {
+  std::string text; // final (possibly truncated) label
+  int width;        // layout width in px
+  int font;         // absolute font px
+  uint32_t color;   // 0x00RRGGBB — quantized theme text color
+  bool operator==(const LabelRasterKey& o) const {
+    return text == o.text && width == o.width && font == o.font && color == o.color;
+  }
+};
+struct LabelRasterKeyHash {
+  std::size_t operator()(const LabelRasterKey& k) const {
+    std::size_t h = std::hash<std::string>{}(k.text);
+    h ^= static_cast<std::size_t>(k.width) << 8;
+    h ^= static_cast<std::size_t>(k.font) << 20;
+    h ^= static_cast<std::size_t>(k.color) << 30;
+    return h;
+  }
+};
+struct LabelRasterCache {
+  std::list<std::pair<LabelRasterKey, cairo_surface_t*>> mru;
+  std::unordered_map<LabelRasterKey, decltype(mru)::iterator, LabelRasterKeyHash> map;
+  static constexpr int kMax = 1024;
+  void clear() {
+    for (auto& kv : mru) cairo_surface_destroy(kv.second);
+    mru.clear();
+    map.clear();
+  }
+  // Rasterize (or fetch) a white-alpha label surface for text at the given
+  // wrap width (px) and font size (px). lines_px gives the surface height
+  // = 2 lines. Font options are copied from cr so metrics match the window.
+  // Truncation to 2 lines happens on miss, exactly as draw_grid_view did.
+  cairo_surface_t* lookup(const LabelRasterKey& key, cairo_t* cr, int lines_px) {
+    auto it = map.find(key);
+    if (it != map.end()) { mru.splice(mru.begin(), mru, it->second); return it->second->second; }
+    // A 2-line label is taller than the line_h grid math assumes (Pango
+    // line height ~18px at 13px font vs the 16px box), and the inline draw
+    // never clipped text to the box. Measure the real per-line height so
+    // the raster surface doesn't clip descenders, matching the old output.
+    int h;
+    {
+      cairo_surface_t* probe_s = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+      cairo_t* probe = cairo_create(probe_s);
+      if (cr) {
+        cairo_font_options_t* fo = cairo_font_options_create();
+        cairo_get_font_options(cr, fo);
+        cairo_set_font_options(probe, fo);
+        cairo_font_options_destroy(fo);
+      }
+      PangoFontDescription* mdesc = pango_font_description_new();
+      pango_font_description_set_family(mdesc, "Sans");
+      pango_font_description_set_absolute_size(mdesc, key.font * PANGO_SCALE);
+      PangoLayout* probe_pl = pango_cairo_create_layout(probe);
+      PangoFontMetrics* mm = pango_context_get_metrics(pango_layout_get_context(probe_pl), mdesc, NULL);
+      int line_h_real = pango_font_metrics_get_height(mm) / PANGO_SCALE;
+      if (line_h_real < 1) line_h_real = 1;
+      pango_font_metrics_unref(mm);
+      pango_font_description_free(mdesc);
+      g_object_unref(probe_pl);
+      h = std::max(lines_px + 2, 2 * line_h_real + 2);
+      cairo_surface_destroy(probe_s);
+      cairo_destroy(probe);
+    }
+    cairo_surface_t* surf =
+        cairo_image_surface_create(CAIRO_FORMAT_ARGB32, key.width, h);
+    cairo_t* lc = cairo_create(surf);
+    cairo_set_source_rgba(lc, (key.color >> 16 & 0xFF) / 255.0,
+                          (key.color >> 8 & 0xFF) / 255.0,
+                          (key.color & 0xFF) / 255.0, 1.0);
+    PangoLayout* pl = pango_cairo_create_layout(lc);
+    auto* desc = pango_font_description_new();
+    pango_font_description_set_family(desc, "Sans");
+    pango_font_description_set_absolute_size(desc, key.font * PANGO_SCALE);
+    pango_layout_set_font_description(pl, desc);
+    pango_layout_set_width(pl, key.width * PANGO_SCALE);
+    pango_layout_set_alignment(pl, PANGO_ALIGN_CENTER);
+    pango_layout_set_wrap(pl, PANGO_WRAP_WORD_CHAR);
+    pango_layout_set_ellipsize(pl, PANGO_ELLIPSIZE_NONE);
+
+    std::string label = key.text;
+    pango_layout_set_text(pl, label.c_str(), -1);
+    if (pango_layout_get_line_count(pl) > 2) {
+      std::string ext;
+      auto dot = label.rfind('.');
+      if (dot != std::string::npos && dot > 0) {
+        ext = label.substr(dot);
+        label = label.substr(0, dot);
+      }
+      while (!label.empty()) {
+        std::string candidate = ext.empty() ? (label + "...") : (label + "..." + ext);
+        pango_layout_set_text(pl, candidate.c_str(), -1);
+        if (pango_layout_get_line_count(pl) <= 2) break;
+        label.pop_back();
+      }
+      if (label.empty()) {
+        pango_layout_set_text(pl, (ext.empty() ? "..." : ("..." + ext)).c_str(), -1);
+      }
+    }
+    pango_cairo_show_layout(lc, pl);
+    pango_font_description_free(desc);
+    g_object_unref(pl);
+    cairo_destroy(lc);
+    mru.push_front({key, surf});
+    map.emplace(key, mru.begin());
+    if (static_cast<int>(mru.size()) > kMax) {
+      cairo_surface_destroy(mru.back().second);
+      map.erase(mru.back().first);
+      mru.pop_back();
+    }
+    return surf;
+  }
+};
+static LabelRasterCache g_grid_labels;
+
+// ── TEMP grid profiler ───────────────────────────────────────────
+struct DrawZone {
+  const char* name;
+  std::chrono::steady_clock::time_point t0;
+  AppState* app;
+  bool done = false;
+  DrawZone(const char* n, AppState* a)
+      : name(n), t0(std::chrono::steady_clock::now()), app(a) {}
+  void end() {
+    if (done) return;
+    done = true;
+    if (app && eh::trace::enabled().load(std::memory_order_relaxed)) {
+      double ms = std::chrono::duration<double, std::milli>(
+                      std::chrono::steady_clock::now() - t0).count();
+      app->resize_phase_samples.emplace_back(name, ms);
+    }
+  }
+  ~DrawZone() { end(); }
+};
+// ── end TEMP grid profiler ───────────────────────────────────────
+
+// Bench-only micro-profiler. Zero-cost when app.paint_profile is false:
+// the active check happens before either clock() call. `enabled` further
+// restricts which cells are timed (e.g. only hidden/cut ones).
+struct PaintStopwatch {
+  AppState* app;
+  std::uint64_t* dst;
+  std::chrono::steady_clock::time_point t0;
+  bool active;
+  PaintStopwatch(AppState& a, std::uint64_t& counter, bool enabled = true)
+      : app(&a), dst(&counter), active(a.paint_profile && enabled) {
+    if (active) t0 = std::chrono::steady_clock::now();
+  }
+  ~PaintStopwatch() {
+    if (active)
+      *dst += static_cast<std::uint64_t>(
+          std::chrono::duration_cast<std::chrono::nanoseconds>(
+              std::chrono::steady_clock::now() - t0).count());
+  }
+};
+
 void draw_grid_view(AppState& app, cairo_t* cr, int content_x,
-                    int content_y, int content_w, int view_h) {
+                    int content_y, int content_w, int view_h, int strip_y0,
+                    int strip_y1) {
+  if (strip_y1 < 0) { strip_y0 = content_y; strip_y1 = content_y + view_h; }
   double zf = app.zoom_pct / 100.0;
 
-  // Grid: auto-fill, minmax(110px, 1fr). Column gap and row gap are
-  // intentionally different — Nautilus/Dolphin use a noticeably tighter
-  // vertical rhythm than horizontal, so reusing one constant for both
-  // (as before) made rows much taller/looser than the reference UIs.
-  int min_cell_w = static_cast<int>(110.0 * zf);
-  int col_gap = static_cast<int>(18.0 * zf);
-  int row_gap = static_cast<int>(10.0 * zf);
-  int cols = std::max(1, (content_w + col_gap) / (min_cell_w + col_gap));
-  int cell_w = (content_w - col_gap - (cols - 1) * col_gap) / cols;
+  // Grid: auto-fill, minmax(110px, 1fr). Geometry now lives in exactly one
+  // place — layout.cpp's compute_grid_layout() — so draw, hit-test, and
+  // keyboard nav always agree on the same row_h/cols.
+  GridLayout gl = compute_grid_layout(content_w, zf);
+  int min_cell_w = gl.min_cell_w;
+  int col_gap = gl.col_gap;
+  int row_gap = gl.row_gap;
+  int cols = gl.cols;
+  int cell_w = gl.cell_w;
   app.grid_cell_size = cell_w;
   app.grid_cols = cols;
   app.grid_cell_gap = col_gap;
 
-  // Icon area, capped smaller than before — large 112px icons at typical
-  // cell widths read oversized next to Nautilus's ~64-72px default.
-  int icon_size = std::min(cell_w - static_cast<int>(16.0 * zf),
-                           static_cast<int>(72.0 * zf));
-  int icon_area = icon_size;
-  int label_h = static_cast<int>(32.0 * zf); // 2 lines of label text
-  int text_gap = static_cast<int>(4.0 * zf); // tight, label sits close under icon
-  int item_h = icon_area + text_gap + label_h;
-  int row_h = item_h + row_gap;
+  int icon_size = gl.icon_size;
+  int icon_area = gl.icon_area;
+  int label_h = gl.label_h;
+  int text_gap = gl.text_gap;
+  int item_h = gl.item_h;
+  int row_h = gl.row_h;
   app.grid_row_h = row_h;
 
-  int grid_w = cols * cell_w + (cols - 1) * col_gap;
-  int grid_offset_x = (content_w - grid_w) / 2;
+  int grid_w = gl.grid_w;
+  int grid_offset_x = gl.grid_offset_x;
 
   int y = content_y + row_gap - app.cur_tab().scroll_px;
 
@@ -3972,6 +2263,25 @@ void draw_grid_view(AppState& app, cairo_t* cr, int content_x,
   std::string first_vis_label;
   int first_vis_header_y = INT_MIN;
 
+  // Batch the exact-fit icon + label blits into one raw-pixel composite pass
+  // (skips cairo/pixman per-op overhead). Active only when the destination is
+  // a plain ARGB32 image surface; otherwise every blit falls back to cairo.
+  BatchedBlitter grid_blit;
+  const bool strip_mode =
+      (strip_y0 != content_y || strip_y1 != content_y + view_h);
+  if (strip_mode) {
+    // Strip pass (scroll-delta reuse): limit every cell blit AND the cairo
+    // fallback drawing to the exposed band. Rows above band_y0 already carry
+    // the correct post-shift pixels; re-blending a band-straddling cell there
+    // would double-blend its translucent icon/label over them.
+    grid_blit.attach(cr, content_x, strip_y0, content_w, strip_y1 - strip_y0);
+    cairo_save(cr);
+    cairo_rectangle(cr, content_x, strip_y0, content_w, strip_y1 - strip_y0);
+    cairo_clip(cr);
+  } else {
+    grid_blit.attach(cr, content_x, content_y, content_w, view_h);
+  }
+
   for (int vi = 0; vi < static_cast<int>(app.cur_tab().visible_entries.size()); ++vi) {
     int col = vi % cols;
     int row = vi / cols;
@@ -3985,9 +2295,12 @@ void draw_grid_view(AppState& app, cairo_t* cr, int content_x,
           prev_group = label;
           int hy = y + row * row_h + group_extra;
           gheader_ys[label] = hy;
-          if (hy + gheader_h >= content_y)
+          if (hy + gheader_h >= content_y &&
+              hy + gheader_h > strip_y0 && hy < strip_y1) {
+            PaintStopwatch sw_header(app, app.profile_grid_header_ns);
             draw_group_header_band(app, cr, content_x, hy, content_w,
                                     gheader_h, label);
+          }
           group_extra += gheader_h;
         }
         if (!sticky_recorded &&
@@ -4005,6 +2318,8 @@ void draw_grid_view(AppState& app, cairo_t* cr, int content_x,
 
     if (cy + item_h < content_y) continue;
     if (cy > content_y + view_h) break;
+    // Strip mode (scroll-delta reuse): draw only band-intersecting cells.
+    if (cy + item_h <= strip_y0 || cy >= strip_y1) continue;
 
     int real_idx = app.cur_tab().visible_entries[vi];
     if (real_idx < 0 || real_idx >= static_cast<int>(app.cur_tab().entries.size()))
@@ -4021,49 +2336,63 @@ void draw_grid_view(AppState& app, cairo_t* cr, int content_x,
     bool is_cut = !app.cut_paths.empty() && app.cut_paths.count(entry.path);
 
     bool hidden = entry.is_hidden;
+    PaintStopwatch sw_hidden(app, app.profile_grid_hidden_ns, hidden || is_cut);
     if (hidden || is_cut) cairo_push_group(cr);
 
     int bg_x = cx + (cell_w - icon_size) / 2;
     int bg_y = cy;
 
-    // Selection/hover outline
-    if (selected) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.35);
-      cairo_set_line_width(cr, 2.0);
-      draw_rounded_rect(cr, bg_x + 1, bg_y + 1, icon_size - 2, icon_size - 2,
-                        static_cast<int>(8.0 * zf));
-      cairo_stroke(cr);
-    } else if (drop_target) {
-      double pulse = 0.30 + 0.10 * std::sin(
-          std::chrono::duration_cast<std::chrono::milliseconds>(
-              std::chrono::steady_clock::now().time_since_epoch()).count() * 0.006);
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, pulse);
-      cairo_set_line_width(cr, 2.0);
-      draw_rounded_rect(cr, bg_x + 1, bg_y + 1, icon_size - 2, icon_size - 2,
-                        static_cast<int>(8.0 * zf));
-      cairo_stroke(cr);
-      app.pendingRedraw = true;
-    } else if (hovered) {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.06);
-      draw_rounded_rect(cr, bg_x, bg_y, icon_size, icon_size,
-                        static_cast<int>(8.0 * zf));
-      cairo_fill(cr);
-    }
+    {
+      PaintStopwatch sw_stroke(app, app.profile_grid_stroke_ns);
+      // Selection/hover overlay spans the whole item (icon + label) with the
+      // same 2px inset top AND bottom, so a wrapped long name is fully framed
+      // and never pokes past the rounded edge. The label box now holds the
+      // real 2-line height (layout.cpp's measured line_h), which makes the
+      // bottom inset actually reach the text.
+      const int overlay_h = item_h - 4; // 2px inset on both sides
+      if (selected) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.15);
+        draw_rounded_rect(cr, cx + 4, cy + 2, cell_w - 8, overlay_h,
+                          static_cast<int>(8.0 * zf));
+        cairo_fill(cr);
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.45);
+        cairo_set_line_width(cr, 2.0);
+        draw_rounded_rect(cr, cx + 4, cy + 2, cell_w - 8, overlay_h,
+                          static_cast<int>(8.0 * zf));
+        cairo_stroke(cr);
+      } else if (drop_target) {
+        double pulse = 0.30 + 0.10 * std::sin(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count() * 0.006);
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, pulse);
+        cairo_set_line_width(cr, 2.0);
+        draw_rounded_rect(cr, bg_x + 1, bg_y + 1, icon_size - 2, icon_size - 2,
+                          static_cast<int>(8.0 * zf));
+        cairo_stroke(cr);
+        app.pendingRedraw = true;
+      } else if (hovered) {
+        // Cover the whole cell (icon + label), not just the icon.
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.06);
+        draw_rounded_rect(cr, cx + 4, cy + 2, cell_w - 8, overlay_h,
+                          static_cast<int>(8.0 * zf));
+        cairo_fill(cr);
+      }
 
-    // Cut indicator: dashed border on cut files (GNOME 49 style)
-    if (is_cut) {
-      cairo_save(cr);
-      double dash_len = 5.0;
-      double gap_len = 3.0;
-      cairo_set_dash(cr, &dash_len, 1, 0.0);
-      cairo_set_line_width(cr, 1.5);
-      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
-                             app.text_secondary_b, 0.6);
-      draw_rounded_rect(cr, bg_x + 1, bg_y + 1, icon_size - 2, icon_size - 2,
-                        static_cast<int>(8.0 * zf));
-      cairo_stroke(cr);
-      cairo_set_dash(cr, &dash_len, 0, 0.0);
-      cairo_restore(cr);
+      // Cut indicator: dashed border on cut files (GNOME 49 style)
+      if (is_cut) {
+        cairo_save(cr);
+        double dash_len = 5.0;
+        double gap_len = 3.0;
+        cairo_set_dash(cr, &dash_len, 1, 0.0);
+        cairo_set_line_width(cr, 1.5);
+        cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                               app.text_secondary_b, 0.6);
+        draw_rounded_rect(cr, bg_x + 1, bg_y + 1, icon_size - 2, icon_size - 2,
+                          static_cast<int>(8.0 * zf));
+        cairo_stroke(cr);
+        cairo_set_dash(cr, &dash_len, 0, 0.0);
+        cairo_restore(cr);
+      }
     }
 
     // File icon
@@ -4073,57 +2402,40 @@ void draw_grid_view(AppState& app, cairo_t* cr, int content_x,
     } else if (entry.type == FileType::Document && (is_pdf_extension(entry.path) || is_epub_extension(entry.path))) {
       thumb = get_thumbnail_lazy(app, vi, entry.path, icon_size);
     }
-    draw_file_icon_cairo(app, cr, bg_x, bg_y,
-                          icon_size, entry.type, selected, entry.icon_name, thumb, &entry.path, &entry);
-
-    // Label (word/char-wrapped to 2 lines; extension preserved if truncation
-    // is needed; top-anchored so spacing is consistent regardless of 1 vs 2 lines)
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    auto* pl = pango_cairo_create_layout(cr);
-    auto* desc = pango_font_description_new();
-    pango_font_description_set_family(desc, "Sans");
-    pango_font_description_set_absolute_size(desc, static_cast<int>(13.0 * zf * PANGO_SCALE));
-    pango_layout_set_font_description(pl, desc);
-    int layout_w = cell_w - 8;
-    pango_layout_set_width(pl, static_cast<int>(layout_w * PANGO_SCALE));
-    pango_layout_set_alignment(pl, PANGO_ALIGN_CENTER);
-    pango_layout_set_wrap(pl, PANGO_WRAP_WORD_CHAR);
-    pango_layout_set_ellipsize(pl, PANGO_ELLIPSIZE_NONE);
-
-    // Try the full name first, with no height cap, so get_line_count()
-    // reflects the true number of lines it would take.
-    std::string label = entry.name;
-    pango_layout_set_text(pl, label.c_str(), -1);
-
-    if (pango_layout_get_line_count(pl) > 2) {
-      // Doesn't fit in 2 lines as-is. Shrink the stem (not the extension)
-      // a character at a time and re-test, same approach as before but
-      // budgeting for 2 wrapped lines instead of 1.
-      std::string ext;
-      auto dot = label.rfind('.');
-      if (dot != std::string::npos && dot > 0) {
-        ext = label.substr(dot);
-        label = label.substr(0, dot);
-      }
-      while (!label.empty()) {
-        std::string candidate = ext.empty() ? (label + "...") : (label + "..." + ext);
-        pango_layout_set_text(pl, candidate.c_str(), -1);
-        if (pango_layout_get_line_count(pl) <= 2) break;
-        label.pop_back();
-      }
-      if (label.empty()) {
-        pango_layout_set_text(pl, (ext.empty() ? "..." : ("..." + ext)).c_str(), -1);
-      }
+    {
+      PaintStopwatch sw_icon(app, app.profile_grid_icon_ns);
+      draw_file_icon_cairo(app, cr, bg_x, bg_y,
+                            icon_size, entry.type, selected, entry.icon_name, thumb, &entry.path, &entry,
+                            (hidden || is_cut) ? nullptr : &grid_blit);
     }
 
+    // Label (word/char-wrapped to 2 lines; extension preserved if truncation
+    // is needed; top-anchored so spacing is consistent regardless of 1 vs 2 lines).
+    // The visible cell count (~50) is far smaller than the entry count
+    // (50k); rasterizing each visible label once and mask-blitting 1:1 per
+    // frame removes the per-frame shaping/alloc churn from the hot path.
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    int layout_w = cell_w - 8;
+    int font_px = static_cast<int>(13.0 * zf);
+    int line_h = gl.line_h; // measured per-line height (layout.cpp)
+    uint32_t color = (static_cast<uint32_t>(app.text_r * 255) << 16) |
+                     (static_cast<uint32_t>(app.text_g * 255) << 8) |
+                     static_cast<uint32_t>(app.text_b * 255);
+    cairo_surface_t* label_surf = g_grid_labels.lookup(
+        LabelRasterKey{entry.name, layout_w, font_px, color}, cr, 2 * line_h);
+
     int label_area_h = label_h;
-    int line_h = static_cast<int>(16.0 * zf);
     int label_x = cx + (cell_w - layout_w) / 2;
     int label_y = cy + icon_size + text_gap + std::max(0, (label_area_h - 2 * line_h) / 2);
-    cairo_move_to(cr, label_x, label_y);
-    pango_cairo_show_layout(cr, pl);
-    pango_font_description_free(desc);
-    g_object_unref(pl);
+    {
+      PaintStopwatch sw_label(app, app.profile_grid_label_ns);
+      if (!(hidden || is_cut) && grid_blit.active()) {
+        grid_blit.add(label_surf, label_x, label_y);
+      } else {
+        cairo_set_source_surface(cr, label_surf, label_x, label_y);
+        cairo_paint(cr);
+      }
+    }
 
     if (hidden || is_cut) {
       cairo_pop_group_to_source(cr);
@@ -4131,14 +2443,25 @@ void draw_grid_view(AppState& app, cairo_t* cr, int content_x,
     }
   }
 
+  if (strip_mode) cairo_restore(cr);
+
+  // Composite the batched icon/label blits before the sticky header draws on
+  // top (matches the old inline ordering: cells first, header over them).
+  {
+    PaintStopwatch sw_flush(app, app.profile_grid_flush_ns);
+    grid_blit.flush();
+  }
+
   int rows = (static_cast<int>(app.cur_tab().visible_entries.size()) + cols - 1) / cols;
   app.cur_tab().content_h = y + rows * row_h + group_extra - content_y + app.cur_tab().scroll_px + row_gap;
 
   // Sticky group header pinned to the top of the viewport
   if (app.cur_tab().group_field > 0 && sticky_recorded &&
-      first_vis_header_y != INT_MIN && first_vis_header_y < content_y)
+      first_vis_header_y != INT_MIN && first_vis_header_y < content_y) {
+    PaintStopwatch sw_header(app, app.profile_grid_header_ns);
     draw_group_header_band(app, cr, content_x, content_y, content_w,
                             gheader_h, first_vis_label, true);
+  }
 }
 
 // ── status bar ───────────────────────────────────────────────────
@@ -4532,1041 +2855,6 @@ void draw_select_dir_bar(AppState& app, cairo_t* cr, int w, int h,
   cairo_show_text(cr, "Cancel");
 }
 
-// ── create dialog ────────────────────────────────────────────────
-
-void draw_create_dialog(AppState& app, cairo_t* cr) {
-  int w = app.width;
-  int h = app.height;
-  int dlg_w = 340;
-  int dlg_h = 160;
-  int dlg_x = (w - dlg_w) / 2;
-  int dlg_y = (h - dlg_h) / 2;
-
-  cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
-  cairo_rectangle(cr, 0, 0, w, h);
-  cairo_fill(cr);
-
-  // Layered soft shadow (consistent with the redesigned menus)
-  for (int s = 4; s >= 1; --s) {
-    double a = 0.09 * (1.0 - s / 5.0);
-    cairo_set_source_rgba(cr, 0, 0, 0, a);
-    draw_rounded_rect(cr, dlg_x + s, dlg_y + s, dlg_w, dlg_h, 10);
-    cairo_fill(cr);
-  }
-
-  double tr, tg, tb;
-  wallpaper_tint_surface(app, kPopupWallpaperTint, tr, tg, tb);
-  cairo_set_source_rgba(cr, tr, tg, tb, 1.0);
-  draw_rounded_rect(cr, dlg_x, dlg_y, dlg_w, dlg_h, 10);
-  cairo_fill(cr);
-
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
-  cairo_set_line_width(cr, 1);
-  draw_rounded_rect(cr, dlg_x + 0.5, dlg_y + 0.5, dlg_w - 1, dlg_h - 1, 9.5);
-  cairo_stroke(cr);
-
-  // Header: icon + title (adapts to folder / document / template)
-  const char* title = "New Folder";
-  const char* placeholder = "Folder name";
-  cairo_surface_t* hicon = app.icon_folder_svg;
-  if (!app.create_is_folder) {
-    title = app.create_template_src.empty() ? "New Document" : "New File from Template";
-    placeholder = "File name";
-    hicon = app.icon_file_text_svg;
-  }
-  cairo_save(cr);
-  if (hicon) {
-    double iw = static_cast<double>(cairo_image_surface_get_width(hicon));
-    double ih = static_cast<double>(cairo_image_surface_get_height(hicon));
-    double sc = 16.0 / std::max(iw, ih);
-    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
-    cairo_rectangle(cr, dlg_x + 20, dlg_y + 14, 16, 16);
-    cairo_clip(cr);
-    cairo_translate(cr, dlg_x + 20, dlg_y + 14);
-    cairo_scale(cr, sc, sc);
-    cairo_mask_surface(cr, hicon, 0, 0);
-  }
-  cairo_restore(cr);
-
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_BOLD);
-  cairo_set_font_size(cr, 15);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, dlg_x + 44, dlg_y + 30);
-  cairo_show_text(cr, title);
-
-  int input_x = dlg_x + 20;
-  int input_y = dlg_y + 50;
-  int input_w = dlg_w - 40;
-  int input_h = 34;
-  cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.5);
-  draw_rounded_rect(cr, input_x, input_y, input_w, input_h, 6);
-  cairo_fill(cr);
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.3);
-  cairo_set_line_width(cr, 1);
-  draw_rounded_rect(cr, input_x + 0.5, input_y + 0.5, input_w - 1, input_h - 1, 5.5);
-  cairo_stroke(cr);
-
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 14);
-
-  // Draw selection highlight
-  if (app.create_sel_start >= 0 && app.create_sel_start != app.create_sel_end) {
-    int sel_a = std::min(app.create_sel_start, app.create_sel_end);
-    int sel_b = std::max(app.create_sel_start, app.create_sel_end);
-    std::string before_sel = app.create_buf.substr(0, static_cast<std::size_t>(sel_a));
-    std::string sel_text = app.create_buf.substr(static_cast<std::size_t>(sel_a), static_cast<std::size_t>(sel_b - sel_a));
-    cairo_text_extents_t te_before, te_sel;
-    cairo_text_extents(cr, before_sel.c_str(), &te_before);
-    cairo_text_extents(cr, sel_text.c_str(), &te_sel);
-    double sel_x = input_x + 10 + te_before.width;
-    double sel_y = input_y + 4;
-    double sel_w = te_sel.width;
-    double sel_h = static_cast<double>(input_h) - 8;
-    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.35);
-    cairo_rectangle(cr, sel_x, sel_y, sel_w, sel_h);
-    cairo_fill(cr);
-  }
-
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, input_x + 10, input_y + input_h / 2 + 4);
-  cairo_show_text(cr, app.create_buf.c_str());
-
-  if (app.create_buf.empty()) {
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    cairo_move_to(cr, input_x + 10, input_y + input_h / 2 + 4);
-    cairo_show_text(cr, placeholder);
-  } else {
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, app.create_buf.substr(0, app.create_cursor_pos).c_str(), &te);
-    int cx = input_x + 10 + static_cast<int>(te.width);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.7);
-    cairo_rectangle(cr, cx, input_y + 6, 1, input_h - 12);
-    cairo_fill(cr);
-  }
-
-  int btn_y = dlg_y + dlg_h - 50;
-  int btn_w = 90;
-  int btn_h = 32;
-  int cancel_x = dlg_x + dlg_w - 220;
-  int create_x = dlg_x + dlg_w - 110;
-
-  // Cancel (secondary)
-  double cancel_alpha = (app.create_hover_btn == 1) ? 0.75 : 0.55;
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, cancel_alpha);
-  draw_rounded_rect(cr, cancel_x, btn_y, btn_w, btn_h, 6);
-  cairo_fill(cr);
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
-  cairo_set_line_width(cr, 1);
-  draw_rounded_rect(cr, cancel_x + 0.5, btn_y + 0.5, btn_w - 1, btn_h - 1, 5.5);
-  cairo_stroke(cr);
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 13);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-  cairo_text_extents_t te;
-  cairo_text_extents(cr, "Cancel", &te);
-  cairo_move_to(cr, cancel_x + (btn_w - te.x_advance) / 2, btn_y + btn_h / 2 + te.height * 0.35);
-  cairo_show_text(cr, "Cancel");
-
-  // Create (primary)
-  double create_alpha = (app.create_hover_btn == 0) ? 1.0 : 0.9;
-  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, create_alpha);
-  draw_rounded_rect(cr, create_x, btn_y, btn_w, btn_h, 6);
-  cairo_fill(cr);
-  cairo_set_source_rgba(cr, 1, 1, 1, 1.0);
-  cairo_text_extents(cr, "Create", &te);
-  cairo_move_to(cr, create_x + (btn_w - te.x_advance) / 2, btn_y + btn_h / 2 + te.height * 0.35);
-  cairo_show_text(cr, "Create");
-}
-
-// ── confirm dialog ───────────────────────────────────────────────
-
-void draw_confirm_dialog(AppState& app, cairo_t* cr) {
-  int w = app.width;
-  int h = app.height;
-  int dlg_w = 380;
-  int dlg_h = 170;
-  int dlg_x = (w - dlg_w) / 2;
-  int dlg_y = (h - dlg_h) / 2;
-
-  // Backdrop
-  cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
-  cairo_rectangle(cr, 0, 0, w, h);
-  cairo_fill(cr);
-
-  // Card (fully opaque, layered soft shadow)
-  draw_dialog_card(app, cr, dlg_x, dlg_y, dlg_w, dlg_h, 10);
-
-  // Title (with trash icon)
-  blit_icon(cr, app.trash_svg, dlg_x + 20, dlg_y + 14, 16,
-            app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_BOLD);
-  cairo_set_font_size(cr, 15);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, dlg_x + 42, dlg_y + 31);
-  cairo_show_text(cr, app.confirm_title.c_str());
-
-  // File-type icon
-  int icon_x = dlg_x + 20;
-  int icon_y = dlg_y + 50;
-  int icon_sz = 48;
-
-  if (app.confirm_item_count == 1 && !app.confirm_preview_path.empty()) {
-    FileType ft = FileType::File;
-    auto dot = app.confirm_preview_path.rfind('.');
-    if (dot != std::string::npos) {
-      std::string ext = app.confirm_preview_path.substr(dot + 1);
-      for (auto& c : ext) c = static_cast<char>(std::tolower(c));
-      if (ext == "png" || ext == "jpg" || ext == "jpeg" ||
-          ext == "gif" || ext == "bmp" || ext == "webp" ||
-          ext == "svg" || ext == "avif" || ext == "tif" ||
-          ext == "tiff" || ext == "psd" || ext == "xcf" ||
-           ext == "ai" || ext == "eps" || ext == "af" || ext == "afphoto" ||
-           ext == "afdesign" || ext == "afpub" || ext == "face" || ext == "icon")
-        ft = FileType::Image;
-      else if (ext == "zip" || ext == "tar" || ext == "gz" || ext == "bz2" ||
-               ext == "xz" || ext == "7z" || ext == "rar" || ext == "zst" ||
-               ext == "zstd" || ext == "iso" || ext == "cab" || ext == "dmg")
-        ft = FileType::Archive;
-      else if (ext == "sh" || ext == "bin" || ext == "elf" || ext == "exe" ||
-               ext == "desktop" || ext == "deb" || ext == "rpm" ||
-               ext == "AppImage" || ext == "appimage" || ext == "flatpak" ||
-               ext == "snap" || ext == "run" || ext == "msi")
-        ft = FileType::Executable;
-      else if (ext == "html" || ext == "htm" || ext == "xhtml" ||
-               ext == "css" || ext == "php" || ext == "wasm")
-        ft = FileType::Web;
-      else if (ext == "md" || ext == "markdown" || ext == "mdown" || ext == "mkd")
-        ft = FileType::Markdown;
-      else if (ext == "c" || ext == "cpp" || ext == "h" || ext == "hpp" ||
-               ext == "py" || ext == "rs" || ext == "go" || ext == "java" ||
-               ext == "js" || ext == "ts" || ext == "rb")
-        ft = FileType::Code;
-      else if (ext == "pdf" || ext == "doc" || ext == "docx" ||
-               ext == "xls" || ext == "xlsx" || ext == "ppt" || ext == "pptx" ||
-               ext == "odt" || ext == "ods" || ext == "odp" || ext == "rtf" ||
-               ext == "epub" || ext == "djvu")
-        ft = FileType::Document;
-      else if (ext == "ttf" || ext == "otf" || ext == "woff" || ext == "woff2")
-        ft = FileType::Font;
-      else if (ext == "txt" || ext == "conf" || ext == "json" ||
-               ext == "xml" || ext == "log" || ext == "yaml" ||
-               ext == "yml" || ext == "toml" || ext == "ini" || ext == "cfg")
-        ft = FileType::Text;
-      else if (ext == "mp3" || ext == "wav" || ext == "flac" || ext == "ogg" ||
-               ext == "m4a" || ext == "aac" || ext == "opus" || ext == "wma")
-        ft = FileType::Audio;
-      else if (ext == "mp4" || ext == "avi" || ext == "mkv" || ext == "mov" ||
-               ext == "webm")
-        ft = FileType::Video;
-    }
-    const auto* ic = app.icons.tray_icon(icon_name_for_file_type(ft, &app.confirm_preview_path));
-    if (ic && ic->surface) {
-      double iw = static_cast<double>(ic->width);
-      double ih = static_cast<double>(ic->height);
-      if (iw > 0 && ih > 0) {
-        double scale = icon_sz / std::max(1.0, std::max(iw, ih));
-        cairo_save(cr);
-        cairo_translate(cr, icon_x, icon_y);
-        cairo_scale(cr, scale, scale);
-        cairo_set_source_surface(cr, ic->surface,
-                                 (icon_sz / scale - iw) / 2,
-                                 (icon_sz / scale - ih) / 2);
-        cairo_paint(cr);
-        cairo_restore(cr);
-      }
-    }
-  }
-
-  // Message text
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 13);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_text_extents_t te;
-  int text_x = icon_x + icon_sz + 12;
-  int text_max_w = dlg_x + dlg_w - 20 - text_x;
-  std::string msg = app.confirm_message;
-  if (cairo_text_extents(cr, msg.c_str(), &te),
-      te.width > static_cast<double>(text_max_w)) {
-    while (!msg.empty()) {
-      msg.pop_back();
-      cairo_text_extents(cr, (msg + "\u2026").c_str(), &te);
-      if (te.width <= static_cast<double>(text_max_w)) {
-        msg += "\u2026";
-        break;
-      }
-    }
-  }
-  cairo_text_extents(cr, msg.c_str(), &te);
-  int text_y = icon_y + icon_sz / 2 + static_cast<int>(te.height) / 2;
-  cairo_move_to(cr, text_x, text_y);
-  cairo_show_text(cr, msg.c_str());
-
-  // Buttons
-  int btn_y = dlg_y + dlg_h - 50;
-  int btn_w = 90;
-  int btn_h = 32;
-  int cancel_x = dlg_x + dlg_w - 220;
-  int delete_x = dlg_x + dlg_w - 110;
-
-  bool cancel_hov = app.confirm_hover_btn == 0;
-  bool delete_hov = app.confirm_hover_btn == 1;
-
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b,
-                        cancel_hov ? 0.75 : 0.55);
-  draw_rounded_rect(cr, cancel_x, btn_y, btn_w, btn_h, 6);
-  cairo_fill(cr);
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.45);
-  cairo_set_line_width(cr, 1);
-  draw_rounded_rect(cr, cancel_x + 0.5, btn_y + 0.5, btn_w - 1, btn_h - 1, 5.5);
-  cairo_stroke(cr);
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 13);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, cancel_x + btn_w / 2 - 20, btn_y + btn_h / 2 + 4);
-  cairo_show_text(cr, "Cancel");
-
-  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
-                        delete_hov ? 1.0 : 0.90);
-  draw_rounded_rect(cr, delete_x, btn_y, btn_w, btn_h, 6);
-  cairo_fill(cr);
-  cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 13);
-  cairo_move_to(cr, delete_x + btn_w / 2 - 20, btn_y + btn_h / 2 + 4);
-  cairo_show_text(cr, "Delete");
-}
-
-// ── Overwrite/merge conflict dialog (Dolphin-style) ─────────────
-
-void draw_conflict_dialog(AppState& app, cairo_t* cr) {
-  if (app.conflict_queue.empty()) return;
-  const auto& c = app.conflict_queue.front();
-
-  int w = app.width;
-  int h = app.height;
-  int dlg_w = 520;
-  int dlg_h = 320;
-  int dlg_x = (w - dlg_w) / 2;
-  int dlg_y = (h - dlg_h) / 2;
-
-  // Backdrop
-  cairo_set_source_rgba(cr, 0, 0, 0, 0.40);
-  cairo_rectangle(cr, 0, 0, w, h);
-  cairo_fill(cr);
-
-  // Card (fully opaque, layered soft shadow)
-  draw_dialog_card(app, cr, dlg_x, dlg_y, dlg_w, dlg_h, 12);
-
-  std::string name = fs::path(c.src).filename().string();
-  bool merge = c.src_is_dir && c.dest_is_dir;
-
-  // Title
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-  cairo_set_font_size(cr, 15);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  {
-    std::string title = merge ? "Merge folder \"" + name + "\"?" :
-                        (c.src_is_dir ? "Replace folder \"" + name + "\"?"
-                                      : "Replace file \"" + name + "\"?");
-    cairo_move_to(cr, dlg_x + 22, dlg_y + 32);
-    cairo_show_text(cr, title.c_str());
-  }
-
-  // Subtitle
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 12);
-  cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
-  {
-    const char* sub = merge
-        ? "The destination contains a folder with the same name. Files with the same name will be replaced."
-        : (c.src_is_dir ? "The destination contains a file where the source has a folder."
-                        : "The destination contains a file with the same name. Overwriting will replace its contents.");
-    cairo_move_to(cr, dlg_x + 22, dlg_y + 52);
-    cairo_show_text(cr, sub);
-  }
-
-  // ── Source vs Destination columns ──
-  auto fmt_time = [](int64_t sec) {
-    if (sec == 0) return std::string("\u2014");
-    time_t t = static_cast<time_t>(sec);
-    struct tm* tm_local = localtime(&t);
-    char buf[64];
-    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", tm_local);
-    return std::string(buf);
-  };
-  auto fmt_size = [](uint64_t sz, bool is_dir) {
-    if (is_dir) return std::string("Folder");
-    char buf[64];
-    double v = static_cast<double>(sz);
-    const char* units[] = {"B", "KB", "MB", "GB", "TB"};
-    int ui = 0;
-    while (v >= 1024.0 && ui < 4) { v /= 1024.0; ++ui; }
-    if (ui == 0) snprintf(buf, sizeof(buf), "%llu B", (unsigned long long)sz);
-    else snprintf(buf, sizeof(buf), "%.1f %s", v, units[ui]);
-    return std::string(buf);
-  };
-  auto draw_column = [&](int x, int y, int col_w, const char* header,
-                         const std::string& p, bool is_dir,
-                         uint64_t sz, int64_t mtime) {
-    // Header pill
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
-    cairo_set_font_size(cr, 11);
-    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, header, &te);
-    cairo_move_to(cr, x + (col_w - te.x_advance) / 2, y);
-    cairo_show_text(cr, header);
-
-    // Icon
-    int icon_sz = 44;
-    const auto* ic = app.icons.tray_icon(is_dir ? "folder"
-                                        : icon_name_for_file_type(FileType::File, &p));
-    if (ic && ic->surface) {
-      double iw = static_cast<double>(ic->width);
-      double ih = static_cast<double>(ic->height);
-      if (iw > 0 && ih > 0) {
-        double scale = icon_sz / std::max(1.0, std::max(iw, ih));
-        cairo_save(cr);
-        cairo_translate(cr, x + (col_w - icon_sz) / 2, y + 8);
-        cairo_scale(cr, scale, scale);
-        cairo_set_source_surface(cr, ic->surface,
-                                 (icon_sz / scale - iw) / 2,
-                                 (icon_sz / scale - ih) / 2);
-        cairo_paint(cr);
-        cairo_restore(cr);
-      }
-    }
-
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 12);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    std::string line1 = fmt_size(sz, is_dir);
-    cairo_text_extents(cr, line1.c_str(), &te);
-    cairo_move_to(cr, x + (col_w - te.x_advance) / 2, y + icon_sz + 28);
-    cairo_show_text(cr, line1.c_str());
-
-    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
-    std::string line2 = fmt_time(mtime);
-    cairo_text_extents(cr, line2.c_str(), &te);
-    cairo_move_to(cr, x + (col_w - te.x_advance) / 2, y + icon_sz + 46);
-    cairo_show_text(cr, line2.c_str());
-  };
-
-  int col_top = dlg_y + 68;
-  int col_w = 200;
-  draw_column(dlg_x + 22, col_top, col_w, "SOURCE", c.src, c.src_is_dir, c.src_size, c.src_mtime);
-  draw_column(dlg_x + dlg_w - 22 - col_w, col_top, col_w, "DESTINATION",
-              c.dest, c.dest_is_dir, c.dest_size, c.dest_mtime);
-  // Divider between columns
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
-  cairo_set_line_width(cr, 1);
-  cairo_move_to(cr, dlg_x + dlg_w / 2 + 0.5, col_top + 4);
-  cairo_line_to(cr, dlg_x + dlg_w / 2 + 0.5, col_top + 92);
-  cairo_stroke(cr);
-
-  // ── Apply-to-all checkbox (only when more than one conflict remains) ──
-  int check_y = dlg_y + dlg_h - 96;
-  if (app.conflict_queue.size() > 1) {
-    int box_sz = 16;
-    int box_x = dlg_x + 22;
-    app.conflict_check_rect[0] = box_x;
-    app.conflict_check_rect[1] = check_y;
-    app.conflict_check_rect[2] = box_sz + 220;
-    app.conflict_check_rect[3] = box_sz;
-    bool hov = app.conflict_check_hover ||
-               (app.pointerX >= box_x && app.pointerX < box_x + box_sz + 220 &&
-                app.pointerY >= check_y && app.pointerY < check_y + box_sz);
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b,
-                          hov ? 0.55 : 0.35);
-    cairo_set_line_width(cr, 1.5);
-    draw_rounded_rect(cr, box_x, check_y, box_sz, box_sz, 4);
-    cairo_stroke(cr);
-    if (app.conflict_apply_all) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.9);
-      draw_rounded_rect(cr, box_x, check_y, box_sz, box_sz, 4);
-      cairo_fill(cr);
-      // Checkmark
-      cairo_set_source_rgba(cr, 1, 1, 1, 0.95);
-      cairo_set_line_width(cr, 2);
-      cairo_move_to(cr, box_x + 4, check_y + 8);
-      cairo_line_to(cr, box_x + 7, check_y + 11);
-      cairo_line_to(cr, box_x + 12, check_y + 5);
-      cairo_stroke(cr);
-    }
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 12);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-    std::string label = "Apply this action to all " +
-                        std::to_string(app.conflict_queue.size() - 1) + " remaining";
-    cairo_move_to(cr, box_x + box_sz + 8, check_y + 13);
-    cairo_show_text(cr, label.c_str());
-  } else {
-    app.conflict_check_rect[0] = 0; app.conflict_check_rect[1] = -100;
-    app.conflict_check_rect[2] = 0; app.conflict_check_rect[3] = 0;
-  }
-
-  // ── Buttons: Skip | Cancel | Overwrite(Merge) ──
-  int btn_y = dlg_y + dlg_h - 54;
-  int btn_h = 34;
-  int btn_w = 104;
-  int b2_x = dlg_x + dlg_w - 22 - btn_w;                    // Overwrite/Merge
-  int b1_x = b2_x - 8 - btn_w;                              // Cancel
-  int b0_x = b1_x - 8 - btn_w;                              // Skip
-  double rects[3][4] = {
-    {static_cast<double>(b0_x), static_cast<double>(btn_y), static_cast<double>(btn_w), static_cast<double>(btn_h)},
-    {static_cast<double>(b1_x), static_cast<double>(btn_y), static_cast<double>(btn_w), static_cast<double>(btn_h)},
-    {static_cast<double>(b2_x), static_cast<double>(btn_y), static_cast<double>(btn_w), static_cast<double>(btn_h)},
-  };
-  for (int b = 0; b < 3; ++b)
-    for (int k = 0; k < 4; ++k) app.conflict_btn_rects[b][k] = rects[b][k];
-
-  const char* labels[3] = {"Skip", "Cancel", merge ? "Merge" : "Overwrite"};
-  int centers[3] = {b0_x, b1_x, b2_x};
-  for (int b = 0; b < 3; ++b) {
-    bool primary = (b == 2);
-    bool hov = (app.pointerX >= rects[b][0] && app.pointerX < rects[b][0] + rects[b][2] &&
-                app.pointerY >= rects[b][1] && app.pointerY < rects[b][1] + rects[b][3]);
-    if (primary) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
-                            hov ? 1.0 : 0.90);
-    } else {
-      cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, hov ? 0.85 : 0.6);
-    }
-    draw_rounded_rect(cr, centers[b], btn_y, btn_w, btn_h, 6);
-    cairo_fill(cr);
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 13);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, labels[b], &te);
-    cairo_move_to(cr, centers[b] + (btn_w - te.x_advance) / 2, btn_y + btn_h / 2 + 4);
-    cairo_show_text(cr, labels[b]);
-  }
-}
-
-// ── password dialog ─────────────────────────────────────────────
-
-void draw_password_dialog(AppState& app, cairo_t* cr) {
-  int w = app.width;
-  int h = app.height;
-  int card_w = 400;
-  int card_h = 210;
-  int cx = (w - card_w) / 2;
-  int cy = (h - card_h) / 2;
-  int pad = 24;
-  int card_r = 14;
-
-  // Backdrop
-  cairo_set_source_rgba(cr, 0, 0, 0, 0.40);
-  cairo_rectangle(cr, 0, 0, w, h);
-  cairo_fill(cr);
-
-  // Card (fully opaque, layered soft shadow)
-  for (int s = 4; s >= 1; --s) {
-    cairo_set_source_rgba(cr, 0, 0, 0, 0.09 * (1.0 - s / 5.0));
-    draw_rounded_rect(cr, cx + s, cy + s, card_w, card_h, card_r);
-    cairo_fill(cr);
-  }
-
-  // Card background
-  double tr, tg, tb;
-  wallpaper_tint_surface(app, kPopupWallpaperTint, tr, tg, tb);
-  cairo_set_source_rgba(cr, tr, tg, tb, 1.0);
-  draw_rounded_rect(cr, cx, cy, card_w, card_h, card_r);
-  cairo_fill_preserve(cr);
-
-  // Card border
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
-  cairo_set_line_width(cr, 1);
-  cairo_stroke(cr);
-
-  // Lock icon
-  blit_icon(cr, app.lock_svg, cx + pad, cy + pad - 2, 16,
-            app.accent_r, app.accent_g, app.accent_b, 0.9);
-
-  // Title
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_BOLD);
-  cairo_set_font_size(cr, 15);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, cx + pad + 28, cy + pad + 15);
-  cairo_show_text(cr, "Enter Password");
-
-  // Subtitle with truncated archive name
-  {
-    std::string fname = fs::path(app.password_archive_path).filename().string();
-    if (fname.size() > 42) fname = fname.substr(0, 39) + "\xE2\x80\xA6";
-    std::string subtitle = "\"" + fname + "\" is password-protected";
-
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                            CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 12);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.5);
-
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, subtitle.c_str(), &te);
-    double max_w = static_cast<double>(card_w - pad * 2);
-    if (te.width > max_w) {
-      while (subtitle.size() > 10) {
-        subtitle.pop_back();
-        cairo_text_extents(cr, (subtitle + "\xE2\x80\xA6").c_str(), &te);
-        if (te.width <= max_w) { subtitle += "\xE2\x80\xA6"; break; }
-      }
-    }
-    cairo_move_to(cr, cx + pad, cy + pad + 36);
-    cairo_show_text(cr, subtitle.c_str());
-  }
-
-  // Separator
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.18);
-  cairo_set_line_width(cr, 1);
-  cairo_move_to(cr, cx + pad, cy + pad + 50);
-  cairo_line_to(cr, cx + card_w - pad, cy + pad + 50);
-  cairo_stroke(cr);
-
-  // Input field
-  int input_x = cx + pad;
-  int input_y = cy + pad + 62;
-  int input_w = card_w - pad * 2;
-  int input_h = 36;
-  int input_r = 8;
-
-  // Input background
-  cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.55);
-  draw_rounded_rect(cr, input_x, input_y, input_w, input_h, input_r);
-  cairo_fill(cr);
-
-  // Input inner glassy rim
-  {
-    cairo_pattern_t* rim = cairo_pattern_create_linear(0, input_y, 0, input_y + input_h);
-    cairo_pattern_add_color_stop_rgba(rim, 0.00, app.text_r, app.text_g, app.text_b, 0.14);
-    cairo_pattern_add_color_stop_rgba(rim, 0.30, app.text_r, app.text_g, app.text_b, 0.06);
-    cairo_pattern_add_color_stop_rgba(rim, 1.00, app.text_r, app.text_g, app.text_b, 0.04);
-    cairo_set_source(cr, rim);
-    cairo_set_line_width(cr, 1.0);
-    draw_rounded_rect(cr, input_x + 1.5, input_y + 1.5, input_w - 3.0, input_h - 3.0,
-                      static_cast<double>(input_r) - 0.5);
-    cairo_stroke(cr);
-    cairo_pattern_destroy(rim);
-  }
-
-  // Password text (masked bullets)
-  int text_y = input_y + input_h / 2;
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 14);
-
-  if (!app.password_buf.empty()) {
-    std::string masked(app.password_buf.size(), '*');
-
-    // Draw selection highlight
-    if (app.password_sel_start >= 0 && app.password_sel_start != app.password_sel_end) {
-      int sel_a = std::min(app.password_sel_start, app.password_sel_end);
-      int sel_b = std::max(app.password_sel_start, app.password_sel_end);
-      std::string before_sel(app.password_buf.begin(), app.password_buf.begin() + std::min(sel_a, static_cast<int>(app.password_buf.size())));
-      std::string sel_masked(before_sel.size(), '*');
-      std::string sel_part(sel_b - sel_a, '*');
-      cairo_text_extents_t te_before, te_sel;
-      cairo_text_extents(cr, sel_masked.c_str(), &te_before);
-      cairo_text_extents(cr, sel_part.c_str(), &te_sel);
-      double sel_x = input_x + 14 + te_before.width;
-      double sel_y = static_cast<double>(input_y) + 4;
-      double sel_w = te_sel.width;
-      double sel_h = static_cast<double>(input_h) - 8;
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.35);
-      cairo_rectangle(cr, sel_x, sel_y, sel_w, sel_h);
-      cairo_fill(cr);
-    }
-
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, masked.c_str(), &te);
-    double tx = input_x + 14;
-    double ty = text_y + te.height * 0.35;
-    // Clip to input bounds
-    cairo_save(cr);
-    draw_rounded_rect(cr, input_x + 2, input_y + 2, input_w - 4, input_h - 4,
-                      static_cast<double>(input_r) - 1);
-    cairo_clip(cr);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.95);
-    cairo_move_to(cr, tx, ty);
-    cairo_show_text(cr, masked.c_str());
-    cairo_restore(cr);
-  } else {
-    // Placeholder
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.30);
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, "Password", &te);
-    cairo_move_to(cr, input_x + 14, text_y + te.height * 0.35);
-    cairo_show_text(cr, "Password");
-  }
-
-  // Cursor
-  {
-    std::string before_cursor(app.password_buf.begin(),
-                              app.password_buf.begin() + std::min(app.password_cursor_pos,
-                                                                   static_cast<int>(app.password_buf.size())));
-    std::string masked_before(before_cursor.size(), '*');
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, masked_before.c_str(), &te);
-    int cur_x = input_x + 14 + static_cast<int>(te.width);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.6);
-    cairo_rectangle(cr, cur_x, input_y + 8, 1, input_h - 16);
-    cairo_fill(cr);
-  }
-
-  // Buttons (pill-shaped)
-  int btn_h = 32;
-  int btn_w = 90;
-  int btn_gap = 10;
-  int btns_total = btn_w * 2 + btn_gap;
-  int btns_x = cx + (card_w - btns_total) / 2;
-  int btn_y = cy + card_h - pad - btn_h;
-
-  // Cancel button
-  {
-    cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.42);
-    draw_rounded_rect(cr, btns_x, btn_y, btn_w, btn_h, btn_h / 2);
-    cairo_fill_preserve(cr);
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.40);
-    cairo_set_line_width(cr, 1);
-    cairo_stroke(cr);
-
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                            CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 13);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, "Cancel", &te);
-    cairo_move_to(cr, btns_x + (btn_w - te.x_advance) / 2,
-                  btn_y + btn_h / 2 + te.height * 0.35);
-    cairo_show_text(cr, "Cancel");
-  }
-
-  // Extract button (accent)
-  {
-    int ex_x = btns_x + btn_w + btn_gap;
-    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.15);
-    draw_rounded_rect(cr, ex_x, btn_y, btn_w, btn_h, btn_h / 2);
-    cairo_fill_preserve(cr);
-    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.85);
-    cairo_set_line_width(cr, 1);
-    cairo_stroke(cr);
-
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                            CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 13);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, "Extract", &te);
-    cairo_move_to(cr, ex_x + (btn_w - te.x_advance) / 2,
-                  btn_y + btn_h / 2 + te.height * 0.35);
-    cairo_show_text(cr, "Extract");
-  }
-}
-
-// ── compress dialog ──────────────────────────────────────────────
-
-void draw_compress_dialog(AppState& app, cairo_t* cr) {
-  int w = app.width;
-  int h = app.height;
-  int dlg_w = 420;
-  int dlg_h = 310;
-  int dlg_x = (w - dlg_w) / 2;
-  int dlg_y = (h - dlg_h) / 2;
-
-  // Backdrop
-  cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
-  cairo_rectangle(cr, 0, 0, w, h);
-  cairo_fill(cr);
-
-  // Card (fully opaque, layered soft shadow)
-  draw_dialog_card(app, cr, dlg_x, dlg_y, dlg_w, dlg_h, 10);
-
-  // Title
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_BOLD);
-  cairo_set_font_size(cr, 15);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, dlg_x + 20, dlg_y + 28);
-  cairo_show_text(cr, "Compress");
-
-  // ── Format row ──
-  static const char* fmt_labels[] = {"Zip", "Tar.gz", "Tar.bz2", "Tar.xz",
-                                      "7z", "Rar", "Tar"};
-  int content_x = dlg_x + 20;
-  int content_y = dlg_y + 50;
-  int fmt_w = 80;
-  int fmt_h = 28;
-  int fmt_gap = 8;
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 12);
-  cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
-                        app.text_secondary_b, 1.0);
-  cairo_move_to(cr, content_x, content_y);
-  cairo_show_text(cr, "Format");
-
-  int fmy = content_y + 18;
-  for (int i = 0; i < 4; ++i) {
-    int fmx = content_x + i * (fmt_w + fmt_gap);
-    bool avail = app.compress_format_available[i];
-    double r = 6;
-    if (i == app.compress_format) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, avail ? 0.85 : 0.30);
-    } else if (i == app.compress_hover_format && avail) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.50);
-    } else {
-      cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.5);
-    }
-    draw_rounded_rect(cr, fmx, fmy, fmt_w, fmt_h, r);
-    cairo_fill(cr);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, avail ? 1.0 : 0.35);
-    cairo_move_to(cr, fmx + 6, fmy + fmt_h / 2 + 4);
-    cairo_show_text(cr, fmt_labels[i]);
-  }
-  int fmy2 = fmy + fmt_h + fmt_gap;
-  for (int i = 4; i < 7; ++i) {
-    int fmx = content_x + (i - 4) * (fmt_w + fmt_gap);
-    bool avail = app.compress_format_available[i];
-    double r = 6;
-    if (i == app.compress_format) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, avail ? 0.85 : 0.30);
-    } else if (i == app.compress_hover_format && avail) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.50);
-    } else {
-      cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.5);
-    }
-    draw_rounded_rect(cr, fmx, fmy2, fmt_w, fmt_h, r);
-    cairo_fill(cr);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, avail ? 1.0 : 0.35);
-    cairo_move_to(cr, fmx + 6, fmy2 + fmt_h / 2 + 4);
-    cairo_show_text(cr, fmt_labels[i]);
-  }
-
-  // ── Name row ──
-  int name_y = fmy2 + fmt_h + 14;
-  cairo_set_font_size(cr, 12);
-  cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
-                        app.text_secondary_b, 1.0);
-  cairo_move_to(cr, content_x, name_y);
-  cairo_show_text(cr, "Name");
-
-  int input_x = content_x;
-  int input_y = name_y + 18;
-  int input_w = dlg_w - 40;
-  int input_h = 32;
-  cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.5);
-  draw_rounded_rect(cr, input_x, input_y, input_w, input_h, 6);
-  cairo_fill(cr);
-
-  cairo_set_font_size(cr, 13);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, input_x + 8, input_y + input_h / 2 + 4);
-  cairo_show_text(cr, app.compress_name_buf.c_str());
-
-  if (app.compress_name_buf.empty()) {
-    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
-                          app.text_secondary_b, 0.6);
-    cairo_move_to(cr, input_x + 8, input_y + input_h / 2 + 4);
-    cairo_show_text(cr, "Archive name");
-  } else {
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, app.compress_name_buf.substr(0, app.compress_name_cursor).c_str(), &te);
-    int cx = input_x + 8 + static_cast<int>(te.width);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.7);
-    cairo_rectangle(cr, cx, input_y + 6, 1, input_h - 12);
-    cairo_fill(cr);
-  }
-
-  // ── Level row ──
-  int lvl_y = input_y + input_h + 14;
-  cairo_set_font_size(cr, 12);
-  cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
-                        app.text_secondary_b, 1.0);
-  cairo_move_to(cr, content_x, lvl_y);
-  cairo_show_text(cr, "Level");
-
-  static const char* level_labels[] = {"Fastest", "Fast", "Normal", "Maximum", "Maximal"};
-  static constexpr int kNumLevels = 5;
-  static constexpr int kLevelValues[kNumLevels] = {0, 3, 6, 8, 9};
-  int lvl_btn_x = content_x;
-  int lvl_btn_y = lvl_y + 18;
-  int lvl_btn_w = 68;
-  int lvl_btn_h = 28;
-  int lvl_gap = 8;
-  for (int i = 0; i < kNumLevels; ++i) {
-    int lx = lvl_btn_x + i * (lvl_btn_w + lvl_gap);
-    double r = 6;
-    if (kLevelValues[i] == app.compress_level) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.85);
-    } else if (i == app.compress_hover_level) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.50);
-    } else {
-      cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.5);
-    }
-    draw_rounded_rect(cr, lx, lvl_btn_y, lvl_btn_w, lvl_btn_h, r);
-    cairo_fill(cr);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    cairo_set_font_size(cr, 11);
-    cairo_move_to(cr, lx + 4, lvl_btn_y + lvl_btn_h / 2 + 4);
-    cairo_show_text(cr, level_labels[i]);
-  }
-
-  // ── Buttons ──
-  int btn_y = dlg_y + dlg_h - 50;
-  int btn_w = 90;
-  int btn_h = 32;
-  int cancel_x = dlg_x + dlg_w - 220;
-  int compress_x = dlg_x + dlg_w - 110;
-
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, 0.6);
-  draw_rounded_rect(cr, cancel_x, btn_y, btn_w, btn_h, 6);
-  cairo_fill(cr);
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 13);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, cancel_x + btn_w / 2 - 20, btn_y + btn_h / 2 + 4);
-  cairo_show_text(cr, "Cancel");
-
-  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.85);
-  draw_rounded_rect(cr, compress_x, btn_y, btn_w, btn_h, 6);
-  cairo_fill(cr);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, compress_x + btn_w / 2 - 24, btn_y + btn_h / 2 + 4);
-  cairo_show_text(cr, "Compress");
-
-  // Hover highlight
-  if (app.compress_hover_btn >= 0) {
-    int hx = app.compress_hover_btn == 0 ? cancel_x : compress_x;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.12);
-    draw_rounded_rect(cr, hx, btn_y, btn_w, btn_h, 6);
-    cairo_fill(cr);
-  }
-}
-
-// ── terminal chooser dialog ──────────────────────────────────────
-
-void draw_terminal_chooser(AppState& app, cairo_t* cr) {
-  int w = app.width;
-  int h = app.height;
-
-  const int kPad = 20;
-  const int kTopBarH = 44;
-  const int kEntryH = 40;
-  const int kBottomBarH = 52;
-  const int kCardRad = 12;
-  const int kMaxListH = 300;
-
-  const int total = static_cast<int>(app.term_chooser_apps.size());
-  const int max_visible = std::max(1, kMaxListH / kEntryH);
-  const int visible = std::min(total, max_visible);
-  const int list_h = visible * kEntryH;
-  const int card_w = 400;
-  const int card_h = kPad + kTopBarH + 8 + list_h + 8 + kBottomBarH + kPad;
-  const int card_x = (w - card_w) / 2;
-  const int card_y = (h - card_h) / 2;
-
-  app.term_chooser_x = card_x;
-  app.term_chooser_y = card_y;
-  app.term_chooser_w = card_w;
-
-  cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
-  cairo_rectangle(cr, 0, 0, w, h);
-  cairo_fill(cr);
-
-  // Card (fully opaque, layered soft shadow)
-  draw_dialog_card(app, cr, card_x, card_y, card_w, card_h, kCardRad);
-
-  const int close_x = card_x + card_w - kPad - 28;
-  const int close_y = card_y + kPad - 4;
-  {
-    int cHov = (app.term_chooser_hover == -2) ? 1 : 0;
-    double a = cHov ? 0.55 : 0.40;
-    cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, a);
-    draw_rounded_rect(cr, close_x, close_y, 28, 28, 6);
-    cairo_fill(cr);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    cairo_set_line_width(cr, 1.5);
-    cairo_move_to(cr, close_x + 9, close_y + 9);
-    cairo_line_to(cr, close_x + 19, close_y + 19);
-    cairo_move_to(cr, close_x + 19, close_y + 9);
-    cairo_line_to(cr, close_x + 9, close_y + 19);
-    cairo_stroke(cr);
-  }
-
-  // Title (with terminal icon)
-  blit_icon(cr, app.monitor_svg, card_x + kPad, card_y + kPad - 2, 16,
-            app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_BOLD);
-  cairo_set_font_size(cr, 15);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, card_x + kPad + 24, card_y + kPad + 15);
-  cairo_show_text(cr, "Choose Terminal");
-
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.15);
-  cairo_rectangle(cr, card_x, card_y + kPad + kTopBarH, card_w, 1);
-  cairo_fill(cr);
-
-  const int list_x = card_x + 12;
-  const int list_y = card_y + kPad + kTopBarH + 8;
-  const int list_w = card_w - 24;
-
-  cairo_save(cr);
-  cairo_rectangle(cr, list_x, list_y, list_w, list_h);
-  cairo_clip(cr);
-
-  const int start = app.term_chooser_scroll;
-  const int end = std::min(start + visible, total);
-  for (int i = start; i < end; ++i) {
-    const int ey = list_y + (i - start) * kEntryH;
-    const bool hov = (i == app.term_chooser_hover);
-
-    if (hov) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.12);
-      cairo_rectangle(cr, list_x, ey, list_w, kEntryH);
-      cairo_fill(cr);
-    }
-
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                            CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 13);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    cairo_move_to(cr, list_x + 8, ey + kEntryH / 2 + 5);
-    cairo_show_text(cr, app.term_chooser_apps[i].name.c_str());
-
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.08);
-    cairo_move_to(cr, list_x + 8, ey + kEntryH - 0.5);
-    cairo_line_to(cr, list_x + list_w - 8, ey + kEntryH - 0.5);
-    cairo_set_line_width(cr, 0.5);
-    cairo_stroke(cr);
-  }
-
-  cairo_restore(cr);
-
-  if (total > visible) {
-    const double sbTrackH = list_h;
-    const double sbH = std::max(6.0, sbTrackH * visible / static_cast<double>(total));
-    const double sbMax = sbTrackH - sbH;
-    const double frac = sbMax > 0
-        ? static_cast<double>(app.term_chooser_scroll) /
-              static_cast<double>(total - visible)
-        : 0.0;
-    const double sbY = list_y + frac * sbMax;
-    const double sx = list_x + list_w - 8;
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.4);
-    draw_rounded_rect(cr, sx, sbY, 4, sbH, 2);
-    cairo_fill(cr);
-  }
-}
 
 // ── marquee / rubber-band selection ──────────────────────────────
 
@@ -5602,48 +2890,6 @@ void draw_marquee(AppState& app, cairo_t* cr) {
 // info-panel / ops-panel insets and the per-pane top bar. The pane is
 // derived FROM THE POINTER X, so results stay position-correct no matter
 // which pane currently has focus.
-struct PaneViewRect {
-  int x, y, w, h;
-  int pane;  // 0 = left/single pane, 1 = right split pane
-};
-
-static PaneViewRect pane_view_rect_at(const AppState& app, int px) {
-  int sidebar_w = app.sidebar_w();
-  int info_w = 0;
-  if (app.info_panel_open)
-    info_w = std::max(200, static_cast<int>(280.0 * app.zoom_pct / 100.0));
-  int ops_w = 0;
-  if (app.ops_panel_slide > 0.01) {
-    ops_w = static_cast<int>(
-        std::max(240, static_cast<int>(320.0 * app.zoom_pct / 100.0)) *
-        app.ops_panel_slide);
-  }
-  // Info panel must never squeeze the content column to nothing.
-  if (info_w > 0) {
-    int max_info = std::max(160, app.width - sidebar_w - ops_w - 240);
-    if (info_w > max_info) info_w = max_info;
-  }
-  int cx = sidebar_w;
-  int cw = app.width - sidebar_w - info_w - ops_w;
-  int selector_h =
-      (app.select_dir_mode || app.select_file_mode) ? app.select_bar_h : 0;
-  bool banner_on = app.search_active || app.recursive_search_active ||
-                   app.r_search_active || app.r_recursive_search_active;
-  int cy = app.top_bar_height + app.tab_bar_height + (banner_on ? 28 : 0);
-  int ch = app.height - cy - app.status_bar_height - selector_h;
-  if (!app.split_view) return {cx, cy, std::max(0, cw), ch, 0};
-
-  constexpr int kDivW = 4;
-  int split =
-      app.split_divider_x > 0 ? app.split_divider_x : std::max(200, cw) / 2;
-  int left_w = std::max(100, split - kDivW / 2);
-  int right_x = std::min(cx + cw - 100, cx + split + kDivW / 2);
-  int right_w = std::max(100, cx + cw - right_x);
-  int pt = app.top_bar_height;
-  if (px >= right_x) return {right_x, cy + pt, right_w, ch - pt, 1};
-  return {cx, cy + pt, left_w, ch - pt, 0};
-}
-
 // Tab whose entry list lives in the pane under px.
 static Tab& pane_tab_at(AppState& app, int px) {
   if (app.split_view && pane_view_rect_at(app, px).pane == 1)
@@ -6020,25 +3266,22 @@ int hit_test_grid(AppState& app, int x, int y) {
   if (x < r.x || x >= r.x + r.w) return -1;
   if (y < r.y || y >= r.y + r.h) return -1;
 
-  // Recompute layout from THIS pane's width on demand — the app.grid_*
-  // globals are overwritten by whichever pane drew last and go stale in
-  // split view.
-  double zf = app.zoom_pct / 100.0;
-  int min_cell_w = static_cast<int>(110.0 * zf);
-  int col_gap = static_cast<int>(18.0 * zf);
-  int row_gap = static_cast<int>(10.0 * zf);
-  int cols = std::max(1, (r.w + col_gap) / (min_cell_w + col_gap));
-  int cell_size = (r.w - col_gap - (cols - 1) * col_gap) / cols;
-  int icon_size = std::min(cell_size - static_cast<int>(16.0 * zf),
-                           static_cast<int>(72.0 * zf));
-  int label_h = static_cast<int>(32.0 * zf);
-  int text_gap = static_cast<int>(4.0 * zf);
-  int item_h = icon_size + text_gap + label_h;
-  int row_h = item_h + row_gap;
+  // Recompute layout from THIS pane's width — same single source of truth
+  // that draw_grid_view uses (layout.cpp). No more stale app.grid_* globals
+  // in split view, and the bucket_down snap is applied identically.
+  GridLayout gl = compute_grid_layout(r.w, app.zoom_pct / 100.0);
+  int cols = gl.cols;
+  int cell_size = gl.cell_w;
+  int icon_size = gl.icon_size;
+  int label_h = gl.label_h;
+  int text_gap = gl.text_gap;
+  int item_h = gl.item_h;
+  int row_h = gl.row_h;
+  int row_gap = gl.row_gap;
+  int col_gap = gl.col_gap;
+  int grid_w = gl.grid_w;
+  int grid_offset_x = gl.grid_offset_x;
   if (row_h <= 0) return -1;
-
-  int grid_w = cols * cell_size + (cols - 1) * col_gap;
-  int grid_offset_x = (r.w - grid_w) / 2;
 
   int rel_x = x - r.x - grid_offset_x;
   int rel_y = y - r.y - row_gap + tab.scroll_px;
@@ -6056,140 +3299,6 @@ int hit_test_grid(AppState& app, int x, int y) {
   if (rel_y < cy || rel_y > cy + item_h) return -1;
 
   return idx;
-}
-
-int hit_test_sidebar(AppState& app, int x, int y) {
-  int side_w = app.effective_sidebar_width();
-  if (side_w <= 0) return -1;
-  if (x < 0 || x >= side_w) return -1;
-  int top = (app.sidebar_folded && app.sidebar_folded_revealed)
-                ? app.content_top_y()
-                : 0;
-  int y0 = y - top;
-  if (y0 < static_cast<int>(24.0 * 1.2) ||
-      y0 >= app.height - app.status_bar_height - top)
-    return -1;
-
-  double zf = 1.2;
-  int total = static_cast<int>(app.sidebar_locations.size());
-
-  // Section boundaries (must match draw_sidebar)
-  int places_end = 0;
-  while (places_end < total &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Favorite &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Root &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Drive)
-    ++places_end;
-
-  int fav_start = places_end;
-  while (fav_start < total &&
-         app.sidebar_locations[fav_start].kind == SidebarLocation::Kind::Favorite)
-    ++fav_start;
-
-  int drives_start = fav_start;
-  int fav_count = fav_start - places_end;
-  int drive_count = total - drives_start;
-
-  int padding = static_cast<int>(24.0 * zf);
-  int header_h = static_cast<int>(24.0 * zf);
-  int item_h = static_cast<int>(36.0 * zf);
-  int div_pad = static_cast<int>(16.0 * zf);
-  int div_total = div_pad + 1 + div_pad;
-
-  int rel_y = y0 + app.sidebar_scroll_px;
-
-  // ── PLACES header ──
-  if (rel_y < padding + header_h) return -1;
-  int pos = rel_y - padding - header_h;
-
-  // ── Places items ──
-  if (pos < places_end * item_h)
-    return pos / item_h;
-
-  if (places_end >= total) return -1;
-
-  // ── Favorites section ──
-  if (fav_count > 0) {
-    pos -= places_end * item_h + div_total + header_h;
-
-    // Favorites items
-    if (pos >= 0 && pos < fav_count * item_h)
-      return places_end + pos / item_h;
-
-    // Skip divider + DRIVES header
-    pos -= fav_count * item_h + div_total + header_h;
-  } else {
-    // No favorites — skip divider + DRIVES header
-    pos -= places_end * item_h + div_total + header_h;
-  }
-
-  // ── Drives items (variable height: drives with usage data are taller) ──
-  if (pos >= 0) {
-    for (int i = drives_start; i < total; ++i) {
-      const auto& loc = app.sidebar_locations[i];
-      int dih = item_h;
-      if ((loc.kind == SidebarLocation::Kind::Drive ||
-           loc.kind == SidebarLocation::Kind::Root) &&
-          loc.total_bytes > 0 && loc.is_mounted)
-        dih += static_cast<int>(16.0 * zf);
-      if (pos < dih) return i;
-      pos -= dih;
-    }
-  }
-
-  return -1;
-}
-
-bool hit_test_fav_section(AppState& app, int x, int y) {
-  int side_w = app.effective_sidebar_width();
-  if (side_w <= 0) return false;
-  if (x < 0 || x >= side_w) return false;
-  int top = (app.sidebar_folded && app.sidebar_folded_revealed)
-                ? app.content_top_y()
-                : 0;
-  int y0 = y - top;
-  if (y0 < static_cast<int>(24.0 * 1.2) ||
-      y0 >= app.height - app.status_bar_height - top)
-    return false;
-
-  double zf = 1.2;
-  int total = static_cast<int>(app.sidebar_locations.size());
-
-  int places_end = 0;
-  while (places_end < total &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Favorite &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Root &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Drive)
-    ++places_end;
-
-  int fav_start = places_end;
-  while (fav_start < total &&
-         app.sidebar_locations[fav_start].kind == SidebarLocation::Kind::Favorite)
-    ++fav_start;
-
-  int drives_start = fav_start;
-  int fav_count = fav_start - places_end;
-  if (fav_count == 0 && drives_start >= total) return false;
-
-  int padding = static_cast<int>(24.0 * zf);
-  int header_h = static_cast<int>(24.0 * zf);
-  int item_h = static_cast<int>(36.0 * zf);
-  int div_pad = static_cast<int>(16.0 * zf);
-  int div_total = div_pad + 1 + div_pad;
-
-  int rel_y = y0 + app.sidebar_scroll_px;
-
-  // Skip padding + PLACES header + items — Favorites section starts at the divider
-  int places_bottom = padding + header_h + places_end * item_h;
-
-  // Favorites items area: from the divider after Places to end of last fav item
-  if (fav_count > 0) {
-    int fav_end = places_bottom + div_total + header_h + fav_count * item_h;
-    return rel_y >= places_bottom && rel_y < fav_end;
-  }
-
-  // No favorites — the "Add to Favorites" zone is the divider area after Places
-  return rel_y >= places_bottom && rel_y < places_bottom + div_total;
 }
 
 int hit_test_context_menu(AppState& app, int x, int y) {
@@ -8632,6 +5741,7 @@ void build_tree_entries(AppState& app) {
       collect(collect, fs::path(entry.path), 1, {});
     }
   }
+  tab.tree_entries_dirty = false;
 }
 
 // ── Tree view ────────────────────────────────────────────────────
@@ -8643,7 +5753,7 @@ void draw_tree_view(AppState& app, cairo_t* cr, int content_x,
   int indent_step = static_cast<int>(24.0 * zf);
   int arrow_w = static_cast<int>(16.0 * zf);
 
-  build_tree_entries(app);
+  if (app.cur_tab().tree_entries_dirty) build_tree_entries(app);
 
   int y = content_y - app.cur_tab().scroll_px;
 
@@ -8882,10 +5992,14 @@ void prewarm_tab_icons(AppState& app) {
   auto& tab = app.cur_tab();
   if (tab.visible_entries.empty()) return;
   const double zf = app.zoom_pct / 100.0;
-  // Match painter request sizes so cache buckets line up exactly.
-  int px = 24;  // list / compact / tree rows (~20-24 * zf)
+  // Match painter request sizes so cache buckets line up exactly: grid draws
+  // at min(cell_w - 16*zf, 72*zf) snapped down to a cache bucket; non-grid
+  // rows draw ~24*zf icons. Prewarming must request the SAME bucket or every
+  // grid icon misses on the first paint and scale-blits until the worker
+  // fills it — we want the exact-fit batch path from frame 1.
+  int px = eh::icons::IconCache::bucket_down(static_cast<int>(24.0 * zf));
   if (tab.view_mode == ViewMode::Grid)
-    px = std::clamp(static_cast<int>(app.grid_cell_size * 0.5 * zf), 24, 96);
+    px = eh::icons::IconCache::bucket_down(static_cast<int>(72.0 * zf));
 
   std::unordered_set<std::string> seen;
   seen.reserve(tab.visible_entries.size() * 2);
@@ -8909,7 +6023,7 @@ void prewarm_tab_icons(AppState& app) {
 int hit_test_tree(AppState& app, int x, int y, bool for_click) {
   PaneViewRect r = pane_view_rect_at(app, x);
   Tab& tab = pane_tab_at(app, x);
-  if (tab.tree_entries.empty()) build_tree_entries(app);
+  if (tab.tree_entries.empty() || tab.tree_entries_dirty) build_tree_entries(app);
   if (tab.tree_entries.empty()) return -1;
 
   double zf = app.zoom_pct / 100.0;

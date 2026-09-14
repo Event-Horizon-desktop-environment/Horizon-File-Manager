@@ -185,6 +185,11 @@ public:
 
   static cairo_surface_t* load_settings_logo_surface();
 
+  // Largest render-size bucket <= px (i.e. a size the cache can return and
+  // blit 1:1). Painters should request/draw at this size so the cached
+  // raster is always exact-fit and never scale-blitted per frame.
+  static int bucket_down(int px);
+
   const IconEntry* app_icon(const std::string& appId);
 
   const IconEntry* tray_icon(const std::string& iconName);

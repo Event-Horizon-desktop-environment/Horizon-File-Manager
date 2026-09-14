@@ -275,6 +275,23 @@ FileBrowserSettings read_file_browser_toml() {
         if (auto s = el.value<std::string>()) fbs.favorites.push_back(*s);
       }
     }
+
+    // Per-directory view memory. Keys are directory paths; toml++ re-emits
+    // them as quoted TOML keys, so any path round-trips safely.
+    if (auto* dvs = tbl["dir_views"].as_table()) {
+      for (const auto& [key, node] : *dvs) {
+        const toml::table* sub = node.as_table();
+        if (!sub) continue;
+        FileBrowserDirView dv;
+        dv.view_mode = (*sub)["view_mode"].value_or(0);
+        dv.sort_field = (*sub)["sort_field"].value_or(0);
+        dv.sort_descending = (*sub)["sort_descending"].value_or(false);
+        dv.group_by_type = (*sub)["group_by_type"].value_or(false);
+        dv.group_field = (*sub)["group_field"].value_or(0);
+        dv.zoom_level = (*sub)["zoom_level"].value_or(8);
+        fbs.dir_views.emplace(std::string(key), dv);
+      }
+    }
   } catch (const std::exception& e) {
     std::cerr << "[horizon-files] TOML parse error (file-browser): " << e.what() << "\n";
   }
@@ -318,6 +335,19 @@ bool write_file_browser_toml(const FileBrowserSettings& fbs) {
     toml::array favs;
     for (const auto& f : fbs.favorites) favs.push_back(f);
     tbl.emplace("favorites", std::move(favs));
+
+    toml::table dvs;
+    for (const auto& [path, dv] : fbs.dir_views) {
+      toml::table sub;
+      sub.emplace("view_mode", dv.view_mode);
+      sub.emplace("sort_field", dv.sort_field);
+      sub.emplace("sort_descending", dv.sort_descending);
+      sub.emplace("group_by_type", dv.group_by_type);
+      sub.emplace("group_field", dv.group_field);
+      sub.emplace("zoom_level", dv.zoom_level);
+      dvs.emplace(path, std::move(sub));
+    }
+    tbl.emplace("dir_views", std::move(dvs));
 
     std::string path = file_browser_toml_path();
     fs::create_directories(fs::path(path).parent_path());

@@ -489,12 +489,28 @@ IconCache::~IconCache() {
 
 // Render-size buckets: bounded set of raster sizes so a handful of cache
 // entries covers every display size while cutting SVG raster cost ~4-16x
-// versus always rendering at 256px.
+// versus always rendering at 256px. The steps include the sizes the file
+// browser actually draws (list 24, grid/icon 72, sidebar/tree 20, preview
+// 48) so those blits hit scale == 1 and avoid a per-frame pixman
+// downscale; intermediate sizes fall on a slightly larger step and get a
+// small, smooth .90-.99x blit instead of a 0.56-0.75x one.
+static constexpr int kBuckets[] = {20, 24, 32, 48, 64, 72, 96, 128, 192, 256};
+
 static int bucket_for(int px) {
-  if (px <= 24) return 32;
-  if (px <= 48) return 64;
-  if (px <= 96) return 128;
-  return 256;
+  for (int b : kBuckets)
+    if (px <= b) return b;
+  return 256; // cap: never rasterize SVGs past 256px
+}
+
+int IconCache::bucket_down(int px) {
+  int r = kBuckets[0];
+  for (int b : kBuckets) {
+    if (b <= px)
+      r = b;
+    else
+      break;
+  }
+  return r;
 }
 
 void IconCache::set_icon_theme(std::string themeId) {

@@ -10,6 +10,9 @@
 //   test_negative_cache    misses are O(1) after first failure
 //   test_async_pipeline    sized lookup returns null, then resolves
 //   test_concurrency       parallel lookups across threads stay consistent
+//   test_bucket_down    snap-down always lands on a real bucket that the
+//                       exact-fit blit path can accept (<= desired, largest,
+//                       monotone)
 //   perf_smoke             prints warm/cold per-lookup cost
 
 #include "platform/common/icon_cache/icon_cache.hpp"
@@ -157,6 +160,31 @@ static void test_concurrency(IconCache& ic) {
   CHECK(bad.load() == 0);
 }
 
+static void test_bucket_down(IconCache& ic) {
+  // The grid draws icons at a snapped size; that size must always be an exact
+  // cache bucket so the batched blitter's exact-fit fast path engages.
+  // (no such icon is actually resolved here — pure size math)
+  (void)ic;
+  int prev = -1;
+  for (int px : {1, 4, 20, 21, 24, 25, 48, 71, 72, 73, 110, 128, 129, 192,
+                 193, 256, 257, 384, 5000}) {
+    int b = IconCache::bucket_down(px);
+    CHECK(px >= 20 ? b <= px : b == 20);   // clamp-up below the floor bucket
+    CHECK(b >= prev);           // non-decreasing in px
+    static const int kLadder[] = {20, 24, 32, 48, 64, 72, 96, 128, 192, 256};
+    bool is_bucket = false;
+    for (int k : kLadder) is_bucket = is_bucket || (b == k);
+    CHECK(is_bucket);           // always one of the real buckets
+    CHECK(IconCache::bucket_down(px + 1) >= b);
+    prev = b;
+  }
+  // The draw-time snap uses exactly this: min(cell_w-16*zf, 72*zf).
+  CHECK(IconCache::bucket_down(72) == 72);      // 100% zoom, unchanged
+  CHECK(IconCache::bucket_down(110) == 96);     // ~153% zoom snap
+  CHECK(IconCache::bucket_down(20) == 20);
+  CHECK(IconCache::bucket_down(19) == 20);      // guard floor clamps up
+}
+
 static void perf_smoke(IconCache& ic) {
   using clock = std::chrono::steady_clock;
 
@@ -201,6 +229,7 @@ int main() {
   test_negative_cache(ic);
   test_async_pipeline(ic);
   test_concurrency(ic);
+  test_bucket_down(ic);
   perf_smoke(ic);
 
   if (g_failures == 0) {

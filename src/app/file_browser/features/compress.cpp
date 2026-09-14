@@ -55,55 +55,102 @@ static std::string shell_quote(const std::string& s) {
 
 static std::string archive_name_for(AppState& app) {
   std::string base = app.compress_name_buf.empty() ? app.compress_source_name : app.compress_name_buf;
-  // Remove trailing extension if present
-  auto dot = base.rfind('.');
-  if (dot != std::string::npos) base = base.substr(0, dot);
+  // If the name already ends with a known archive extension, strip it so the
+  // selected format's extension is applied cleanly (e.g. "backup.tar.gz" +
+  // zip -> "backup.zip"). Otherwise leave every dot intact: a custom name like
+  // "my.photos.2024" must never be truncated.
+  for (int i = 0; i < kNumCompressFormats; ++i) {
+    const auto& ext = kCompressFormats[i].extension;
+    std::size_t elen = ext.size();
+    if (base.size() > elen && base.compare(base.size() - elen, elen, ext) == 0) {
+      base.resize(base.size() - elen);
+      break;
+    }
+  }
+  if (base.empty()) base = "archive";
   base += kCompressFormats[app.compress_format].extension;
   return fs::path(app.cur_tab().current_path) / base;
+}
+
+// Deepest directory that contains every source path; archive entries are then
+// stored relative to it so extracting produces the folder tree the user sees,
+// not the absolute path hierarchy of their machine.
+static std::string common_parent_dir(const std::vector<std::string>& paths) {
+  if (paths.empty()) return "/";
+  std::string common = fs::path(paths[0]).parent_path().lexically_normal().string();
+  for (std::size_t i = 1; i < paths.size() && !common.empty(); ++i) {
+    std::string p = fs::path(paths[i]).parent_path().lexically_normal().string();
+    std::size_t n = std::min(common.size(), p.size());
+    std::size_t k = 0;
+    while (k < n && common[k] == p[k]) ++k;
+    while (k > 0 && common[k - 1] != '/') --k;
+    common = common.substr(0, k);
+  }
+  return common.empty() ? "/" : common;
+}
+
+static std::vector<std::string> relative_basenames(const std::vector<std::string>& paths,
+                                                    const std::string& parent) {
+  std::vector<std::string> rels;
+  std::string prefix = parent;
+  if (!prefix.empty() && prefix.back() != '/') prefix += '/';
+  for (const auto& p : paths) {
+    std::string full = fs::absolute(p).lexically_normal().string();
+    if (full.size() > prefix.size() && full.compare(0, prefix.size(), prefix) == 0)
+      rels.push_back(full.substr(prefix.size()));
+    else
+      rels.push_back(fs::path(full).filename().string());
+  }
+  return rels;
 }
 
 std::string format_compress_cmd(const std::vector<std::string>& source_paths,
                                  const std::string& archive_path,
                                  int format_idx, int level) {
+  if (source_paths.empty()) return std::string();
+  // Archive entries are stored relative to the common parent directory so the
+  // extracted layout matches the folder tree on screen (no nested machine paths).
+  std::string parent = common_parent_dir(source_paths);
+  auto rels = relative_basenames(source_paths, parent);
+  std::string qparent = shell_quote(parent);
+  std::string qarchive = shell_quote(archive_path);
+  std::string qrels;
+  for (const auto& r : rels) qrels += " " + shell_quote(r);
+
   std::string cmd;
   switch (format_idx) {
     case 0: { // zip
-      if (tool_available("zip")) {
-        cmd = "zip -r -" + std::to_string(std::min(9, std::max(0, level)));
-        for (const auto& p : source_paths) cmd += " " + shell_quote(p);
-        cmd += " -- " + shell_quote(archive_path);
-      } else {
-        cmd = "7z a -tzip -mx=" + std::to_string(std::min(9, std::max(0, level)));
-        cmd += " " + shell_quote(archive_path);
-        for (const auto& p : source_paths) cmd += " " + shell_quote(p);
-      }
+      if (tool_available("zip"))
+        cmd = "cd " + qparent + " && zip -r -" +
+              std::to_string(std::min(9, std::max(0, level))) +
+              " " + qarchive + qrels;
+      else
+        cmd = "cd " + qparent + " && 7z a -tzip -mx=" +
+              std::to_string(std::min(9, std::max(0, level))) +
+              " " + qarchive + qrels;
       break;
     }
     case 1: // tar.gz
-      cmd = "tar -czf " + shell_quote(archive_path);
-      for (const auto& p : source_paths) cmd += " " + shell_quote(p);
+      cmd = "tar -czf " + qarchive + " -C " + qparent + qrels;
       break;
     case 2: // tar.bz2
-      cmd = "tar -cjf " + shell_quote(archive_path);
-      for (const auto& p : source_paths) cmd += " " + shell_quote(p);
+      cmd = "tar -cjf " + qarchive + " -C " + qparent + qrels;
       break;
     case 3: // tar.xz
-      cmd = "tar -cJf " + shell_quote(archive_path);
-      for (const auto& p : source_paths) cmd += " " + shell_quote(p);
+      cmd = "tar -cJf " + qarchive + " -C " + qparent + qrels;
       break;
     case 4: // 7z
-      cmd = "7z a -mx=" + std::to_string(std::min(9, std::max(0, level / 2)));
-      cmd += " " + shell_quote(archive_path);
-      for (const auto& p : source_paths) cmd += " " + shell_quote(p);
+      cmd = "cd " + qparent + " && 7z a -mx=" +
+            std::to_string(std::min(9, std::max(0, level / 2))) +
+            " " + qarchive + qrels;
       break;
     case 5: // rar
-      cmd = "rar a -m" + std::to_string(std::min(5, std::max(0, level / 2)));
-      cmd += " " + shell_quote(archive_path);
-      for (const auto& p : source_paths) cmd += " " + shell_quote(p);
+      cmd = "cd " + qparent + " && rar a -m" +
+            std::to_string(std::min(5, std::max(0, level / 2))) +
+            " " + qarchive + qrels;
       break;
     case 6: // tar (no compression)
-      cmd = "tar -cf " + shell_quote(archive_path);
-      for (const auto& p : source_paths) cmd += " " + shell_quote(p);
+      cmd = "tar -cf " + qarchive + " -C " + qparent + qrels;
       break;
   }
   return cmd;

@@ -9,11 +9,46 @@
 
 namespace eh::file_browser {
 
+// Describes an in-place scroll-delta repaint of the content column. When the
+// ONLY change vs the previous frame is vertical scrolling, the caller may ask
+// paint() to (1) shift the existing content pixels by `delta`, (2) refill the
+// exposed band with the content background, and (3) repaint only the grid
+// cells that intersect that band. Everything else is left untouched on the
+// target (the caller is responsible for the backing surface still holding the
+// previous frame's content in that region).
+struct ContentReuseHint {
+  int delta = 0;    // signed vertical scroll delta; >0 = content moves up
+  int band_x = 0;   // exposed band, buffer coords
+  int band_y0 = 0;
+  int band_y1 = 0;
+};
+
 /// Main draw function — paints the entire file browser UI (standalone, uses own buffers + surface).
 void draw(AppState& app);
 
 /// Paint the file browser UI into an existing cairo context (embedded mode, no Wayland surface required).
-void paint(AppState& app, cairo_t* cr);
+void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse = nullptr);
+
+/// Scroll-delta reuse gate (grid mode, single pane): returns a hint with
+/// delta != 0 when this frame's only content change is a scroll and the
+/// buffer holding last frame's content is free again. reuse.delta == 0 means
+/// the caller must do a full repaint. Shared by draw() and bench_paint so the
+/// bench exercises the real reuse decision.
+ContentReuseHint make_content_reuse_hint(AppState& app);
+
+/// Record that `buffer_index` now holds a fresh full content paint at the
+/// current scroll, making it eligible for reuse on the next scroll frame.
+void record_content_reuse(AppState& app, int buffer_index);
+
+/// Advance smooth scroll -> scroll_px for the frame being built (used by
+/// draw() and the paint bench ahead of make_content_reuse_hint; paint()
+/// also runs it internally when no ContentReuseHint is passed).
+void advance_scroll_render(AppState& app);
+
+/// Content column geometry (shared with paint/draw; exported for the bench
+/// identity probe).
+void content_reuse_geometry(AppState& app, int& cx, int& cy, int& cw, int& ch,
+                            int& banner_h);
 
 /// Schedule the next frame if animations or thumbs are pending.
 void schedule_frame(AppState& app);
@@ -59,6 +94,10 @@ void open_tab_in_active_pane(AppState& app, int tab_idx);
 
 /// Navigate to the parent directory.
 void navigate_up(AppState& app);
+
+/// Whether the current folder has a structural parent to navigate up to
+/// (false at the filesystem root and in virtual views like computer://).
+bool can_navigate_up(AppState& app);
 
 /// Go back in history.
 void navigate_back(AppState& app);
@@ -220,12 +259,16 @@ cairo_surface_t* get_thumbnail(AppState& app, const std::string& path,
 void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
                   int view_h);
 void size_sidebar_to_content(AppState& app, cairo_t* cr);
+/// Byte-size formatter ("463.2 GB"); shared by the sidebar's drive rows (in
+/// features/sidebar.cpp) and draw.cpp's list/status views.
+std::string format_size(uint64_t bytes);
 void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x = 0, int pane_w = 0);
 void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int pane_x = 0, int pane_w = 0);
 void draw_list_view(AppState& app, cairo_t* cr, int content_x, int content_y,
                     int content_w, int view_h);
 void draw_grid_view(AppState& app, cairo_t* cr, int content_x, int content_y,
-                    int content_w, int view_h);
+                     int content_w, int view_h, int strip_y0 = -1,
+                     int strip_y1 = -1);
 void draw_computer_view(AppState& app, cairo_t* cr, int content_x, int content_y,
                         int content_w, int view_h);
 void draw_tree_view(AppState& app, cairo_t* cr, int content_x, int content_y,

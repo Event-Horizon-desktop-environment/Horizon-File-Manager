@@ -1839,7 +1839,7 @@ void execute_context_menu_action(AppState& app, int item_idx) {
         app.compress_name_buf = stem;
       }
       check_compress_tool_availability(app);
-      app.compress_name_cursor = static_cast<int>(entry.name.size());
+      app.compress_name_cursor = static_cast<int>(app.compress_name_buf.size());
       app.compress_format = 1; // tar.gz
       app.compress_level = 6;
       app.compress_hover_format = -1;
@@ -2266,6 +2266,58 @@ void open_settings(AppState& app) {
   create_settings_window(app);
 }
 
+// Bridge the session per-directory state map into the persisted config struct.
+static void dir_views_to_config(eh::config::FileBrowserSettings& fbs,
+                                const AppState& app) {
+  fbs.dir_views.clear();
+  fbs.dir_views.reserve(app.dir_view_states.size() + 1);
+  for (const auto& [path, st] : app.dir_view_states) {
+    eh::config::FileBrowserDirView dv;
+    dv.view_mode = static_cast<int>(st.view_mode);
+    dv.sort_field = static_cast<int>(st.sort_field);
+    dv.sort_descending = st.sort_descending;
+    dv.group_by_type = st.group_by_type;
+    dv.group_field = st.group_field;
+    dv.zoom_level = st.zoom_level;
+    fbs.dir_views.emplace(path, dv);
+  }
+  // The folder we're sitting in is only snapshotted when we navigate AWAY
+  // (remember_independent_view), which never happens for the last folder we
+  // visit — so capture it live here or its zoom would never reach the disk.
+  if (app.independent_dir_views) {
+    const std::string& cur = app.cur_tab().current_path;
+    if (!cur.empty() && cur != "computer://" && cur != "trash://" &&
+        cur.rfind("recent://", 0) != 0) {
+      const auto& t = app.cur_tab();
+      eh::config::FileBrowserDirView dv;
+      dv.view_mode = static_cast<int>(t.view_mode);
+      dv.sort_field = static_cast<int>(t.sort_field);
+      dv.sort_descending = t.sort_descending;
+      dv.group_by_type = t.group_by_type;
+      dv.group_field = t.group_field;
+      dv.zoom_level = zoom_level_for_pct(app.zoom_pct);
+      fbs.dir_views[cur] = dv;
+    }
+  }
+}
+
+// Seed the session per-directory state map from the persisted config struct.
+static void dir_views_from_config(AppState& app,
+                                  const eh::config::FileBrowserSettings& fbs) {
+  app.dir_view_states.clear();
+  app.dir_view_states.reserve(fbs.dir_views.size());
+  for (const auto& [path, dv] : fbs.dir_views) {
+    AppState::DirViewState st;
+    st.view_mode = static_cast<ViewMode>(dv.view_mode);
+    st.sort_field = static_cast<SortField>(dv.sort_field);
+    st.sort_descending = dv.sort_descending;
+    st.group_by_type = dv.group_by_type;
+    st.group_field = dv.group_field;
+    st.zoom_level = dv.zoom_level;
+    app.dir_view_states.emplace(path, st);
+  }
+}
+
 void save_file_browser_settings(AppState& app) {
   eh::config::FileBrowserSettings fbs;
   fbs.zoom_pct = app.zoom_pct;
@@ -2298,6 +2350,7 @@ void save_file_browser_settings(AppState& app) {
   fbs.show_hidden = app.show_hidden;
   fbs.favorites = app.favorites;
   fbs.window_controls_left = app.window_controls_left;
+  dir_views_to_config(fbs, app);
   (void)eh::config::write_file_browser_toml(fbs);
   reload_settings_from_config(app);
 }
@@ -2332,6 +2385,7 @@ void settings_apply(AppState& app) {
   fbs.show_hidden = app.show_hidden;
   fbs.favorites = app.favorites;
   fbs.independent_dir_views = app.settings_independent_dir_views;
+  dir_views_to_config(fbs, app);
   (void)eh::config::write_file_browser_toml(fbs);
 
   // Terminal preference is a global setting — update the main config
@@ -2451,6 +2505,7 @@ void reload_settings_from_config(AppState& app) {
   app.dynamic_view = fbs.dynamic_view;
   app.per_folder_props = fbs.per_folder_props;
   app.independent_dir_views = fbs.independent_dir_views;
+  dir_views_from_config(app, fbs);
   app.show_hidden = fbs.show_hidden;
   app.sort_natural = fbs.sort_natural;
   app.sort_case_sensitive = fbs.sort_case_sensitive;

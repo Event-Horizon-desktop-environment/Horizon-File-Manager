@@ -1,4 +1,5 @@
 #include "app/file_browser/app.hpp"
+#include "app/file_browser/features/sidebar.hpp"
 #include "app/file_browser/features/selection.hpp"
 #include "app/file_browser/trace.hpp"
 
@@ -32,6 +33,7 @@ struct PaintPhase {
   std::chrono::steady_clock::time_point t0;
   std::vector<std::pair<const char*, double>>* log;
   std::vector<std::pair<const char*, double>>* sink; // resize-trace sink
+  bool capture_all; // bench profiling: record every phase, no >=1 ms gate
   ~PaintPhase() {
     double ms = std::chrono::duration<double, std::milli>(
                     std::chrono::steady_clock::now() - t0).count();
@@ -40,74 +42,141 @@ struct PaintPhase {
     static std::atomic<int> first_paint{0};
     bool first = first_paint.fetch_add(1, std::memory_order_relaxed) < 40;
     if (ms >= 50.0 || (first && ms >= 0.5)) log->emplace_back(name, ms);
-    if (sink && ms >= 1.0) sink->emplace_back(name, ms);
+    if (sink && (capture_all || ms >= 1.0)) sink->emplace_back(name, ms);
   }
 };
 }  // namespace
 
-void paint(AppState& app, cairo_t* cr) {
-  std::vector<std::pair<const char*, double>> slow_phases;
-  auto phase = [&app, &slow_phases](const char* n) {
-    return PaintPhase{n, std::chrono::steady_clock::now(), &slow_phases,
-                      (app.resize_session_active &&
-                       eh::trace::enabled().load(std::memory_order_relaxed))
-                          ? &app.resize_phase_samples
-                          : nullptr};
-  };
-  // Check if settings TOMLs changed and re-apply settings if so
-  {
-    static timespec s_last_settings_mtime{};
-    static bool s_initialized_settings = false;
-    const std::string toml_path = eh::config::state_settings_toml_path();
-    struct stat st{};
-    if (::stat(toml_path.c_str(), &st) == 0) {
-      if (!s_initialized_settings) {
-        s_last_settings_mtime = st.st_mtim;
-        s_initialized_settings = true;
-      } else if (st.st_mtim.tv_sec != s_last_settings_mtime.tv_sec ||
-                 st.st_mtim.tv_nsec != s_last_settings_mtime.tv_nsec) {
-        s_last_settings_mtime = st.st_mtim;
-        reload_settings_from_config(app);
-      }
-    }
-    static timespec s_last_fb_mtime{};
-    static bool s_initialized_fb = false;
-    const std::string fb_path = eh::config::state_file_browser_toml_path();
-    struct stat fb_st{};
-    if (::stat(fb_path.c_str(), &fb_st) == 0) {
-      if (!s_initialized_fb) {
-        s_last_fb_mtime = fb_st.st_mtim;
-        s_initialized_fb = true;
-      } else if (fb_st.st_mtim.tv_sec != s_last_fb_mtime.tv_sec ||
-                 fb_st.st_mtim.tv_nsec != s_last_fb_mtime.tv_nsec) {
-        s_last_fb_mtime = fb_st.st_mtim;
-        reload_settings_from_config(app);
-      }
-    }
-    static timespec s_last_shell_color_mtime{};
-    static bool s_initialized_shell_color = false;
-    const std::string sc_path = eh::matugen::shell_color_config_path();
-    struct stat sc_st{};
-    if (::stat(sc_path.c_str(), &sc_st) == 0) {
-      if (!s_initialized_shell_color) {
-        s_last_shell_color_mtime = sc_st.st_mtim;
-        s_initialized_shell_color = true;
-      } else if (sc_st.st_mtim.tv_sec != s_last_shell_color_mtime.tv_sec ||
-                 sc_st.st_mtim.tv_nsec != s_last_shell_color_mtime.tv_nsec) {
-        s_last_shell_color_mtime = sc_st.st_mtim;
-        reload_settings_from_config(app);
-      }
-    }
+// ── content scroll-delta reuse (partial repaint) ─────────────────
+
+// Content column geometry (bench identity probe). The real geometry lives
+// in features/sidebar.cpp (sidebar_content_geometry) so paint(), the reuse
+// gate and the painter all share one fold-aware source of truth.
+void content_reuse_geometry(AppState& app, int& cx, int& cy, int& cw, int& ch,
+                            int& banner_h) {
+  sidebar_content_geometry(app, cx, cy, cw, ch, banner_h);
+}
+
+// Shift the content clip rect [cx..cx+cw) x [cy..cy+ch) of `cr`'s target
+// (an ARGB32 image surface) vertically by `delta` rows, in place. Positive
+// delta = content moves up (new content appears at the bottom). Rows outside
+// the copied range keep their old bytes; the caller must refill the newly
+// exposed band. Returned rows copy src→dst in an order that guarantees no
+// write clobbers a not-yet-read source row (verified: +delta ascending,
+// -delta descending).
+static void shift_content_rows(cairo_t* cr, int cx, int cy, int cw, int ch,
+                               int delta) {
+  if (delta == 0) return;
+  cairo_surface_t* s = cairo_get_target(cr);
+  if (!s || cairo_surface_status(s) != CAIRO_STATUS_SUCCESS) return;
+  if (cairo_surface_get_type(s) != CAIRO_SURFACE_TYPE_IMAGE) return;
+  if (cairo_image_surface_get_format(s) != CAIRO_FORMAT_ARGB32) return;
+  cairo_surface_flush(s);
+  uint32_t* data = reinterpret_cast<uint32_t*>(cairo_image_surface_get_data(s));
+  if (!data) return;
+  const int stride = cairo_image_surface_get_stride(s) / 4;
+  const int ad = std::abs(delta);
+  const int copy = ch - ad;
+  if (copy <= 0 || cw <= 0) { cairo_surface_mark_dirty_rectangle(s, cx, cy, cw, ch); return; }
+  const uint32_t* src = data + (delta > 0 ? cy + delta : cy) * stride;
+  uint32_t* dst = data + (delta > 0 ? cy : cy + ad) * stride;
+  if (delta > 0) {          // shift up: write low rows first
+    for (int i = 0; i < copy; ++i)
+      memcpy(dst + i * stride + cx, src + i * stride + cx,
+             static_cast<size_t>(cw) * 4u);
+  } else {                  // shift down: write high rows first
+    for (int i = copy - 1; i >= 0; --i)
+      memcpy(dst + i * stride + cx, src + i * stride + cx,
+             static_cast<size_t>(cw) * 4u);
   }
+  cairo_surface_mark_dirty_rectangle(s, cx, cy, cw, ch);
+}
 
-  // Reset thumbnail decode budget for this frame
-  app.thumb_decodes_this_frame = 0;
-  app.thumb_pending_queue.clear();
+// Signature of everything that affects content-column pixels except the
+// scroll offset. A match means "the only possible change is scroll".
+static uint64_t content_reuse_key(AppState& app, int cx, int cy, int cw,
+                                  int ch) {
+  auto& t = app.cur_tab();
+  uint64_t h = 1469598103934665603ull;
+  auto mix = [&h](uint64_t v) { h ^= v; h *= 1099511628211ull; };
+  const auto q8 = [](double v) { return static_cast<uint64_t>(v * 2048.0); };
+  mix(static_cast<uint64_t>(t.view_mode));
+  mix(static_cast<uint64_t>(std::lround(app.zoom_pct)));
+  mix(static_cast<uint64_t>(cx));
+  mix(static_cast<uint64_t>(cy));
+  mix(static_cast<uint64_t>(cw));
+  mix(static_cast<uint64_t>(ch));
+  mix(static_cast<uint64_t>(app.surface_opacity_pct));
+  mix(q8(app.bg_r));
+  mix(q8(app.bg_g));
+  mix(q8(app.bg_b));
+  mix(q8(app.surface_r));
+  mix(q8(app.surface_g));
+  mix(q8(app.surface_b));
+  mix(q8(app.text_r));
+  mix(q8(app.text_g));
+  mix(q8(app.text_b));
+  mix(q8(app.accent_r));
+  mix(q8(app.accent_g));
+  mix(q8(app.accent_b));
+  mix(static_cast<uint64_t>(t.hover_idx));
+  mix(static_cast<uint64_t>(t.selected_idx));
+  mix(static_cast<uint64_t>(t.multi_selected.size()));
+  for (int v : t.multi_selected) mix(static_cast<uint64_t>(v));
+  mix(app.listing_epoch);
+  mix(static_cast<uint64_t>(t.entries.size()));
+  mix(static_cast<uint64_t>(t.visible_entries.size()));
+  mix(static_cast<uint64_t>(std::hash<std::string>{}(t.current_path)));
+  mix(static_cast<uint64_t>(t.dir_mtime));
+  mix(static_cast<uint64_t>(t.group_field));
+  mix(static_cast<uint64_t>(t.sort_field));
+  mix(t.sort_descending ? 1u : 0u);
+  mix(app.show_hidden ? 1u : 0u);
+  mix(!app.drop_target_path.empty() ? 1u : 0u);
+  mix(static_cast<uint64_t>(app.drop_target_idx));
+  mix(app.drop_target_is_sidebar ? 1u : 0u);
+  mix(static_cast<uint64_t>(app.cut_paths.size()));
+  return h;
+}
 
-  // Scrollbar hit rects are rebuilt by draw_scrollbar() during this frame
-  app.scrollbar_rects.clear();
+ContentReuseHint make_content_reuse_hint(AppState& app) {
+  ContentReuseHint h;
+  int cx2, cy2, cw2, ch2, bh2;
+  sidebar_content_geometry(app, cx2, cy2, cw2, ch2, bh2);
+  const bool maybe_reuse =
+      !app.split_view && app.cur_tab().view_mode == ViewMode::Grid &&
+      !app.marquee_active && !app.context_menu_open && !app.preview_active &&
+      !app.startup_blank_frame;
+  if (maybe_reuse && app.content_reuse.valid &&
+      app.content_reuse.last_bi >= 0 && app.content_reuse.last_bi < 2 &&
+      app.content_reuse.last_key == content_reuse_key(app, cx2, cy2, cw2, ch2) &&
+      cw2 > 0 && ch2 > 0) {
+    int delta = app.cur_tab().scroll_px - app.content_reuse.last_scroll;
+    if (delta != 0 && std::abs(delta) < ch2 &&
+        !app.buf[app.content_reuse.last_bi].busy())
+      h.delta = delta;
+  }
+  return h;
+}
 
-  // Smooth scroll (tab content)
+void record_content_reuse(AppState& app, int buffer_index) {
+  int cx2, cy2, cw2, ch2, bh2;
+  sidebar_content_geometry(app, cx2, cy2, cw2, ch2, bh2);
+  app.content_reuse.last_bi = buffer_index;
+  app.content_reuse.last_scroll = app.cur_tab().scroll_px;
+  app.content_reuse.last_key = content_reuse_key(app, cx2, cy2, cw2, ch2);
+  app.content_reuse.valid =
+      !app.split_view && app.cur_tab().view_mode == ViewMode::Grid &&
+      !app.marquee_active && !app.context_menu_open && !app.preview_active &&
+      !app.startup_blank_frame;
+}
+
+// Advance smooth scroll -> scroll_px for the frame being built. Called by
+// draw()/bench BEFORE the reuse gate (so the gate sees the scroll it will
+// render) and by paint() itself when no ContentReuseHint is supplied (raw
+// full paints). Keeping it split from paint() lets the reuse decision read
+// the freshly-advanced scroll_px.
+void advance_scroll_render(AppState& app) {
   auto smooth_scroll_tab = [&](Tab& tab) {
     bool scrolling = std::abs(tab.scroll_smooth_current - tab.scroll_smooth_target) > 0.5;
     if (scrolling) {
@@ -166,6 +235,74 @@ void paint(AppState& app, cairo_t* cr) {
   if (!tab_scrolling && !comp_scrolling) {
     app.scroll_needs_redraw = false;
   }
+}
+
+// ── main draw ────────────────────────────────────────────────────
+
+void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
+  std::vector<std::pair<const char*, double>> slow_phases;
+  auto phase = [&app, &slow_phases](const char* n) {
+    return PaintPhase{n, std::chrono::steady_clock::now(), &slow_phases,
+                      (app.resize_session_active &&
+                       eh::trace::enabled().load(std::memory_order_relaxed))
+                          ? &app.resize_phase_samples
+                          : nullptr,
+                      app.paint_profile};
+  };
+  // Check if settings TOMLs changed and re-apply settings if so
+  {
+    static timespec s_last_settings_mtime{};
+    static bool s_initialized_settings = false;
+    const std::string toml_path = eh::config::state_settings_toml_path();
+    struct stat st{};
+    if (::stat(toml_path.c_str(), &st) == 0) {
+      if (!s_initialized_settings) {
+        s_last_settings_mtime = st.st_mtim;
+        s_initialized_settings = true;
+      } else if (st.st_mtim.tv_sec != s_last_settings_mtime.tv_sec ||
+                 st.st_mtim.tv_nsec != s_last_settings_mtime.tv_nsec) {
+        s_last_settings_mtime = st.st_mtim;
+        reload_settings_from_config(app);
+      }
+    }
+    static timespec s_last_fb_mtime{};
+    static bool s_initialized_fb = false;
+    const std::string fb_path = eh::config::state_file_browser_toml_path();
+    struct stat fb_st{};
+    if (::stat(fb_path.c_str(), &fb_st) == 0) {
+      if (!s_initialized_fb) {
+        s_last_fb_mtime = fb_st.st_mtim;
+        s_initialized_fb = true;
+      } else if (fb_st.st_mtim.tv_sec != s_last_fb_mtime.tv_sec ||
+                 fb_st.st_mtim.tv_nsec != s_last_fb_mtime.tv_nsec) {
+        s_last_fb_mtime = fb_st.st_mtim;
+        reload_settings_from_config(app);
+      }
+    }
+    static timespec s_last_shell_color_mtime{};
+    static bool s_initialized_shell_color = false;
+    const std::string sc_path = eh::matugen::shell_color_config_path();
+    struct stat sc_st{};
+    if (::stat(sc_path.c_str(), &sc_st) == 0) {
+      if (!s_initialized_shell_color) {
+        s_last_shell_color_mtime = sc_st.st_mtim;
+        s_initialized_shell_color = true;
+      } else if (sc_st.st_mtim.tv_sec != s_last_shell_color_mtime.tv_sec ||
+                 sc_st.st_mtim.tv_nsec != s_last_shell_color_mtime.tv_nsec) {
+        s_last_shell_color_mtime = sc_st.st_mtim;
+        reload_settings_from_config(app);
+      }
+    }
+  }
+
+  // Reset thumbnail decode budget for this frame
+  app.thumb_decodes_this_frame = 0;
+  app.thumb_pending_queue.clear();
+
+  // Scrollbar hit rects are rebuilt by draw_scrollbar() during this frame
+  app.scrollbar_rects.clear();
+
+  if (!reuse) advance_scroll_render(app);
 
   // ── Operations panel slide animation ──
   {
@@ -197,17 +334,9 @@ void paint(AppState& app, cairo_t* cr) {
   int tab_h = app.tab_bar_height;
   int status_h = app.status_bar_height;
 
-  // Adaptive sidebar: fold into a toolbar toggle when the window is narrow —
-  // either below Nautilus 51's breakpoint, or the very moment the right-side
-  // button cluster would start overlapping the nav arrows/path bar.
-  // The fold only applies to the non-split layout; split panes keep the
-  // sidebar pinned-inline so the layout stays predictable.
-  bool prev_folded = app.sidebar_folded;
-  app.sidebar_folded = !app.split_view &&
-      w < std::max(AppState::kSidebarFoldBreakpoint,
-                   app.top_bar_min_width());
-  if (app.sidebar_folded != prev_folded) app.sidebar_folded_revealed = false;
-  if (!app.sidebar_folded) app.sidebar_folded_revealed = false;
+  // Adaptive sidebar fold (module owns the fold/flap state so the fold
+  // condition and the geometry can never drift apart).
+  update_sidebar_fold(app, w);
 
   // Fit sidebar width to longest label
   if (app.sidebar_expanded && !app.sidebar_locations.empty()) {
@@ -250,14 +379,11 @@ void paint(AppState& app, cairo_t* cr) {
       info_panel_w = max_info;
     }
   }
-  int content_x = sidebar_w;
-  int content_w = w - sidebar_w - info_panel_w - ops_panel_w;
-  int selector_h = (app.select_dir_mode || app.select_file_mode) ? app.select_bar_h : 0;
+  int content_x, content_y, content_w, view_h, banner_h;
+  sidebar_content_geometry(app, content_x, content_y, content_w, view_h, banner_h);
   bool search_banner_on = (app.search_active || app.recursive_search_active ||
                            app.r_search_active || app.r_recursive_search_active);
-  int banner_h = search_banner_on ? 28 : 0;
-  int content_y = top_h + tab_h + banner_h;
-  int view_h = h - top_h - tab_h - banner_h - status_h - selector_h;
+  int selector_h = (app.select_dir_mode || app.select_file_mode) ? app.select_bar_h : 0;
   int pane_top_h = app.split_view ? app.top_bar_height : 0;
 
   // Update info panel metadata if selection changed
@@ -302,36 +428,69 @@ void paint(AppState& app, cairo_t* cr) {
 
   double surf_alpha = app.surface_opacity_pct / 100.0;
 
-  // Background (content column)
-  cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, surf_alpha);
-  cairo_rectangle(cr, sidebar_w, 0, content_w, h - status_h);
-  cairo_fill(cr);
+  const bool reuse_scroll =
+      (reuse != nullptr && reuse->delta != 0) &&
+      app.cur_tab().view_mode == ViewMode::Grid;
+  // Content scroll-delta reuse: draw() skipped the whole-window CLEAR so the
+  // retained content column can be shifted in place later. Every shell layer
+  // that repaints this frame must therefore composite over the SAME base a
+  // full frame used (transparent post-CLEAR, or the content-column bg fill
+  // where that full fill covered chrome), or translucent chrome (sidebar
+  // body, separator, scrollbar, top/tab/status bars) alpha-stacks onto its
+  // own previous-frame pixels on every scroll step.
+  if (reuse_scroll) {
+    // Clear the chrome regions outside the reused content column.
+    cairo_save(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+    cairo_rectangle(cr, 0, 0, w, content_y);
+    cairo_rectangle(cr, 0, content_y + view_h, w, h);
+    cairo_rectangle(cr, 0, content_y, content_x, view_h);
+    cairo_rectangle(cr, content_x + content_w, content_y,
+                    w - content_x - content_w, view_h);
+    // Sidebar separator column (1px line + 2px neighbor): a full frame
+    // forms each row of this strip from ONE bg alpha + the outline line
+    // (bg fill, then paint_inline_sidebar's 0.3-alpha line). The reuse
+    // frame must produce the same composition, so erase the previous
+    // frame's line-over-bg pixels here and let the bg re-lay + sidebar
+    // line repaint them exactly once — otherwise the 0.53 surf_alpha bg
+    // stacks on top of the retained line pixels on every scroll step.
+    cairo_rectangle(cr, content_x, 0, 3, h - status_h);
+    cairo_fill(cr);
+    cairo_restore(cr);
 
-  // Sidebar
-  int sidebar_h = h - status_h;
-  cairo_save(cr);
-  cairo_rectangle(cr, 0, 0, sidebar_w, sidebar_h);
-  cairo_clip(cr);
-  double sidebar_alpha = app.sidebar_opacity_pct / 100.0;
-  cairo_set_source_rgba(cr, app.surface_r * 2, app.surface_g * 2, app.surface_b * 2, sidebar_alpha);
-  cairo_rectangle(cr, 0, 0, sidebar_w, sidebar_h);
-  cairo_fill(cr);
-  { auto ph = phase("sidebar"); draw_sidebar(app, cr, sidebar_w, 0, view_h); }
-  cairo_restore(cr);
-
-  // Sidebar separator (and resize handle)
-  if (sidebar_w > 0) {
-    int sep_h = h - status_h;
-    if (app.sidebar_hover_resize) {
-      cairo_set_source_rgba(cr, 0.4, 0.6, 1.0, 0.6);
-      cairo_rectangle(cr, sidebar_w - 1, 0, 3, sep_h);
-    } else {
-      cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b,
-                             0.3);
-      cairo_rectangle(cr, sidebar_w, 0, 1, sep_h);
-    }
+    // Re-lay the content-column bg under the chrome strips that full frames
+    // paint over it (full's fill covered [sidebar_w, 0, content_w, h-status_h]
+    // but the reuse path skips it to keep the interior for the shift).
+    cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, surf_alpha);
+    // Top strip (topbar/tabbar/search-banner rows over the content column).
+    if (content_w > 3)
+      cairo_rectangle(cr, content_x + 3, 0, content_w - 3, content_y);
+    // Sidebar separator column (x=content_x..content_x+3, full column height;
+    // 1px normal, 3px while the resize handle is hovered).
+    cairo_rectangle(cr, content_x, 0, 3, h - status_h);
+    // Bottom strip between the content column and the status bar. A full
+    // frame has NO content-column bg under the status bar (the bg fill stops
+    // at h-status_h, which is exactly content_y+view_h when no selector bar
+    // is showing), so the status bar paints over transparency and re-laying
+    // bg here would alpha-stack under it. Only the optional selector rows
+    // [content_y+view_h, h-status_h) sit on the bg fill in a full frame.
+    int selector_h = h - status_h - (content_y + view_h);
+    if (selector_h > 0)
+      cairo_rectangle(cr, content_x, content_y + view_h, content_w, selector_h);
     cairo_fill(cr);
   }
+
+  // Background (content column). Skipped on scroll-delta reuse frames: the
+  // previous frame's content pixels must survive until shifted in place.
+  if (!(reuse && reuse->delta != 0)) {
+    cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, surf_alpha);
+    cairo_rectangle(cr, sidebar_w, 0, content_w, h - status_h);
+    cairo_fill(cr);
+  }
+
+  // Sidebar (inline column + separator/resize handle; the module computes
+  // its own fold-aware width so content geometry and painting stay in sync).
+  paint_inline_sidebar(app, cr, h, status_h, view_h);
 
   // Content area
   cairo_save(cr);
@@ -422,34 +581,92 @@ void paint(AppState& app, cairo_t* cr) {
       }
     }
     app.active_pane = 0;
-  } else {
+} else {
     // Single pane
     int sb_x = w - info_panel_w - 10;
     if (app.cur_tab().view_mode == ViewMode::Computer) {
       draw_scrollbar(app, cr, sb_x, content_y, view_h, app.computer_content_h, view_h,
                      app.computer_scroll_px, app.outline_r, app.outline_g, app.outline_b, true);
-    } else {
+    } else if (!reuse_scroll) {
+      // On scrolling reuse frames the scrollbar is drawn only after the
+      // content shift (it would otherwise be moved by the shift while the
+      // in-place redraw re-blends it). Full frames draw it here as usual.
       draw_scrollbar(app, cr, sb_x, content_y, view_h, app.cur_tab().content_h, view_h,
                      app.cur_tab().scroll_px, app.outline_r, app.outline_g, app.outline_b);
     }
-    const char* view_name =
-        app.cur_tab().view_mode == ViewMode::List    ? "listview"
-      : app.cur_tab().view_mode == ViewMode::Grid    ? "gridview"
-      : app.cur_tab().view_mode == ViewMode::Computer? "computerview"
-      : app.cur_tab().view_mode == ViewMode::Tree    ? "treeview"
-      : app.cur_tab().view_mode == ViewMode::Compact ? "compactview"
-                                                     : "content";
-    auto ph = phase(view_name);
-    if (app.cur_tab().view_mode == ViewMode::List) {
-      draw_list_view(app, cr, content_x, content_y, content_w, view_h);
-    } else if (app.cur_tab().view_mode == ViewMode::Grid) {
-      draw_grid_view(app, cr, content_x, content_y, content_w, view_h);
-    } else if (app.cur_tab().view_mode == ViewMode::Computer) {
-      draw_computer_view(app, cr, content_x, content_y, content_w, view_h);
-    } else if (app.cur_tab().view_mode == ViewMode::Tree) {
-      draw_tree_view(app, cr, content_x, content_y, content_w, view_h);
-    } else if (app.cur_tab().view_mode == ViewMode::Compact) {
-      draw_compact_view(app, cr, content_x, content_y, content_w, view_h);
+    // Content scroll-delta reuse: only the newly exposed band is repainted;
+    // the rest of the content column is shifted in place from the previous
+    // frame (the caller verified nothing else changed).
+    if (reuse_scroll) {
+      const int ad = std::abs(reuse->delta);
+      int band_y0 = reuse->delta > 0 ? content_y + view_h - ad : content_y;
+      int band_y1 = band_y0 + ad;
+      if (ad < view_h) {
+        {
+          auto ph = phase("grid-scroll");
+          shift_content_rows(cr, content_x, content_y, content_w, view_h,
+                             reuse->delta);
+          // The exposed band must be composited over the same base the full
+          // path used (transparent, post-CLEAR) — simply re-filling bg over
+          // the retained pre pixels stacks the surface alpha a second time
+          // whenever surf_alpha < 1. Erase first, then fill + strip-draw.
+          cairo_save(cr);
+          // Skip the 1px sidebar separator column (x=content_x): the band rows
+          // there already hold this frame's separator-over-bg composition
+          // (nothing sampled that column), so wiping it would drop the line.
+          cairo_rectangle(cr, content_x + 1, band_y0,
+                          std::max(0, content_w - 1), band_y1 - band_y0);
+          cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+          cairo_fill(cr);
+          cairo_restore(cr);
+          cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, surf_alpha);
+          cairo_rectangle(cr, content_x + 1, band_y0,
+                          std::max(0, content_w - 1), band_y1 - band_y0);
+          cairo_fill(cr);
+          draw_grid_view(app, cr, content_x, content_y, content_w, view_h,
+                         band_y0, band_y1);
+          // Scrollbar thumb moved with the content. It composites over the
+          // content-column bg in a full frame (bg fill, then scrollbar), so
+          // on a reuse frame its 6px strip must be erased and re-laid with
+          // bg first — otherwise the retained pre-scroll thumb pixels
+          // alpha-stack under the new thumb.
+          cairo_save(cr);
+          cairo_rectangle(cr, sb_x, content_y, 6, view_h);
+          cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+          cairo_fill(cr);
+          cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+          cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, surf_alpha);
+          cairo_rectangle(cr, sb_x, content_y, 6, view_h);
+          cairo_fill(cr);
+          cairo_restore(cr);
+          draw_scrollbar(app, cr, sb_x, content_y, view_h, app.cur_tab().content_h,
+                         view_h, app.cur_tab().scroll_px, app.outline_r,
+                         app.outline_g, app.outline_b);
+        }
+      } else {
+        auto ph = phase("gridview");
+        draw_grid_view(app, cr, content_x, content_y, content_w, view_h);
+      }
+    } else {
+      const char* view_name =
+          app.cur_tab().view_mode == ViewMode::List    ? "listview"
+        : app.cur_tab().view_mode == ViewMode::Grid    ? "gridview"
+        : app.cur_tab().view_mode == ViewMode::Computer? "computerview"
+        : app.cur_tab().view_mode == ViewMode::Tree    ? "treeview"
+        : app.cur_tab().view_mode == ViewMode::Compact ? "compactview"
+                                                        : "content";
+      auto ph = phase(view_name);
+      if (app.cur_tab().view_mode == ViewMode::List) {
+        draw_list_view(app, cr, content_x, content_y, content_w, view_h);
+      } else if (app.cur_tab().view_mode == ViewMode::Grid) {
+        draw_grid_view(app, cr, content_x, content_y, content_w, view_h);
+      } else if (app.cur_tab().view_mode == ViewMode::Computer) {
+        draw_computer_view(app, cr, content_x, content_y, content_w, view_h);
+      } else if (app.cur_tab().view_mode == ViewMode::Tree) {
+        draw_tree_view(app, cr, content_x, content_y, content_w, view_h);
+      } else if (app.cur_tab().view_mode == ViewMode::Compact) {
+        draw_compact_view(app, cr, content_x, content_y, content_w, view_h);
+      }
     }
   }
 
@@ -479,29 +696,8 @@ void paint(AppState& app, cairo_t* cr) {
   // Status bar
   { auto ph = phase("statusbar"); draw_status_bar(app, cr, w, h, status_h); }
 
-  // Adaptive sidebar fold flap: the sidebar is a temporary overlay covering
-  // only the content column (below top/tab/banner bars), leaving the toolbars
-  // fully interactive while a strip of content peek out to the right.
-  if (app.sidebar_folded && app.sidebar_folded_revealed) {
-    int o_w = app.effective_sidebar_width();
-    int flap_top = app.content_top_y();
-    int flap_bottom = h - status_h;
-    cairo_set_source_rgba(cr, 0.0, 0.0, 0.0, 0.15);
-    cairo_rectangle(cr, o_w, flap_top, w - o_w, flap_bottom - flap_top);
-    cairo_fill(cr);
-    cairo_save(cr);
-    cairo_rectangle(cr, 0, flap_top, o_w, flap_bottom - flap_top);
-    cairo_clip(cr);
-    double flap_alpha = app.sidebar_opacity_pct / 100.0;
-    cairo_set_source_rgba(cr, app.surface_r * 2, app.surface_g * 2, app.surface_b * 2, flap_alpha);
-    cairo_rectangle(cr, 0, flap_top, o_w, flap_bottom - flap_top);
-    cairo_fill(cr);
-    { auto ph = phase("sidebar"); draw_sidebar(app, cr, o_w, flap_top, view_h); }
-    cairo_restore(cr);
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.3);
-    cairo_rectangle(cr, o_w, flap_top, 1, flap_bottom - flap_top);
-    cairo_fill(cr);
-  }
+  // Adaptive sidebar fold flap (module-owned overlay paint).
+  paint_sidebar_flap(app, cr, w, h, view_h, status_h);
 
   // Directory/file picker bar
   if (app.select_dir_mode || app.select_file_mode)
@@ -610,15 +806,30 @@ void draw(AppState& app) {
     return;
   }
 
+  // Content scroll-delta reuse gate: this frame may shift last frame's
+  // content column in place and repaint only the exposed band when the ONLY
+  // change is the scroll offset. Requires grid mode (v1), a stable signature,
+  // the buffer that holds last frame's content being free again, no overlays
+  // that live above the content, and no split view.
+  advance_scroll_render(app);
+  ContentReuseHint reuse_hint = make_content_reuse_hint(app);
+
+  if (reuse_hint.delta) paint_bi = app.content_reuse.last_bi;
+
   cairo_t* cr = app.buf[paint_bi].cairo();
   cairo_save(cr);
 
-  // Clear
-  cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
-  cairo_paint(cr);
-  cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+  if (!reuse_hint.delta) {
+    // Clear
+    cairo_set_operator(cr, CAIRO_OPERATOR_CLEAR);
+    cairo_paint(cr);
+    cairo_set_operator(cr, CAIRO_OPERATOR_OVER);
+  }
 
-  paint(app, cr);
+  paint(app, cr, reuse_hint.delta ? &reuse_hint : nullptr);
+
+  // Record content-reuse state for the next frame.
+  record_content_reuse(app, paint_bi);
 
   cairo_restore(cr);
 

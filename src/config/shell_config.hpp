@@ -352,6 +352,17 @@ struct AudioSettings {
   int compat_pcm_format = 0;
 };
 
+// Per-directory view + zoom memory persisted in the file-browser TOML. Plain
+// ints so the config layer stays decoupled from the app's enums.
+struct FileBrowserDirView {
+  int view_mode = 0;             // 0=List, 1=Grid
+  int sort_field = 0;            // 0=Name, 1=Size, 2=Modified, 3=Type
+  bool sort_descending = false;
+  bool group_by_type = false;
+  int group_field = 0;
+  int zoom_level = 8;            // discrete zoom level; 8 = 100%
+};
+
 struct FileBrowserSettings {
   double zoom_pct = 100.0;       // 50–200
   bool folders_before_files = true;
@@ -382,6 +393,11 @@ struct FileBrowserSettings {
   bool dynamic_view = true;      // media-heavy folders auto-switch to icon view
   bool per_folder_props = false; // read/write per-folder .directory view props
   bool independent_dir_views = false; // each folder keeps its own view in-session
+
+  // ── Per-directory view + zoom memory (Independent views per folder) ──
+  // Persistent so each folder keeps its view mode/sort/group/zoom across
+  // restarts. Keyed by canonical directory path.
+  std::unordered_map<std::string, FileBrowserDirView> dir_views;
 
   // ── Sidebar favorites (bookmarked folders) ──
   std::vector<std::string> favorites;

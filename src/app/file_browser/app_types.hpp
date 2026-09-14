@@ -211,6 +211,10 @@ struct Tab {
   // Tree view
   std::vector<TreeEntry> tree_entries;
   std::unordered_set<std::string> tree_expanded;
+  // Tree rows derive from entries/visible_entries/tree_expanded. Rebuilding
+  // on every frame costs ~3-15 ms with thousands of entries, so the build is
+  // skipped while nothing that feeds it changed (see build_tree_entries).
+  bool tree_entries_dirty = true;
 
   // Dynamic view: media-heavy folders auto-switch to icon view (one-shot)
   bool dynamic_view_done = false;
@@ -332,6 +336,7 @@ struct AppState {
     bool sort_descending = false;
     bool group_by_type = false;
     int group_field = 0;
+    int zoom_level = 0;
   };
   std::unordered_map<std::string, DirViewState> dir_view_states;
 
@@ -397,6 +402,12 @@ struct AppState {
   // by dir_watch_mtx.
   std::unordered_set<std::string> dir_watch_refresh_names;
   std::unordered_set<std::string> dir_watch_pane_refresh_names;
+  // Structural inotify events (create/delete/move) that arrived while the
+  // single background scan slot was busy. We drain inotify every iteration,
+  // but a reload_dir would cancel the in-flight scan, so these stay latched
+  // until the slot frees and the loop relaunches the listing scan.
+  bool dir_watch_tab_reload_pending = false;
+  bool dir_watch_pane_reload_pending = false;
   std::mutex dir_watch_mtx;
 
   bool show_hidden = false;
@@ -483,7 +494,7 @@ struct AppState {
 
     int nav_origin = (sidebar_expanded ? sidebar_width : 0) +
                      static_cast<int>(20.0 * zf);
-    int arrows_w = 2 * arrow_slot + 2 * gap; // back + forward (+ trailing gap)
+    int arrows_w = 3 * arrow_slot + 3 * gap; // back + forward + up (+ trailing gap)
     int right_block_w = folder_search_btn_w + gap + search_btn_w + gap +
                         view_toggle_w + sort_w + gap + gear_w +
                         gear_gap + traffic_w + right_margin;
@@ -613,6 +624,15 @@ struct AppState {
   double resize_tick_ms_sum = 0.0, resize_tick_ms_max = 0.0;
   double resize_buf_ms_max = 0.0, resize_draw_ms_max = 0.0;
   std::vector<std::pair<const char*, double>> resize_phase_samples;
+
+  // ── Paint micro-profiling (bench only; paint_profile=false → zero cost) ──
+  bool paint_profile = false;     // bench_paint sets this to enable the counters
+  std::uint64_t profile_grid_icon_ns = 0;   // draw_file_icon_cairo per grid cell
+  std::uint64_t profile_grid_label_ns = 0;  // label raster blit per grid cell
+  std::uint64_t profile_grid_stroke_ns = 0; // selection/hover/drop outline per cell
+  std::uint64_t profile_grid_header_ns = 0; // group-header bands
+  std::uint64_t profile_grid_hidden_ns = 0; // hidden/cut push_group + paint_with_alpha
+  std::uint64_t profile_grid_flush_ns = 0;  // BatchedBlitter::flush (icon+label batch)
 
   // ── Operations panel (right sidebar) ──
   bool ops_panel_open = false;
@@ -883,6 +903,11 @@ struct AppState {
   std::string preview_text;        // text content for text file previews
   int preview_x = 0, preview_y = 0;
   int preview_w = 0, preview_h = 0;
+
+  // Anchor point for hover preview / tooltip placement: cursor position when
+  // mouse-driven, or the selected entry's rect center for keyboard nav
+  // (hover_idx < 0). Both popups float near this point.
+  int overlay_anchor_x = 0, overlay_anchor_y = 0;
 
   // ── Preview popup surface (wl_subsurface) ──
   wl_surface* previewPopupSurface = nullptr;
@@ -1204,12 +1229,16 @@ struct AppState {
   // ── Top-bar arrow button hover ──
   int arrow_back_x = 0;
   int arrow_forward_x = 0;
+  int arrow_up_x = 0;
   int r_arrow_back_x = 0;
   int r_arrow_forward_x = 0;
+  int r_arrow_up_x = 0;
   bool arrow_back_hover = false;
   bool r_arrow_back_hover = false;
   bool arrow_forward_hover = false;
   bool r_arrow_forward_hover = false;
+  bool arrow_up_hover = false;
+  bool r_arrow_up_hover = false;
 
   // ── Breadcrumb nav bar ──
   std::vector<BreadcrumbSegment> breadcrumbs;
@@ -1310,6 +1339,19 @@ struct AppState {
   cairo_surface_t* mounted_svg = nullptr;
   cairo_surface_t* icon_desktop_svg = nullptr;
   cairo_surface_t* icon_documents_svg = nullptr;
+
+  // ── Path-bar glass pill render cache ──
+  // The glassy pill is a multi-pass vertical-gradient decoration over a
+  // ~pane-wide region; its appearance depends only on pane geometry + theme,
+  // so it is preredered once per (geometry, theme) change and blitted each
+  // frame instead of re-rasterizing ~3700px of gradients.
+  struct PillCache {
+    cairo_surface_t* surface = nullptr;
+    int w = -1;
+    int h = -1;
+    uint64_t key = 0;
+  };
+  PillCache pill_cache[4];
   cairo_surface_t* icon_downloads_svg = nullptr;
   cairo_surface_t* icon_music_svg = nullptr;
   cairo_surface_t* icon_pictures_svg = nullptr;
@@ -1379,6 +1421,18 @@ struct AppState {
 
   // ── Cut visual indicator ──
   std::unordered_set<std::string> cut_paths;  // paths of files marked for cut (dashed border)
+
+  // ── Scroll-delta content reuse (partial repaint) ──
+  // When only scroll_px changes (signature + epoch verify it), the content
+  // column can shift in place and repaint only the newly exposed band instead
+  // of recompositing every cell (grid mode).
+  uint64_t listing_epoch = 0;  // bumped whenever entries/visible_entries change
+  struct ContentReuse {
+    bool valid = false;         // content pixels in last_bi are reusable
+    int last_bi = -1;           // wayland buffer index holding the content
+    int last_scroll = INT_MIN;  // scroll_px that content was drawn at
+    uint64_t last_key = 0;      // content signature (everything except scroll)
+  } content_reuse;
 };
 
 } // namespace eh::file_browser
