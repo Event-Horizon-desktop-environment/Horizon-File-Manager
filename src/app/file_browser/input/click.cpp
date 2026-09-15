@@ -2408,6 +2408,9 @@ int path_w = in_search_btn_x - static_cast<int>(6.0 * zf) - path_x;
     }
 
     if (idx >= 0) {
+      // Mouse selection: clear the keyboard-selection flag so hover
+      // preview/tooltip don't chase a merely-click-selected item.
+      app.cur_tab().selected_by_kbd = false;
       // Computer view: single click selects/mounts, double click opens
       if (app.cur_tab().view_mode == ViewMode::Computer) {
         auto& item = app.computer_items[idx];

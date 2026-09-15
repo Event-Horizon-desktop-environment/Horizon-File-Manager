@@ -1567,6 +1567,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       app.cur_tab().multi_selected.push_back(i);
     }
     if (!app.cur_tab().visible_entries.empty()) app.cur_tab().selected_idx = 0;
+    app.cur_tab().selected_by_kbd = true;
     draw(app);
     return true;
   }
@@ -1754,6 +1755,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       return true;
 
     case XKB_KEY_Left: {
+      app.cur_tab().selected_by_kbd = true;
       // Tree view: collapse expanded directory
       if (app.cur_tab().view_mode == ViewMode::Tree) {
         auto& tab = app.cur_tab();
@@ -1808,6 +1810,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     }
 
     case XKB_KEY_Right: {
+      app.cur_tab().selected_by_kbd = true;
       // Tree view: expand collapsed directory
       if (app.cur_tab().view_mode == ViewMode::Tree) {
         auto& tab = app.cur_tab();
@@ -1860,6 +1863,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     }
 
     case XKB_KEY_Up: {
+      app.cur_tab().selected_by_kbd = true;
       // Tree view: navigate tree_entries
       if (app.cur_tab().view_mode == ViewMode::Tree) {
         auto& tab = app.cur_tab();
@@ -1903,6 +1907,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
     }
 
     case XKB_KEY_Down: {
+      app.cur_tab().selected_by_kbd = true;
       // Tree view: navigate tree_entries
       if (app.cur_tab().view_mode == ViewMode::Tree) {
         auto& tab = app.cur_tab();

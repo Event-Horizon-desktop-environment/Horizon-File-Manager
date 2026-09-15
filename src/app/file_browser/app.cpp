@@ -737,7 +737,8 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
     draw_context_menu(app, cr);
 
   // Preview popup (skipped when a separate layer‑shell surface is active)
-  if (app.preview_active && !app.previewPopupSurface)
+  // and never painted over the right-click context menu.
+  if (app.preview_active && !app.previewPopupSurface && !app.context_menu_open)
     draw_hover_preview(app, cr);
 
   // Info panel (F11)

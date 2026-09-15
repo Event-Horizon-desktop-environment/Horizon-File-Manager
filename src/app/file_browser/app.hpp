@@ -305,7 +305,10 @@ int hit_test_drop_chooser(const AppState& app, int x, int y);
 bool hit_test_fav_section(AppState& app, int x, int y);
 void hit_test_marquee(AppState& app);
 
-// ── context menu logic (file_browser_menu.cpp) ───────────────────
+// ── context menu logic (file_browser_menu.cpp + context_actions.cpp) ──
+
+// Shared 3-second expiry helper (definition in context_actions.cpp).
+std::uint64_t menu_expiry_3s();
 
 void execute_context_menu_action(AppState& app, int item_idx);
 
@@ -317,13 +320,13 @@ void insert_template_submenu(AppState& app, std::size_t pos);
 /// given position; no-op when no executable scripts exist.
 void insert_scripts_submenu(AppState& app, std::size_t pos);
 
-// ── Open With dialog (file_browser_menu.cpp + draw.cpp) ──────────
+// ── Open With dialog (file_browser_menu.cpp + open_with.cpp + draw.cpp) ──
 
 void open_with_open(AppState& app, const std::string& file_path);
 void open_with_close(AppState& app);
 void draw_open_with(AppState& app, cairo_t* cr);
 
-// ── Settings dialog (file_browser_menu.cpp + draw.cpp) ───────────
+// ── Settings dialog (file_browser_menu.cpp + settings.cpp + draw.cpp) ───
 
 void open_settings(AppState& app);
 void save_file_browser_settings(AppState& app);

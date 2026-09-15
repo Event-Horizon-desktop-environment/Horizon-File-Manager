@@ -196,13 +196,17 @@ void reset_preview(AppState& app) {
 
 // The entry an overlay (hover preview / tooltip) should currently describe:
 // the hovered entry when the mouse is over one, else the keyboard-selected
-// entry. Only List/Grid/Compact index both hover and selection into
-// visible_entries — Tree and Computer keep their own arrays, so the keyboard
-// fallback is disabled there (hover still works via hover_idx).
+// entry. A left-click selects too, but a mouse-selected item must NOT count as
+// a hover once the cursor leaves it, so the selected fallback only engages
+// when the selection was made by the keyboard (selected_by_kbd). Only
+// List/Grid/Compact index both hover and selection into visible_entries —
+// Tree and Computer keep their own arrays, so the keyboard fallback is
+// disabled there (hover still works via hover_idx).
 static int overlay_target_idx(const AppState& app) {
   if (app.cur_tab().hover_idx >= 0) return app.cur_tab().hover_idx;
   auto vm = app.cur_tab().view_mode;
-  if (vm == ViewMode::List || vm == ViewMode::Grid || vm == ViewMode::Compact)
+  if ((vm == ViewMode::List || vm == ViewMode::Grid || vm == ViewMode::Compact) &&
+      app.cur_tab().selected_by_kbd)
     return app.cur_tab().selected_idx;
   return -1;
 }
@@ -260,6 +264,12 @@ static void hover_anchor_point(AppState& app, int vi, int& mx, int& my) {
 void check_hover_preview(AppState& app) {
   // Don't touch space preview
   if (app.preview_mode == AppState::PreviewMode::Space) return;
+
+  // A right-click menu must never sit under (or re-arm) a hover preview.
+  if (app.context_menu_open) {
+    if (app.preview_entry_idx >= 0) reset_preview(app);
+    return;
+  }
 
   // Guard: if index is stale (entries changed), reset
   int n_visible = static_cast<int>(app.cur_tab().visible_entries.size());
@@ -532,7 +542,7 @@ static bool create_tooltip_popup(AppState& app) {
 }
 
 // Draw content is provided by draw.cpp; commit mirrors the preview popup.
-void draw_tooltip_card(AppState& app, cairo_t* cr); // defined in draw.cpp
+void draw_tooltip_card(AppState& app, cairo_t* cr); // defined in draw_popups.cpp
 
 static void commit_tooltip_popup(AppState& app) {
   if (!app.tooltipPopupSurface || !app.tooltipPopupSub) return;

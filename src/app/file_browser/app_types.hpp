@@ -203,7 +203,9 @@ struct Tab {
   int selected_idx = -1;
   int sel_anchor = -1;                      // anchor for Shift-click range
   std::vector<int> multi_selected;        // indices into visible_entries
-  std::string tree_selected_path;           // tree view: selected row path (rows may not exist in visible_entries)
+  bool selected_by_kbd = false;          // true when the last selection was keyboard-driven
+                                         // (so hover preview/tooltip don't chase mouse-selected items)
+  std::string tree_selected_path;        // tree view: selected row path (rows may not exist in visible_entries)
 
   // Directory auto-refresh
   int64_t dir_mtime = 0;
