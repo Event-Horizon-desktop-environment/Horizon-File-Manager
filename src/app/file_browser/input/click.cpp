@@ -404,6 +404,56 @@ void handle_click(AppState& app, int x, int y, int button) {
     return;
   }
 
+  // ── Context menu clicks ──
+  // Dispatched before the region handlers below: the menu is drawn above
+  // the status bar / scrollbar, so its rows must win over those handlers,
+  // which otherwise swallow any click in their band (e.g. the status-bar
+  // zoom guard at the bottom edge returns unconditionally, making menu
+  // rows near the bottom unclickable).
+  if (button == 0x110 && app.context_menu_open) {
+    int cm_idx = hit_test_context_menu(app, x, y);
+    if (cm_idx >= 0) {
+      // Main menu item - if it has a submenu, just keep hover; otherwise execute
+      if (static_cast<size_t>(cm_idx) < app.context_menu_items.size() &&
+          !app.context_menu_items[cm_idx].sub_items.empty()) {
+        app.context_menu_hover = cm_idx;
+        draw(app);
+        return;
+      }
+      execute_context_menu_action(app, cm_idx);
+    } else if (cm_idx < -9) {
+      // Submenu item: decode and execute
+      int sub_idx = -(cm_idx + 10);
+      int saved_parent = app.context_menu_hover_prev;
+      app.context_menu_hover = -1; app.context_menu_hover_prev = -1; app.context_menu_sub_hover = -1;
+      if (saved_parent >= 0 && static_cast<size_t>(saved_parent) < app.context_menu_items.size()) {
+        auto& item = app.context_menu_items[saved_parent];
+        if (sub_idx >= 0 && static_cast<size_t>(sub_idx) < item.sub_items.size()) {
+          auto action = item.sub_items[sub_idx].action;
+          if (action != AppState::ContextMenuAction::Separator) {
+            // Clone the menu items to set file_idx for execute
+            app.context_menu_open = false;
+            // Rebuild a single-item context menu to reuse execute_context_menu_action
+            auto saved_items = std::move(app.context_menu_items);
+            app.context_menu_items = {item.sub_items[sub_idx]};
+            execute_context_menu_action(app, 0);
+            draw(app);
+            if (app.context_menu_open) {
+              app.context_menu_items = std::move(saved_items);
+              app.context_menu_hover_prev = saved_parent;
+            }
+            return;
+          }
+        }
+      }
+      app.context_menu_open = false;
+    } else {
+      app.context_menu_open = false;
+    }
+    draw(app);
+    return;
+  }
+
   // Split pane: determine which pane was clicked
   if (app.split_view) {
     int s_w = app.sidebar_w();
@@ -1513,52 +1563,6 @@ void handle_click(AppState& app, int x, int y, int button) {
 
   // Left click
   if (button == 0x110) {
-    if (app.context_menu_open) {
-      int cm_idx = hit_test_context_menu(app, x, y);
-      if (cm_idx >= 0) {
-        // Main menu item - if it has a submenu, just keep hover; otherwise execute
-        if (static_cast<size_t>(cm_idx) < app.context_menu_items.size() &&
-            !app.context_menu_items[cm_idx].sub_items.empty()) {
-          app.context_menu_hover = cm_idx;
-          draw(app);
-          return;
-        }
-        execute_context_menu_action(app, cm_idx);
-      } else if (cm_idx < -9) {
-        // Submenu item: decode and execute
-        int sub_idx = -(cm_idx + 10);
-        int saved_parent = app.context_menu_hover_prev;
-        app.context_menu_hover = -1; app.context_menu_hover_prev = -1; app.context_menu_sub_hover = -1;
-        if (saved_parent >= 0 && static_cast<size_t>(saved_parent) < app.context_menu_items.size()) {
-          auto& item = app.context_menu_items[saved_parent];
-          if (sub_idx >= 0 && static_cast<size_t>(sub_idx) < item.sub_items.size()) {
-            auto action = item.sub_items[sub_idx].action;
-            if (action != AppState::ContextMenuAction::Separator) {
-              // Clone the menu items to set file_idx for execute
-              app.context_menu_open = false;
-              // Rebuild a single-item context menu to reuse execute_context_menu_action
-              auto saved_items = std::move(app.context_menu_items);
-              app.context_menu_items = {item.sub_items[sub_idx]};
-              execute_context_menu_action(app, 0);
-              draw(app);
-              if (!app.context_menu_open) {
-                // Action handled, restore nothing
-              } else {
-                app.context_menu_items = std::move(saved_items);
-                app.context_menu_hover_prev = saved_parent;
-              }
-              return;
-            }
-          }
-        }
-        app.context_menu_open = false;
-      } else {
-        app.context_menu_open = false;
-      }
-      draw(app);
-      return;
-    }
-
     // Prefer the compositor's event timestamp: UI-thread stalls (e.g. a slow
     // frame between the two clicks of a double-click) must not inflate the
     // apparent gap and reject genuine double-clicks.
