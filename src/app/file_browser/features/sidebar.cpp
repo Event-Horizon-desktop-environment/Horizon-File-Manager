@@ -90,12 +90,10 @@ void size_sidebar_to_content(AppState& app, cairo_t* cr) {
   }
   // icon + gap + widest label + mount-indicator/usage reserve + edge padding
   int needed = static_cast<int>(label_x + widest + 40.0 * kSbZf + 16.0 * kSbZf);
-  // Leave room for the info/ops panels and a usable content column so the
-  // three can never combine into an overlap on narrow windows.
-  int reserve = (app.info_panel_open ? app.info_panel_width : 0) +
-                (app.ops_panel_slide > 0.01
-                     ? static_cast<int>(app.ops_panel_width * app.ops_panel_slide)
-                     : 0);
+  // Leave room for the info panel and a usable content column so the two can
+  // never combine into an overlap on narrow windows. The ops panel is an
+  // overlay, so it does not reserve content width.
+  int reserve = (app.info_panel_open ? app.info_panel_width : 0);
   int cap = std::max(160, std::min(std::max(340, app.width * 3 / 5),
                                    app.width - reserve - 240));
   int want = std::max(app.sidebar_width, needed);
@@ -976,7 +974,6 @@ void sidebar_content_geometry(AppState& app, int& cx, int& cy, int& cw,
   const int h = app.height;
   int sidebar_w = app.sidebar_w();
   int info_panel_w = app.info_panel_open ? app.info_panel_width : 0;
-  int ops_panel_w = app.ops_panel_open ? app.ops_panel_width : 0;
   if (info_panel_w > 0) {
     int max_info = w - 300;
     if (max_info > 320) max_info = 320;
@@ -993,7 +990,7 @@ void sidebar_content_geometry(AppState& app, int& cx, int& cy, int& cw,
                  ? 28
                  : 0;
   cx = sidebar_w;
-  cw = w - sidebar_w - info_panel_w - ops_panel_w;
+  cw = w - sidebar_w - info_panel_w;
   cy = top_h + tab_h + banner_h;
   ch = h - top_h - tab_h - banner_h - status_h - selector_h;
 }

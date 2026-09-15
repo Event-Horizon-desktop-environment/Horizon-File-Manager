@@ -364,16 +364,15 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
     app.info_panel_width = std::max(200, static_cast<int>(280 * app.zoom_pct / 100.0));
     info_panel_w = app.info_panel_width;
   }
-  int ops_panel_w = 0;
-  if (app.ops_panel_slide > 0.01) {
+  // Ops panel floats over the content as an overlay; keep its zoom-scaled
+  // width updated but it never resizes the content column.
+  if (app.ops_panel_slide > 0.01)
     app.ops_panel_width = std::max(240, static_cast<int>(320 * app.zoom_pct / 100.0));
-    ops_panel_w = static_cast<int>(app.ops_panel_width * app.ops_panel_slide);
-  }
   size_sidebar_to_content(app, cr);
   int sidebar_w = app.sidebar_w();
   // Info panel must never squeeze the content column to nothing.
   if (info_panel_w > 0) {
-    int max_info = std::max(160, w - sidebar_w - ops_panel_w - 240);
+    int max_info = std::max(160, w - sidebar_w - 240);
     if (info_panel_w > max_info) {
       app.info_panel_width = max_info;
       info_panel_w = max_info;
@@ -746,6 +745,9 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
 
   // Operations panel (right sidebar)
   { auto ph = phase("opspanel"); draw_operations_panel(app, cr); }
+
+  // Drop action chooser (Copy/Move prompt) — drawn last so it sits on top.
+  if (app.drop_chooser_open) draw_drop_chooser(app, cr);
 
   {
     static std::atomic<bool> logged_first{false};

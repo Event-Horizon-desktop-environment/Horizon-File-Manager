@@ -298,6 +298,7 @@ int hit_test_compact(AppState& app, int x, int y);
 void build_tree_entries(AppState& app);
 int hit_test_sidebar(AppState& app, int x, int y);
 int hit_test_context_menu(AppState& app, int x, int y);
+int hit_test_drop_chooser(const AppState& app, int x, int y);
 
 /// Returns true if (x, y) is within the Favorites section area of the sidebar
 /// (not on an individual item, but anywhere in the section).
@@ -329,6 +330,11 @@ void save_file_browser_settings(AppState& app);
 void request_fs_operation(AppState& app, const std::vector<std::string>& srcs,
                           const std::string& dest_dir, bool is_move,
                           const std::string& success_toast, bool clear_cut = false);
+// Deferred-drop chooser: stash a pending copy/move operation so the user can
+// pick Copy vs Move from the popup once the wl_data_device session is over.
+void open_drop_chooser(AppState& app, std::vector<std::string> ops, std::string target);
+// Dispatch a stashed drop operation: choice 0 = copy, 1 = move.
+void resolve_drop_chooser(AppState& app, int choice);
 // Paste clipboard contents into dest_dir (or the current directory when
 // empty): file URIs if present, otherwise saves clipboard image data
 // (screenshots) as a new image file.
@@ -344,6 +350,7 @@ void draw_hover_preview(AppState& app, cairo_t* cr);
 void draw_properties_dialog(AppState& app, cairo_t* cr);
 void draw_info_panel(AppState& app, cairo_t* cr);
 void draw_operations_panel(AppState& app, cairo_t* cr);
+void draw_drop_chooser(AppState& app, cairo_t* cr);
 int properties_hit_test(AppState& app, int x, int y);
 int settings_hit_test(AppState& app, int x, int y);
 void show_properties(AppState& app, const std::string& path, const std::string& icon_name = "");

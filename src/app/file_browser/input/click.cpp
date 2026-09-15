@@ -387,6 +387,23 @@ void handle_click(AppState& app, int x, int y, int button) {
   // was clicked), matching the Nautilus AdwFlap behavior.
   dismiss_sidebar_flap(app, x, y);
 
+  // ── Drop action chooser (Copy/Move prompt) ──
+  // A click on a row picks that action; any other click (either button)
+  // dismisses the prompt without acting.
+  if (app.drop_chooser_open) {
+    int dc = hit_test_drop_chooser(app, x, y);
+    if (dc >= 0 && button == 0x110) {
+      resolve_drop_chooser(app, dc);
+    } else if (button == 0x110 || button == 0x111) {
+      app.drop_chooser_open = false;
+      app.drop_chooser_hover = -1;
+      app.drop_chooser_srcs.clear();
+      app.drop_chooser_target.clear();
+    }
+    draw(app);
+    return;
+  }
+
   // Split pane: determine which pane was clicked
   if (app.split_view) {
     int s_w = app.sidebar_w();

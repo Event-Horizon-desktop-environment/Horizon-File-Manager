@@ -1401,6 +1401,17 @@ struct AppState {
   int drop_target_tab_idx = -1;          // tab index being hovered during drag (-1 = none)
   uint64_t drop_tab_switch_start_ms = 0; // epoch ms when hover began on a tab (0 = inactive)
 
+  // ── Drop action chooser (Copy/Move prompt shown after a drop) ──
+  // When a drop lands, the operation is deferred until the user picks
+  // "Copy here" or "Move here" from this small popup instead of deciding
+  // implicitly from the Ctrl modifier / negotiated DnD action.
+  bool drop_chooser_open = false;
+  int drop_chooser_x = 0;       // popup anchor (drop pointer position)
+  int drop_chooser_y = 0;
+  int drop_chooser_hover = -1;  // hovered row: 0 = copy, 1 = move
+  std::vector<std::string> drop_chooser_srcs;  // pending source paths
+  std::string drop_chooser_target;             // destination directory
+
   // ── Undo support ──
   struct UndoRecord {
     enum class Type : uint8_t {

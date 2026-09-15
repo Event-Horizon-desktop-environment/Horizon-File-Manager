@@ -905,13 +905,6 @@ void data_device_drop(void* data, wl_data_device*) {
     // Use drop target if valid, otherwise current directory
     std::string target = app.drop_target_is_valid ? app.drop_target_path : app.cur_tab().current_path;
 
-    // Copy or move based on Ctrl state
-    bool ctrl = false;
-    if (auto* xkb = app.seat.xkb_state_ptr()) {
-      ctrl = xkb_state_mod_name_is_active(xkb, XKB_MOD_NAME_CTRL,
-                                          XKB_STATE_MODS_EFFECTIVE) != 0;
-    }
-
     // Filter out items already inside the target directory — dropping them
     // back where they came from is a no-op, just release
     std::vector<std::string> ops;
@@ -934,9 +927,8 @@ void data_device_drop(void* data, wl_data_device*) {
       return;
     }
 
-    // Conflict-checked copy/move (may open the overwrite dialog)
-    request_fs_operation(app, ops, target, !ctrl, ctrl ? "Copied" : "Moved", false);
-
+    // Ask the user how to handle the drop before starting any file I/O.
+    open_drop_chooser(app, std::move(ops), std::move(target));
     return;
   }
 
@@ -1021,9 +1013,6 @@ void data_device_drop(void* data, wl_data_device*) {
   // Determine target directory
   std::string target = app.drop_target_is_valid ? app.drop_target_path : app.cur_tab().current_path;
 
-  // Use the compositor-negotiated action to decide copy vs move
-  bool is_move = app.drop_chosen_action == WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
-
   // Skip items already inside the target directory
   std::vector<std::string> ops;
   ops.reserve(paths.size());
@@ -1034,9 +1023,8 @@ void data_device_drop(void* data, wl_data_device*) {
   }
   if (ops.empty()) return;
 
-  // Conflict-checked copy/move (may open the overwrite dialog)
-  request_fs_operation(app, ops, target, is_move,
-                       is_move ? "Moved" : "Copied", false);
+  // Ask the user how to handle the drop before starting any file I/O.
+  open_drop_chooser(app, std::move(ops), std::move(target));
 }
 
 void setup_drop_receiver(AppState& app) {
@@ -1051,6 +1039,35 @@ void setup_drop_receiver(AppState& app) {
     .selection = data_device_selection,
   };
   wl_data_device_add_listener(app.data_device, &kDataDeviceListener, &app);
+}
+
+// ── Drop action chooser (Copy/Move prompt) ───────────────────────
+
+void open_drop_chooser(AppState& app, std::vector<std::string> ops,
+                       std::string target) {
+  app.drop_chooser_srcs = std::move(ops);
+  app.drop_chooser_target = std::move(target);
+  app.drop_chooser_x = app.drop_x;
+  app.drop_chooser_y = app.drop_y;
+  app.drop_chooser_hover = -1;
+  app.drop_chooser_open = true;
+  app.pendingRedraw = true;
+}
+
+void resolve_drop_chooser(AppState& app, int choice) {
+  app.drop_chooser_open = false;
+  app.drop_chooser_hover = -1;
+  auto srcs = std::move(app.drop_chooser_srcs);
+  app.drop_chooser_srcs.clear();
+  std::string target = std::move(app.drop_chooser_target);
+  app.drop_chooser_target.clear();
+  if (srcs.empty() || target.empty() || choice < 0 || choice > 1) {
+    app.pendingRedraw = true;
+    return;
+  }
+  bool is_move = (choice == 1);
+  request_fs_operation(app, srcs, target, is_move,
+                       is_move ? "Moved" : "Copied", false);
 }
 
 } // namespace eh::file_browser

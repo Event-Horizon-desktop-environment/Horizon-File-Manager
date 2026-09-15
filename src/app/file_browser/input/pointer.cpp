@@ -1074,6 +1074,11 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
   }
 
+  if (app.drop_chooser_open) {
+    int hover = hit_test_drop_chooser(app, x, y);
+    if (hover != app.drop_chooser_hover) app.drop_chooser_hover = hover;
+  }
+
   if (app.context_menu_open) {
     int prev = app.context_menu_hover;
     int hit = hit_test_context_menu(app, x, y);

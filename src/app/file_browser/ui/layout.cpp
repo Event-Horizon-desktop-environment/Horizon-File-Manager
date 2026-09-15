@@ -49,19 +49,13 @@ PaneViewRect pane_view_rect_at(const AppState& app, int px) {
   int info_w = 0;
   if (app.info_panel_open)
     info_w = std::max(200, static_cast<int>(280.0 * app.zoom_pct / 100.0));
-  int ops_w = 0;
-  if (app.ops_panel_slide > 0.01) {
-    ops_w = static_cast<int>(
-        std::max(240, static_cast<int>(320.0 * app.zoom_pct / 100.0)) *
-        app.ops_panel_slide);
-  }
   // Info panel must never squeeze the content column to nothing.
   if (info_w > 0) {
-    int max_info = std::max(160, app.width - sidebar_w - ops_w - 240);
+    int max_info = std::max(160, app.width - sidebar_w - 240);
     if (info_w > max_info) info_w = max_info;
   }
   int cx = sidebar_w;
-  int cw = app.width - sidebar_w - info_w - ops_w;
+  int cw = app.width - sidebar_w - info_w;
   int selector_h =
       (app.select_dir_mode || app.select_file_mode) ? app.select_bar_h : 0;
   bool banner_on = app.search_active || app.recursive_search_active ||

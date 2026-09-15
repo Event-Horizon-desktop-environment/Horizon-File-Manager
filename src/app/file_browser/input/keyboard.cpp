@@ -2109,7 +2109,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       !app.password_dialog_open &&
       !app.properties.open && !app.open_with_open && !app.compress_dialog_open &&
       !app.batch_rename_open && !app.settings_dropdown_open &&
-      (app.active_pane ? !app.r_sort_menu_open : !app.sort_menu_open) && !app.context_menu_open &&
+      (app.active_pane ? !app.r_sort_menu_open : !app.sort_menu_open) && !app.context_menu_open && !app.drop_chooser_open &&
       !ctrl && !alt && utf8_len == 1 && utf8[0] >= 32 && utf8[0] < 127 &&
       app.cur_tab().current_path != "computer://") {
     auto& active = app.active_pane ? app.r_search_active : app.search_active;
@@ -2139,6 +2139,16 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   // ── Space preview dismiss ──
   if (app.preview_mode == AppState::PreviewMode::Space && sym == XKB_KEY_Escape) {
     reset_preview(app);
+    draw(app);
+    return true;
+  }
+
+  // ── Dismiss drop action chooser ──
+  if (app.drop_chooser_open && sym == XKB_KEY_Escape) {
+    app.drop_chooser_open = false;
+    app.drop_chooser_hover = -1;
+    app.drop_chooser_srcs.clear();
+    app.drop_chooser_target.clear();
     draw(app);
     return true;
   }
