@@ -37,4 +37,12 @@ void draw_dialog_card(AppState& app, cairo_t* cr, double x, double y,
   cairo_stroke(cr);
 }
 
+// Clamp a popup rect so it stays fully on-screen (with an 8px margin).
+void clamp_popup_rect(const AppState& app, int& x, int& y, int w, int h) {
+  if (x + w > app.width - 8) x = app.width - w - 8;
+  if (y + h > app.height - 8) y = app.height - h - 8;
+  if (x < 8) x = 8;
+  if (y < 8) y = 8;
+}
+
 } // namespace eh::file_browser

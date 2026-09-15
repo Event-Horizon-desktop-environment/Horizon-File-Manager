@@ -26,4 +26,8 @@ void wallpaper_tint_surface(const AppState& app, double strength,
 void draw_dialog_card(AppState& app, cairo_t* cr, double x, double y,
                       double w, double h, double r);
 
+// Clamp a popup rect so it stays fully on-screen (with an 8px margin).
+// Shared by the context menu and the drop-action chooser.
+void clamp_popup_rect(const AppState& app, int& x, int& y, int w, int h);
+
 } // namespace eh::file_browser

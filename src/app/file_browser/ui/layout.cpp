@@ -115,4 +115,11 @@ ListLayout compute_list_layout(double zf) {
   return l;
 }
 
+// Tab whose entry list lives in the pane under pixel px (see layout.hpp).
+Tab& pane_tab_at(AppState& app, int px) {
+  if (app.split_view && pane_view_rect_at(app, px).pane == 1)
+    return app.right_pane;
+  return app.tabs[app.active_tab];
+}
+
 } // namespace eh::file_browser

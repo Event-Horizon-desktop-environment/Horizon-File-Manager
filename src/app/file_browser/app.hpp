@@ -4,6 +4,7 @@
 
 #include <string>
 #include <unordered_set>
+#include <vector>
 
 #include <cairo/cairo.h>
 
@@ -311,6 +312,49 @@ void hit_test_marquee(AppState& app);
 std::uint64_t menu_expiry_3s();
 
 void execute_context_menu_action(AppState& app, int item_idx);
+
+// ── context menu action module (features/context_actions{,_items,_regions}.cpp) ──
+// execute_context_menu_action calls the per-region handlers below (bool = handled,
+// exits the dispatcher), then resolves `entry` and calls execute_item_action. The
+// handlers and switcher live in separate TUs, so these are the cross-cluster decls.
+// selected_entry_paths is shared by run_nemo_script (regions) and the
+// CopyTo*/MoveTo* switch cases (items).
+
+// Multi-selection paths (falls back to single selection); definition in
+// context_actions.cpp.
+std::vector<std::string> selected_entry_paths(AppState& app);
+
+// Per-region context-menu handlers (feature context_actions_regions.cpp).
+bool ctx_path_edit_menu(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_dialog_text_menu(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_new_folder(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_new_document(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_new_from_template(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_run_script(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_reload(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_copy_location(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_select_all(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_open_with(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_properties(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_paste(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_open_in_terminal(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_remove_from_favorites(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_unmount_drive(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_mount_drive(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_open(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_empty_trash(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_add_to_favorites(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_settings(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_open_in_new_tab(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_tab_menu(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_open_in_new_window(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_open_as_admin(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_open_file_location(AppState& app, int item_idx, AppState::ContextMenuAction action);
+
+// Per-item action dispatch (feature context_actions_items.cpp): the switch on
+// `action` for the resolved entry; returns without drawing on a return-cased
+// action and draws after break-cased ones.
+void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuAction action);
 
 /// Inserts a "New From Template" submenu (from ~/Templates) at the given
 /// position of the current context menu; no-op when no templates exist.

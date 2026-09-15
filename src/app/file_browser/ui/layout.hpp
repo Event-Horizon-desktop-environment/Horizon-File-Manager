@@ -19,6 +19,7 @@
 #include <algorithm>
 
 struct AppState;
+struct Tab;
 
 namespace eh::file_browser {
 
@@ -36,6 +37,11 @@ PaneViewRect pane_view_rect_at(const AppState& app, int px);
 
 // Rect of pane index `pane` directly (keyboard path — focus is app.active_pane).
 PaneViewRect pane_view_rect_for_index(const AppState& app, int pane);
+
+// Tab whose entry list lives in the pane under pixel px. For split view the
+// pane is derived FROM THE POINTER X, so this stays position-correct no matter
+// which pane currently has focus; outside split view it is the active tab.
+Tab& pane_tab_at(AppState& app, int px);
 
 // Pane-local grid geometry, computed from THIS pane's content width and the
 // current zoom. Never stored on AppState — the per-pane values recompute on
