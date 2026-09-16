@@ -132,7 +132,7 @@ bool RecursiveSearchWorker::match_name(const std::string& name) {
 
 bool RecursiveSearchWorker::match_content(const std::string& path) {
   struct stat st{};
-  if (::stat(path.c_str(), &st) != 0 || S_ISDIR(st.st_mode)) return false;
+  if (::stat(path.c_str(), &st) != 0 || !S_ISREG(st.st_mode)) return false;
   if (static_cast<uint64_t>(st.st_size) > kContentMaxBytes) return false;
 
   FILE* f = std::fopen(path.c_str(), "rb");

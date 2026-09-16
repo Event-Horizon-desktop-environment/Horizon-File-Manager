@@ -1,5 +1,9 @@
 #include "app/file_browser/features/desktop_icon_parser.hpp"
 
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -7,8 +11,21 @@
 namespace eh::file_browser {
 
 std::string parse_desktop_icon(const std::string& path) {
-  FILE* fp = fopen(path.c_str(), "r");
-  if (!fp) return {};
+  // Never block while scanning: a FIFO named "*.desktop" (like Steam's
+  // steam.pipe) would hang plain fopen("r") forever. Open non-blocking and
+  // only read regular files.
+  int fd = ::open(path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+  if (fd < 0) return {};
+  struct stat st{};
+  if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+    ::close(fd);
+    return {};
+  }
+  FILE* fp = fdopen(fd, "r");
+  if (!fp) {
+    ::close(fd);
+    return {};
+  }
 
   char line[512];
   bool in_entry = false;

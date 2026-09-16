@@ -42,6 +42,7 @@
 #include <fstream>
 #include <map>
 #include <set>
+#include <sstream>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -89,10 +90,27 @@ bool is_hidden_file(const std::string& name) {
 // (freedesktop convention, honored by Dolphin/Nemo).
 std::unordered_set<std::string> read_hidden_file(const std::string& dir) {
   std::unordered_set<std::string> names;
-  std::ifstream f(dir + "/.hidden");
-  if (!f.is_open()) return names;
+  // Never block while scanning: a FIFO named ".hidden" would hang a plain
+  // ifstream open forever. Open non-blocking and only read regular files.
+  int fd = ::open((dir + "/.hidden").c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+  if (fd < 0) return names;
+  struct stat st{};
+  if (::fstat(fd, &st) != 0 || !S_ISREG(st.st_mode)) {
+    ::close(fd);
+    return names;
+  }
+  std::string data;
+  char buf[8192];
+  for (;;) {
+    ssize_t n = ::read(fd, buf, sizeof(buf));
+    if (n <= 0) break;
+    data.append(buf, static_cast<size_t>(n));
+    if (data.size() > (1u << 20)) break;  // safety cap; .hidden files are tiny
+  }
+  ::close(fd);
+  std::istringstream in(data);
   std::string line;
-  while (std::getline(f, line)) {
+  while (std::getline(in, line)) {
     while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
     if (!line.empty()) names.insert(line);
   }

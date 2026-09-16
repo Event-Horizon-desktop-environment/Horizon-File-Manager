@@ -336,22 +336,34 @@ FileType detect_file_type(const std::string& name, bool is_dir,
     }
   }
 
-  // Content-sniffing fallback for directory browsing (not search results)
+  // Content-sniffing fallback for directory browsing (not search results).
+  // Must never block: a FIFO with no writer (e.g. ~/.steam/steam.pipe) hangs
+  // plain open(O_RDONLY) forever, which would freeze the directory scan. Open
+  // non-blocking and only sniff regular files — pipes, sockets and devices
+  // are skipped before any read.
   if (!full_path.empty()) {
-    FILE* fp = fopen(full_path.c_str(), "rb");
-    if (fp) {
-      unsigned char buf[512];
-      size_t n = fread(buf, 1, sizeof(buf), fp);
-      fclose(fp);
-
-      gboolean uncertain = FALSE;
-      gchar* ct = g_content_type_guess(name.c_str(), buf, n, &uncertain);
-      if (ct) {
-        std::string mime(ct);
-        g_free(ct);
-        FileType ft = mime_to_file_type(mime);
-        if (ft != FileType::File) return ft;
+    int fd = ::open(full_path.c_str(), O_RDONLY | O_NONBLOCK | O_CLOEXEC);
+    if (fd >= 0) {
+      struct stat st{};
+      if (::fstat(fd, &st) == 0 && S_ISREG(st.st_mode)) {
+        unsigned char buf[512];
+        ssize_t n = ::read(fd, buf, sizeof(buf));
+        if (n > 0) {
+          gboolean uncertain = FALSE;
+          gchar* ct =
+              g_content_type_guess(name.c_str(), buf, n, &uncertain);
+          if (ct) {
+            std::string mime(ct);
+            g_free(ct);
+            FileType ft = mime_to_file_type(mime);
+            if (ft != FileType::File) {
+              ::close(fd);
+              return ft;
+            }
+          }
+        }
       }
+      ::close(fd);
     }
   }
 
