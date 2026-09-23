@@ -496,6 +496,7 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
             DeferredCall::callLater([&app, ok, mnt, iso]() {
               if (ok && !mnt.empty()) {
                 app.operation_status = "Mounted";
+                app.operation_status_expires_ms = menu_expiry_3s();
                 app.sidebar_needs_refresh = true;
                 app.computer_needs_refresh = true;
                 navigate_to(app, mnt);
@@ -556,8 +557,10 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
       app.compress_name_cursor = static_cast<int>(app.compress_name_buf.size());
       app.compress_format = 1; // tar.gz
       app.compress_level = 6;
+      app.compress_threads = 0; // Auto
       app.compress_hover_format = -1;
       app.compress_hover_level = -1;
+      app.compress_hover_threads = -1;
       app.compress_hover_btn = -1;
       app.compress_dialog_open = true;
       draw(app);

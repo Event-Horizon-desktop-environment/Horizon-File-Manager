@@ -100,8 +100,13 @@ void open_settings(AppState& app) {
 }
 
 // Bridge the session per-directory state map into the persisted config struct.
+// `independent` is the flag value being saved (live state for immediate
+// controls, pending dialog value for Apply) — the current folder is only
+// snapshotted when we navigate AWAY (remember_independent_view), which never
+// happens for the last folder visited, so capture it live here or its zoom
+// would never reach the disk.
 static void dir_views_to_config(eh::config::FileBrowserSettings& fbs,
-                                const AppState& app) {
+                                const AppState& app, bool independent) {
   fbs.dir_views.clear();
   fbs.dir_views.reserve(app.dir_view_states.size() + 1);
   for (const auto& [path, st] : app.dir_view_states) {
@@ -117,7 +122,7 @@ static void dir_views_to_config(eh::config::FileBrowserSettings& fbs,
   // The folder we're sitting in is only snapshotted when we navigate AWAY
   // (remember_independent_view), which never happens for the last folder we
   // visit — so capture it live here or its zoom would never reach the disk.
-  if (app.independent_dir_views) {
+  if (independent) {
     const std::string& cur = app.cur_tab().current_path;
     if (!cur.empty() && cur != "computer://" && cur != "trash://" &&
         cur.rfind("recent://", 0) != 0) {
@@ -183,7 +188,7 @@ void save_file_browser_settings(AppState& app) {
   fbs.show_hidden = app.show_hidden;
   fbs.favorites = app.favorites;
   fbs.window_controls_left = app.window_controls_left;
-  dir_views_to_config(fbs, app);
+  dir_views_to_config(fbs, app, app.independent_dir_views);
   (void)eh::config::write_file_browser_toml(fbs);
   reload_settings_from_config(app);
 }
@@ -218,7 +223,7 @@ void settings_apply(AppState& app) {
   fbs.show_hidden = app.show_hidden;
   fbs.favorites = app.favorites;
   fbs.independent_dir_views = app.settings_independent_dir_views;
-  dir_views_to_config(fbs, app);
+  dir_views_to_config(fbs, app, app.settings_independent_dir_views);
   (void)eh::config::write_file_browser_toml(fbs);
 
   // Terminal preference is a global setting — update the main config

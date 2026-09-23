@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -14,6 +15,7 @@ enum class OperationType : uint8_t {
   Copy,
   Move,
   Extract,
+  Compress,
 };
 
 struct OperationProgress {
@@ -25,7 +27,22 @@ struct OperationProgress {
   std::atomic<int> copied_files{0};
   std::atomic<uint64_t> total_bytes{0};
   std::atomic<uint64_t> done_bytes{0};
+  // Written on worker threads, read on the UI draw thread: guarded because
+  // std::string is not safe for concurrent read/write.
   std::string current_file;
+  mutable std::mutex current_file_mtx;
+  void set_current_file(std::string v) {
+    std::lock_guard<std::mutex> lock(current_file_mtx);
+    current_file = std::move(v);
+  }
+  void clear_current_file() {
+    std::lock_guard<std::mutex> lock(current_file_mtx);
+    current_file.clear();
+  }
+  std::string get_current_file() const {
+    std::lock_guard<std::mutex> lock(current_file_mtx);
+    return current_file;
+  }
   OperationType type{OperationType::Copy};
   std::chrono::steady_clock::time_point start_time;
 

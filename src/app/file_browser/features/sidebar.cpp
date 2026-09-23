@@ -47,18 +47,26 @@ static std::string xdg_user_dir(const char* env, const char* fallback) {
 }
 
 // Whether the system trash contains anything (drives the full/empty icon).
+// Cached with a 1 s TTL: called per trash row per frame, and a directory
+// scan per frame is pure waste for state that changes on user action.
 static bool trash_has_files() {
+  using clock = std::chrono::steady_clock;
+  static bool cached = false;
+  static clock::time_point expires{};
+  auto now = clock::now();
+  if (now < expires) return cached;
+  expires = now + std::chrono::seconds(1);
   const char* home = std::getenv("HOME");
-  if (!home) return false;
+  if (!home) return (cached = false);
   fs::path trash_files = fs::path(home) / ".local/share/Trash/files";
   std::error_code ec;
   fs::directory_iterator it(trash_files, ec);
-  if (ec) return false;
+  if (ec) return (cached = false);
   for (auto& entry : it) {
     (void)entry;
-    return true;
+    return (cached = true);
   }
-  return false;
+  return (cached = false);
 }
 
 }  // namespace

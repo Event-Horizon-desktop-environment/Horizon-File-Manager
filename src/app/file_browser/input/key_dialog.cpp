@@ -38,6 +38,70 @@ namespace fs = std::filesystem;
 namespace xdg = eh::shell::desktop::xdg;
 
 namespace eh::file_browser {
+// ── UTF-8 cursor helpers (byte offset ↔ codepoint boundary) ────────────────
+// Buffers are UTF-8 std::string with cursor stored as a byte offset. Moving or
+// erasing by a single byte splits multi-byte codepoints and leaves invalid
+// UTF-8 behind (renders as a tofu box). These step by whole codepoints.
+static int utf8_prev_pos(const std::string& s, int pos) {
+  if (pos <= 0) return 0;
+  int n = static_cast<int>(s.size());
+  if (pos > n) pos = n;
+  --pos;
+  while (pos > 0 &&
+         (static_cast<unsigned char>(s[static_cast<std::size_t>(pos)]) & 0xC0) == 0x80)
+    --pos;
+  return pos;
+}
+
+static int utf8_next_pos(const std::string& s, int pos) {
+  if (pos < 0) return 0;
+  int n = static_cast<int>(s.size());
+  if (pos >= n) return n;
+  ++pos;
+  while (pos < n &&
+         (static_cast<unsigned char>(s[static_cast<std::size_t>(pos)]) & 0xC0) == 0x80)
+    ++pos;
+  return pos;
+}
+
+static int word_prev_pos(const std::string& s, int pos) {
+  int p = pos;
+  int n = static_cast<int>(s.size());
+  if (p > n) p = n;
+  // Skip spaces/tabs backwards, then the word itself.
+  while (p > 0 && (s[static_cast<std::size_t>(p - 1)] == ' ' ||
+                   s[static_cast<std::size_t>(p - 1)] == '\t'))
+    p = utf8_prev_pos(s, p);
+  while (p > 0 && s[static_cast<std::size_t>(p - 1)] != ' ' &&
+         s[static_cast<std::size_t>(p - 1)] != '\t')
+    p = utf8_prev_pos(s, p);
+  return p;
+}
+
+static int word_next_pos(const std::string& s, int pos) {
+  int p = pos;
+  int n = static_cast<int>(s.size());
+  if (p < 0) p = 0;
+  if (p > n) p = n;
+  while (p < n && (s[static_cast<std::size_t>(p)] == ' ' ||
+                  s[static_cast<std::size_t>(p)] == '\t'))
+    p = utf8_next_pos(s, p);
+  while (p < n && s[static_cast<std::size_t>(p)] != ' ' &&
+         s[static_cast<std::size_t>(p)] != '\t')
+    p = utf8_next_pos(s, p);
+  return p;
+}
+
+static void clamp_cursor(const std::string& s, int& cursor) {
+  int n = static_cast<int>(s.size());
+  if (cursor < 0) cursor = 0;
+  if (cursor > n) cursor = n;
+  // Snap inside-codepoint positions back to a boundary so substr() stays
+  // valid UTF-8 (prevents tofu boxes in cairo).
+  while (cursor > 0 && cursor < n &&
+         (static_cast<unsigned char>(s[static_cast<std::size_t>(cursor)]) & 0xC0) == 0x80)
+    --cursor;
+}
 // ── key region handlers, in original flow order ─────────────────────────────
 
 bool key_properties(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
@@ -733,19 +797,34 @@ bool key_rename_ui(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
       }
       return true;
     }
-    if (sym == XKB_KEY_BackSpace && !app.rename_ui_buf.empty()) {
+    if (sym == XKB_KEY_BackSpace) {
+      // Always consume while the dialog is open so a press on an empty buffer
+      // or at column 0 never leaks to navigate_up() behind the dialog.
       if (app.rename_ui_sel_start >= 0 && app.rename_ui_sel_start != app.rename_ui_sel_end) {
         int a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
         int b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
-        app.rename_ui_buf.erase(a, b - a);
+        clamp_cursor(app.rename_ui_buf, a);
+        clamp_cursor(app.rename_ui_buf, b);
+        app.rename_ui_buf.erase(static_cast<std::size_t>(a), static_cast<std::size_t>(b - a));
         app.rename_ui_cursor_pos = a;
         app.rename_ui_sel_start = -1;
         app.rename_ui_sel_end = -1;
       } else if (app.rename_ui_cursor_pos > 0) {
-        app.rename_ui_buf.erase(app.rename_ui_cursor_pos - 1, 1);
-        --app.rename_ui_cursor_pos;
+        clamp_cursor(app.rename_ui_buf, app.rename_ui_cursor_pos);
+        if (ctrl) {
+          int p = word_prev_pos(app.rename_ui_buf, app.rename_ui_cursor_pos);
+          app.rename_ui_buf.erase(static_cast<std::size_t>(p),
+                                  static_cast<std::size_t>(app.rename_ui_cursor_pos - p));
+          app.rename_ui_cursor_pos = p;
+        } else {
+          int p = utf8_prev_pos(app.rename_ui_buf, app.rename_ui_cursor_pos);
+          app.rename_ui_buf.erase(static_cast<std::size_t>(p),
+                                  static_cast<std::size_t>(app.rename_ui_cursor_pos - p));
+          app.rename_ui_cursor_pos = p;
+        }
       }
-      if (app.rename_ui_buf.empty())
+      clamp_cursor(app.rename_ui_buf, app.rename_ui_cursor_pos);
+      if (app.rename_ui_buf.empty() || app.rename_ui_cursor_pos <= 0)
         app.key_repeat_sym = 0;
       else
         { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
@@ -754,55 +833,99 @@ bool key_rename_ui(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
       draw(app);
       return true;
     }
-    if (sym == XKB_KEY_Delete && !app.rename_ui_buf.empty()) {
+    if (sym == XKB_KEY_Delete) {
+      // Always consume; at end-of-text Delete is a no-op (never pop_back).
+      bool erased = false;
       if (app.rename_ui_sel_start >= 0 && app.rename_ui_sel_start != app.rename_ui_sel_end) {
         int a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
         int b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
-        app.rename_ui_buf.erase(a, b - a);
+        clamp_cursor(app.rename_ui_buf, a);
+        clamp_cursor(app.rename_ui_buf, b);
+        app.rename_ui_buf.erase(static_cast<std::size_t>(a), static_cast<std::size_t>(b - a));
         app.rename_ui_cursor_pos = a;
         app.rename_ui_sel_start = -1;
         app.rename_ui_sel_end = -1;
-      } else if (app.rename_ui_cursor_pos < static_cast<int>(app.rename_ui_buf.size()))
-        app.rename_ui_buf.erase(app.rename_ui_cursor_pos, 1);
+        erased = true;
+      } else if (app.rename_ui_cursor_pos < static_cast<int>(app.rename_ui_buf.size())) {
+        clamp_cursor(app.rename_ui_buf, app.rename_ui_cursor_pos);
+        if (ctrl) {
+          int p = word_next_pos(app.rename_ui_buf, app.rename_ui_cursor_pos);
+          app.rename_ui_buf.erase(static_cast<std::size_t>(app.rename_ui_cursor_pos),
+                                  static_cast<std::size_t>(p - app.rename_ui_cursor_pos));
+        } else {
+          int p = utf8_next_pos(app.rename_ui_buf, app.rename_ui_cursor_pos);
+          app.rename_ui_buf.erase(static_cast<std::size_t>(app.rename_ui_cursor_pos),
+                                  static_cast<std::size_t>(p - app.rename_ui_cursor_pos));
+        }
+        erased = true;
+      }
+      clamp_cursor(app.rename_ui_buf, app.rename_ui_cursor_pos);
+      if (app.rename_ui_buf.empty() || !erased)
+        app.key_repeat_sym = 0;
       else
-        app.rename_ui_buf.pop_back();
-      if (app.rename_ui_cursor_pos > static_cast<int>(app.rename_ui_buf.size()))
-        app.rename_ui_cursor_pos = static_cast<int>(app.rename_ui_buf.size());
-      { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
-        app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
-        app.key_repeat_last_ms = app.key_repeat_start_ms; }
+        { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
+          app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
+          app.key_repeat_last_ms = app.key_repeat_start_ms; }
       draw(app);
       return true;
     }
-    if (sym == XKB_KEY_Left && app.rename_ui_cursor_pos > 0) {
-      if (shift) {
-        if (app.rename_ui_sel_start < 0) app.rename_ui_sel_start = app.rename_ui_cursor_pos;
-        --app.rename_ui_cursor_pos;
-        app.rename_ui_sel_end = app.rename_ui_cursor_pos;
-      } else {
-        --app.rename_ui_cursor_pos;
+    if (sym == XKB_KEY_Left) {
+      // Always consume so the file selection behind the dialog never moves.
+      clamp_cursor(app.rename_ui_buf, app.rename_ui_cursor_pos);
+      bool moved = false;
+      if (app.rename_ui_cursor_pos > 0) {
+        int p = ctrl ? word_prev_pos(app.rename_ui_buf, app.rename_ui_cursor_pos)
+                     : utf8_prev_pos(app.rename_ui_buf, app.rename_ui_cursor_pos);
+        if (shift) {
+          if (app.rename_ui_sel_start < 0) app.rename_ui_sel_start = app.rename_ui_cursor_pos;
+          app.rename_ui_cursor_pos = p;
+          app.rename_ui_sel_end = app.rename_ui_cursor_pos;
+        } else {
+          app.rename_ui_cursor_pos = p;
+          app.rename_ui_sel_start = -1;
+          app.rename_ui_sel_end = -1;
+        }
+        moved = true;
+      } else if (!shift) {
         app.rename_ui_sel_start = -1;
         app.rename_ui_sel_end = -1;
       }
-      { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
-        app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
-        app.key_repeat_last_ms = app.key_repeat_start_ms; }
+      if (moved)
+        { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
+          app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
+          app.key_repeat_last_ms = app.key_repeat_start_ms; }
+      else
+        app.key_repeat_sym = 0;
       draw(app);
       return true;
     }
-    if (sym == XKB_KEY_Right && app.rename_ui_cursor_pos < static_cast<int>(app.rename_ui_buf.size())) {
-      if (shift) {
-        if (app.rename_ui_sel_start < 0) app.rename_ui_sel_start = app.rename_ui_cursor_pos;
-        ++app.rename_ui_cursor_pos;
-        app.rename_ui_sel_end = app.rename_ui_cursor_pos;
-      } else {
-        ++app.rename_ui_cursor_pos;
+    if (sym == XKB_KEY_Right) {
+      // Always consume; a space counts as a character and the cursor steps it.
+      clamp_cursor(app.rename_ui_buf, app.rename_ui_cursor_pos);
+      bool moved = false;
+      if (app.rename_ui_cursor_pos < static_cast<int>(app.rename_ui_buf.size())) {
+        int p = ctrl ? word_next_pos(app.rename_ui_buf, app.rename_ui_cursor_pos)
+                     : utf8_next_pos(app.rename_ui_buf, app.rename_ui_cursor_pos);
+        if (shift) {
+          if (app.rename_ui_sel_start < 0) app.rename_ui_sel_start = app.rename_ui_cursor_pos;
+          app.rename_ui_cursor_pos = p;
+          app.rename_ui_sel_end = app.rename_ui_cursor_pos;
+        } else {
+          app.rename_ui_cursor_pos = p;
+          app.rename_ui_sel_start = -1;
+          app.rename_ui_sel_end = -1;
+        }
+        moved = true;
+      } else if (!shift) {
         app.rename_ui_sel_start = -1;
         app.rename_ui_sel_end = -1;
       }
-      { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
-        app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
-        app.key_repeat_last_ms = app.key_repeat_start_ms; }
+      if (moved)
+        { auto _n = std::chrono::steady_clock::now(); app.key_repeat_sym = sym;
+          app.key_repeat_start_ms = std::chrono::duration_cast<std::chrono::milliseconds>(_n.time_since_epoch()).count();
+          app.key_repeat_last_ms = app.key_repeat_start_ms; }
+      else
+        app.key_repeat_sym = 0;
       draw(app);
       return true;
     }
@@ -833,21 +956,35 @@ bool key_rename_ui(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
       draw(app);
       return true;
     }
-    if (utf8 && utf8_len > 0 && utf8_len <= 4) {
+    if (utf8 && utf8_len > 0 && utf8_len <= 4 && !ctrl && !alt) {
+      const unsigned char c0 = static_cast<unsigned char>(utf8[0]);
+      // Never insert C0 controls / DEL (Tab, etc.) into a file name. They are
+      // swallowed so they can't leak to the browser or leave tofu behind.
+      // Multi-byte sequences (lead byte >= 0x80) are printable by definition.
+      const bool printable =
+          (utf8_len > 1) || (c0 >= 0x20 && c0 != 0x7f);
+      if (!printable) return true;
       if (app.rename_ui_sel_start >= 0 && app.rename_ui_sel_start != app.rename_ui_sel_end) {
         int a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
         int b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
-        app.rename_ui_buf.erase(a, b - a);
+        clamp_cursor(app.rename_ui_buf, a);
+        clamp_cursor(app.rename_ui_buf, b);
+        app.rename_ui_buf.erase(static_cast<std::size_t>(a), static_cast<std::size_t>(b - a));
         app.rename_ui_cursor_pos = a;
         app.rename_ui_sel_start = -1;
         app.rename_ui_sel_end = -1;
       }
-      app.rename_ui_buf.insert(app.rename_ui_cursor_pos, utf8, utf8_len);
+      clamp_cursor(app.rename_ui_buf, app.rename_ui_cursor_pos);
+      app.rename_ui_buf.insert(static_cast<std::size_t>(app.rename_ui_cursor_pos), utf8,
+                               static_cast<std::size_t>(utf8_len));
       app.rename_ui_cursor_pos += utf8_len;
+      clamp_cursor(app.rename_ui_buf, app.rename_ui_cursor_pos);
       draw(app);
       return true;
     }
-    return false;
+    // Modal: swallow anything else (Up/Down, F-keys, Ctrl+letter shortcuts…)
+    // so the browser behind the dialog never reacts while renaming.
+    return true;
   }
   return false;
 }

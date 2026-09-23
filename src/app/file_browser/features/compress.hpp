@@ -17,7 +17,17 @@ extern const CompressFormat kCompressFormats[kNumCompressFormats];
 
 std::string format_compress_cmd(const std::vector<std::string>& source_paths,
                                  const std::string& archive_path,
-                                 int format_idx, int level);
+                                 int format_idx, int level, int threads);
+
+// Thread choices for the dialog (0 = Auto). Powers of two plus the detected
+// hardware count as the max, so Auto and the top button both mean "all cores".
+std::vector<int> compress_thread_options();
+// Hardware threads, always >= 1 (falls back to 4 when undetectable).
+unsigned compress_hw_threads();
+// Resolve 0=Auto to hardware threads, clamped to >= 1.
+int compress_effective_threads(int threads);
+// Button width for the threads row given the option count (fits 380px).
+int compress_thread_btn_w(int count);
 
 bool is_archive_extension(const std::string& path);
 bool is_iso_image(const std::string& path);

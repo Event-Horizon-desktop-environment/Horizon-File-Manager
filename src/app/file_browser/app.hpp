@@ -209,6 +209,11 @@ void check_hover_tooltip(AppState& app);
 void toggle_space_preview(AppState& app);
 /// Activate (or switch) space preview — does not toggle off.
 void activate_space_preview(AppState& app);
+/// True only for types with a real preview renderer (image/video/audio thumb,
+/// text/code/markdown snippet, PDF/EPUB cover). Archives (.tar.xz, .zip…),
+/// fonts, web, executables and non-PDF/EPUB documents have no renderer and
+/// must not arm any preview.
+bool is_supported_preview(const FileEntry& e);
 
 /// Create a new tab (clones current navigation state).
 void new_tab(AppState& app);

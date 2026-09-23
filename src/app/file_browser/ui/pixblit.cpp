@@ -16,17 +16,24 @@ namespace eh::file_browser {
 namespace {
 
 // One premultiplied ARGB32 src-over dst pixel, rounded like pixman's 8.8
-// blend: out = src + (dst * (255 - srcA) + 0x80) >> 8, per channel.
+// blend: out = src + (dst * (255 - srcA) + 0x80) >> 8, per channel,
+// saturated to 255 like pixman (packus in the SIMD path below). Saturation
+// only triggers for invalid (superluminescent) src pixels; valid
+// premultiplied input can never exceed 255, so this is a no-op there.
 inline uint32_t over_pixel(uint32_t dst, uint32_t src) {
   const unsigned a = (src >> 24) & 0xffu;
   const unsigned m = 255u - a;
   auto scale = [m](unsigned ch) { return (ch * m + 0x80u) >> 8; };
+  auto add_sat = [](unsigned s, unsigned dscaled) {
+    unsigned v = s + dscaled;
+    return v > 255u ? 255u : v;
+  };
   const unsigned sa = (src >> 24) & 0xffu;
   const unsigned da = (dst >> 24) & 0xffu;
-  return ((sa + scale(da)) << 24) |
-         (((src >> 16) & 0xffu) + scale((dst >> 16) & 0xffu)) << 16 |
-         (((src >> 8) & 0xffu) + scale((dst >> 8) & 0xffu)) << 8 |
-         (((src) & 0xffu) + scale((dst) & 0xffu));
+  return (add_sat(sa, scale(da)) << 24) |
+         (add_sat((src >> 16) & 0xffu, scale((dst >> 16) & 0xffu)) << 16) |
+         (add_sat((src >> 8) & 0xffu, scale((dst >> 8) & 0xffu)) << 8) |
+         add_sat(src & 0xffu, scale(dst & 0xffu));
 }
 
 }  // namespace

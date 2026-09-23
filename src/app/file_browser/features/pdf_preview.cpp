@@ -5,6 +5,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <cstdarg>
 #include <cstdint>
@@ -12,10 +13,14 @@
 #include <ctime>
 #include <string>
 
+#include "../trace.hpp"
+
 namespace eh::file_browser {
 namespace {
 
 void pdf_log(const char* fmt, ...) {
+  // Gated: was an unconditional fopen/write/fclose + localtime per thumbnail.
+  if (!trace::enabled().load(std::memory_order_relaxed)) return;
   FILE* f = fopen("/tmp/horizon-files.log", "a");
   if (!f) return;
   timespec ts{};

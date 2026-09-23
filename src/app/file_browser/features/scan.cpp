@@ -147,6 +147,9 @@ static void natural_key(const std::string& name, std::string& out) {
 
 struct EntryLess {
   const ScanParams* sp;
+  // Snapshot once per sort: group_rank(Date) must not call time() per
+  // comparison (O(n log n) syscalls). Set at every construction site.
+  std::time_t now = 0;
   // Group By rank helper (field: 0=None 1=Type 2=Name 3=Date 4=Size)
   int group_rank(const FileEntry& e) const {
     switch (sp->group_field) {
@@ -157,8 +160,8 @@ struct EntryLess {
         return (c0 >= 'a' && c0 <= 'z') ? c0 : ('z' + 1);
       }
       case 3: {
-        std::time_t now = std::time(nullptr);
-        double age_s = difftime(now, e.modified_sec);
+        std::time_t t = now ? now : std::time(nullptr);
+        double age_s = difftime(t, e.modified_sec);
         if (age_s < 0) age_s = 0;
         if (age_s < 86400) return 0;                     // Today
         if (age_s < 172800) return 1;                    // Yesterday
@@ -265,7 +268,7 @@ struct EntryLess {
 };
 
 static void sort_entries(std::vector<FileEntry>& entries, const ScanParams& sp) {
-  std::sort(entries.begin(), entries.end(), EntryLess{&sp});
+  std::sort(entries.begin(), entries.end(), EntryLess{&sp, std::time(nullptr)});
 }
 
 // Per-directory-entry raw data captured from readdir()/getdents64.
@@ -752,7 +755,7 @@ static void sort_entries_parallel(std::vector<FileEntry>& entries,
         size_t hi = std::min(n, lo + chunk);
         pool.emplace_back([&entries, lo, hi, &sp] {
           std::sort(entries.begin() + static_cast<long>(lo),
-                    entries.begin() + static_cast<long>(hi), EntryLess{&sp});
+                    entries.begin() + static_cast<long>(hi), EntryLess{&sp, std::time(nullptr)});
         });
       }
       for (auto& t : pool) t.join();
@@ -762,7 +765,7 @@ static void sort_entries_parallel(std::vector<FileEntry>& entries,
       size_t cut = k * chunk;
       if (cut >= n) break;
       std::inplace_merge(b, b + static_cast<long>(cut),
-                         entries.end(), EntryLess{&sp});
+                         entries.end(), EntryLess{&sp, std::time(nullptr)});
     }
     return;
   }
@@ -785,7 +788,7 @@ static void sort_entries_parallel(std::vector<FileEntry>& entries,
     for (auto& t : pool) t.join();
   }
 
-  EntryLess less{&sp};
+  EntryLess less{&sp, std::time(nullptr)};
 
   std::vector<uint32_t> idx(n);
   for (size_t i = 0; i < n; ++i) idx[i] = static_cast<uint32_t>(i);
@@ -1300,7 +1303,7 @@ void reload_dir(AppState& app) {
         tab.group_field = dp.group_field;
         tab.group_by_type = (dp.group_field == 1);
       }
-      if (dp.has_zoom && dp.zoom_level >= 0 && dp.zoom_level <= 16)
+      if (dp.has_zoom && dp.zoom_level >= 0 && dp.zoom_level < kZoomLevelCount)
         apply_zoom_pct(app, zoom_pct_for_level(dp.zoom_level));
       if (dp.has_hidden) app.show_hidden = dp.show_hidden;
     }

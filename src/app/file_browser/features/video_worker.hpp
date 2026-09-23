@@ -5,6 +5,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstddef>
+#include <map>
 #include <mutex>
 #include <queue>
 #include <set>
@@ -48,13 +49,18 @@ private:
 
   void thread_main(int thread_id);
 
-  static constexpr int kNumThreads = 6;
+  // Two decoders: video spawns are the heaviest per-item cost in the app
+  // (fork+exec+demux+seek); six concurrent decodes thrashed on scroll.
+  static constexpr int kNumThreads = 2;
 
   std::vector<std::thread> m_threads;
   std::mutex m_in_mutex;
   std::condition_variable m_in_cv;
   std::queue<WorkItem> m_in;
-  std::set<std::string> m_pending;
+  // Pending thumb requests by path -> largest max_px requested so far. A
+  // later hover (500px) upgrades an already-queued grid request (128px)
+  // instead of being dropped, so one spawn serves both.
+  std::map<std::string, int> m_pending;
   std::set<std::string> m_prev_pending;
 
   std::mutex m_out_mutex;

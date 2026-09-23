@@ -393,7 +393,7 @@ bool click_compress(AppState& app, int x, int y, int button) {
   // ── Compress dialog clicks ──
   if (app.compress_dialog_open) {
     int dlg_w = 420;
-    int dlg_h = 310;
+    int dlg_h = 372;
     int dlg_x = (app.width - dlg_w) / 2;
     int dlg_y = (app.height - dlg_h) / 2;
     int content_x = dlg_x + 20;
@@ -441,6 +441,21 @@ bool click_compress(AppState& app, int x, int y, int button) {
         int lx = content_x + i * (lvl_btn_w + lvl_gap);
         if (x >= lx && x < lx + lvl_btn_w && y >= lvl_btn_y && y < lvl_btn_y + lvl_btn_h) {
           app.compress_level = kLevelValues[i];
+          draw(app);
+          return true;
+        }
+      }
+
+      // Threads buttons
+      const std::vector<int> thread_opts = compress_thread_options();
+      int th_btn_y = lvl_btn_y + lvl_btn_h + 12 + 18;
+      int th_btn_w = compress_thread_btn_w(static_cast<int>(thread_opts.size()));
+      int th_btn_h = 28;
+      int th_gap = 8;
+      for (size_t ti = 0; ti < thread_opts.size(); ++ti) {
+        int tx = content_x + static_cast<int>(ti) * (th_btn_w + th_gap);
+        if (x >= tx && x < tx + th_btn_w && y >= th_btn_y && y < th_btn_y + th_btn_h) {
+          app.compress_threads = thread_opts[ti];
           draw(app);
           return true;
         }

@@ -334,3 +334,50 @@ icon_cache_test = executable(
 )
 
 test('icon_cache', icon_cache_test)
+
+pixblit_test = executable(
+  'test_pixblit',
+  'tests/test_pixblit.cpp',
+  'src/app/file_browser/ui/pixblit.cpp',
+  include_directories: inc,
+  cpp_args: test_cpp_args,
+  dependencies: [dep_cairo],
+)
+
+test('pixblit', pixblit_test)
+
+# Headless paint benchmark (manual run, not a pass/fail test): same sources
+# as horizon-files minus standalone_main (bench_paint has its own main()).
+bench_lib_sources = []
+foreach f : sources
+  if not f.full_path().endswith('standalone_main.cpp')
+    bench_lib_sources += f
+  endif
+endforeach
+
+bench_paint_exe = executable(
+  'bench_paint',
+  bench_lib_sources,
+  'tests/bench_paint.cpp',
+  include_directories: inc,
+  cpp_args: test_cpp_args,
+  dependencies: [
+    dep_wayland,
+    dep_cairo,
+    dep_pango,
+    dep_xkbcommon,
+    dep_glib,
+    dep_webp,
+    dep_jpeg,
+    dep_openssl,
+    dep_poppler,
+    dep_archive,
+    dep_librsvg,
+    dep_sdbus,
+    dep_fontconfig,
+    dep_uring,
+    eh_material_colors_dep,
+  ],
+  install: false,
+  build_by_default: false,
+)

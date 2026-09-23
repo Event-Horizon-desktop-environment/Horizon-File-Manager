@@ -348,18 +348,21 @@ bool key_global_shortcuts(AppState& app, uint32_t sym, bool ctrl, bool shift, bo
 
   if (ctrl && (sym == XKB_KEY_equal || sym == XKB_KEY_KP_Add)) {
     step_zoom(app, +1);
+    save_file_browser_settings(app);
     draw(app);
     return true;
   }
 
   if (ctrl && (sym == XKB_KEY_minus || sym == XKB_KEY_KP_Subtract)) {
     step_zoom(app, -1);
+    save_file_browser_settings(app);
     draw(app);
     return true;
   }
 
   if (ctrl && (sym == XKB_KEY_0 || sym == XKB_KEY_KP_0)) {
     apply_zoom_pct(app, 100.0);
+    save_file_browser_settings(app);
     draw(app);
     return true;
   }

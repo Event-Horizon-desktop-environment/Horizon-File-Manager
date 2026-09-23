@@ -65,7 +65,7 @@ static void copy_recursive(const fs::path& src, const fs::path& dest,
       prog->progress.store(total > 0 ? static_cast<double>(done.load()) / total : 0.0);
       uint64_t file_sz = fs::file_size(src, ec);
       prog->done_bytes.fetch_add(file_sz);
-      prog->current_file = src.filename().string();
+      prog->set_current_file(src.filename().string());
     }
   }
 }
@@ -104,7 +104,7 @@ static void do_operation(std::vector<std::string> src_paths,
       if (si < dst_names.size() && !dst_names[si].empty())
         fname = dst_names[si];
       fs::path dest = fs::path(dest_dir) / fname;
-      prog->current_file = src_path.filename().string();
+      prog->set_current_file(src_path.filename().string());
 
       if (is_move) {
         std::error_code ec;
@@ -132,7 +132,7 @@ static void do_operation(std::vector<std::string> src_paths,
   }
 
   prog->active = false;
-  prog->current_file.clear();
+  prog->clear_current_file();
 
 done:
   bool cancelled = prog->cancel.load();

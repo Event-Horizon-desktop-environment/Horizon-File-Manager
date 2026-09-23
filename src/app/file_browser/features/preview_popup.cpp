@@ -211,15 +211,30 @@ static int overlay_target_idx(const AppState& app) {
   return -1;
 }
 
+// Types with a real preview renderer. Mirrors the decode paths below (image /
+// video / audio thumbs, PDF/EPUB covers, text snippets). Everything else —
+// archives (.tar.xz, .zip…), fonts, web, executables, non-PDF/EPUB documents,
+// unknown files — has no renderer and must not arm any preview.
+bool is_supported_preview(const FileEntry& e) {
+  switch (e.type) {
+    case FileType::Image:
+    case FileType::Video:
+    case FileType::Audio:
+    case FileType::Text:
+    case FileType::Markdown:
+    case FileType::Code:
+      return true;
+    case FileType::Document:
+      return is_pdf_extension(e.path) || is_epub_extension(e.path);
+    default:
+      return false;
+  }
+}
+
 // Types that get a live hover preview (mirrors the arming conditions in
 // pointer.cpp — keep in sync when a type is added or removed).
 static bool is_previewable_entry(const FileEntry& e) {
-  return e.type == FileType::Image || e.type == FileType::Video ||
-         e.type == FileType::Audio || e.type == FileType::Text ||
-         e.type == FileType::Document || e.type == FileType::Code ||
-         e.type == FileType::Archive || e.type == FileType::Web ||
-         e.type == FileType::Font || e.type == FileType::Executable ||
-         e.type == FileType::Markdown;
+  return is_supported_preview(e);
 }
 
 // Anchor point for popup placement: the cursor when mouse-driven, otherwise
@@ -817,7 +832,13 @@ void activate_space_preview(AppState& app) {
   if (ri < 0 || ri >= static_cast<int>(app.cur_tab().entries.size())) return;
   const auto& entry = app.cur_tab().entries[ri];
 
-  if (entry.is_dir) return;
+  // No renderer for dirs or unsupported types (archives like .tar.xz, fonts,
+  // web, executables, non-PDF/EPUB docs): close any open preview and open
+  // nothing.
+  if (entry.is_dir || !is_supported_preview(entry)) {
+    reset_preview(app);
+    return;
+  }
 
   reset_preview(app);
 

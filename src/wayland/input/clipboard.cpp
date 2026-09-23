@@ -270,6 +270,12 @@ bool ClipboardService::bind(void* manager, const DataControlOps* ops, wl_seat* s
 }
 
 void ClipboardService::cleanup() {
+  if (ops_) {
+    for (auto& [offer, _] : offerMimes_) {
+      if (offer && offer != selectionOffer_) ops_->destroyOffer(offer);
+    }
+    if (selectionOffer_) ops_->destroyOffer(selectionOffer_);
+  }
   selectionOffer_ = nullptr;
   selectionMimes_.clear();
   offerMimes_.clear();
@@ -384,6 +390,10 @@ void ClipboardService::handle_selection(void* offer) {
     auto it = offerMimes_.find(offer);
     if (it != offerMimes_.end()) {
       selectionMimes_ = it->second;
+    } else {
+      // Offer advanced before its mime events arrived: never advertise the
+      // previous offer's types or pastes request the wrong payload.
+      selectionMimes_.clear();
     }
     // Prune stale offers so the map can't grow without bound. Keep the live
     // selection offer plus a few recent ones; destroy the rest.
@@ -532,9 +542,7 @@ bool ClipboardService::copy_files(bool cut, const std::vector<std::string>& abs_
     if (!plain.empty()) plain += "\n";
     plain += canon;
   }
-  if (gnome.size() <= 4 && gnome[0] != '/' && abs_paths.size() > 1) return false;
-  // gnome at least has "cut\n" or "copy\n" (4 chars) — if only header, no valid paths
-  if (gnome.size() < 6) return false;
+  if (gnome.size() < 6) return false;  // header only ("cut\n"/"copy\n"), no paths
 
   outgoingData_.clear();
   outgoingData_[std::string(kGnomeCopiedFiles)] = std::vector<char>(gnome.begin(), gnome.end());

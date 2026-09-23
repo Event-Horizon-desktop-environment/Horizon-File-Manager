@@ -9,6 +9,47 @@
 
 namespace eh::shell::desktop::xdg {
 
+namespace {
+
+// Single-quote a shell argument so paths with spaces, quotes, $ or ` cannot
+// break out into command injection.
+std::string sh_quote(const std::string& s) {
+  std::string out = "'";
+  for (char c : s) {
+    if (c == '\'')
+      out += "'\\''";
+    else
+      out += c;
+  }
+  out += '\'';
+  return out;
+}
+
+std::string percent_decode(const std::string& s) {
+  auto hex = [](char c) -> int {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+  };
+  std::string out;
+  out.reserve(s.size());
+  for (size_t i = 0; i < s.size(); ++i) {
+    if (s[i] == '%' && i + 2 < s.size()) {
+      int hi = hex(s[i + 1]), lo = hex(s[i + 2]);
+      if (hi >= 0 && lo >= 0) {
+        out.push_back(static_cast<char>((hi << 4) | lo));
+        i += 2;
+        continue;
+      }
+    }
+    out.push_back(s[i]);
+  }
+  return out;
+}
+
+}  // namespace
+
 std::string canonical_absolute_path(const std::string& path) { return path; }
 
 std::string file_uri_for_path(const std::string& abs_path) {
@@ -20,16 +61,16 @@ std::string expand_desktop_exec_tokens(std::string exec, const std::string&, con
 }
 
 void spawn_sh_lc_detached(const std::string& script) {
-  std::system(("sh -c '" + script + "' &").c_str());
+  std::system(("sh -c " + sh_quote(script) + " &").c_str());
 }
 
 void open_path_in_default_application(const std::string& abs_path) {
-  std::string cmd = "xdg-open " + abs_path + " &";
+  std::string cmd = "xdg-open " + sh_quote(abs_path) + " &";
   std::system(cmd.c_str());
 }
 
 void open_uri(const std::string& uri) {
-  std::string cmd = "xdg-open '" + uri + "' &";
+  std::string cmd = "xdg-open " + sh_quote(uri) + " &";
   std::system(cmd.c_str());
 }
 
@@ -43,7 +84,7 @@ void open_file_location(const std::string& desktop_abs_path, const DesktopEntryI
   auto slash = desktop_abs_path.rfind('/');
   if (slash != std::string::npos) {
     std::string dir = desktop_abs_path.substr(0, slash);
-    std::string cmd = "horizon-files '" + dir + "' &";
+    std::string cmd = "horizon-files " + sh_quote(dir) + " &";
     std::system(cmd.c_str());
   }
 }
@@ -57,7 +98,7 @@ bool clipboard_paste_into_directory(const std::string&, std::vector<std::string>
 }
 
 bool trash_file(const std::string& abs_path) {
-  std::string cmd = "gio trash '" + abs_path + "' 2>/dev/null";
+  std::string cmd = "gio trash " + sh_quote(abs_path) + " 2>/dev/null";
   return std::system(cmd.c_str()) == 0;
 }
 
@@ -87,10 +128,19 @@ bool restore_from_trash(const std::string& trash_file_path) {
 
   if (original_path.empty()) return false;
 
-  std::string mkdir_cmd = "mkdir -p '" + original_path.substr(0, original_path.rfind('/')) + "' 2>/dev/null";
+  // .trashinfo stores Path= percent-encoded (spaces as %20); decode it or
+  // restore fails, and never silently overwrite an existing destination.
+  original_path = percent_decode(original_path);
+  if (original_path.empty()) return false;
+  {
+    std::ifstream probe(original_path);
+    if (probe.is_open()) return false;
+  }
+
+  std::string mkdir_cmd = "mkdir -p " + sh_quote(original_path.substr(0, original_path.rfind('/'))) + " 2>/dev/null";
   std::system(mkdir_cmd.c_str());
 
-  std::string mv_cmd = "mv '" + trash_file_path + "' '" + original_path + "' 2>/dev/null";
+  std::string mv_cmd = "mv " + sh_quote(trash_file_path) + " " + sh_quote(original_path) + " 2>/dev/null";
   int ret = std::system(mv_cmd.c_str());
   if (ret != 0) return false;
 

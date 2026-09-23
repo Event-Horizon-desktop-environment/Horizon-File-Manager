@@ -145,7 +145,13 @@ void refresh_computer(AppState& app) {
       for (auto& entry : fs::directory_iterator("/dev/disk/by-label/", ec)) {
         std::error_code ec2;
         std::string target = fs::read_symlink(entry.path(), ec2);
-        if (!ec2 && target.find(dev_base) != std::string::npos) {
+        // Basename equality: a substring match would let "sda1" claim the
+        // label of "../../sda12".
+        if (ec2) continue;
+        auto slash = target.find_last_of('/');
+        std::string link_base =
+            (slash == std::string::npos) ? target : target.substr(slash + 1);
+        if (link_base == dev_base) {
           item.label = unescape_name(entry.path().filename().string());
           item.is_user_label = true;
           break;

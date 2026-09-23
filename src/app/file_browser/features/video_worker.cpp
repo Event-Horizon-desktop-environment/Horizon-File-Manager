@@ -113,9 +113,26 @@ void VideoThumbWorker::enqueue(const std::string& path, int max_px,
                                 time_t src_mtime) {
   {
     std::lock_guard<std::mutex> lock(m_in_mutex);
-    if (m_pending.count(path)) return;
+    auto it = m_pending.find(path);
+    if (it != m_pending.end()) {
+      // Already queued: upgrade to the largest requested size so a later
+      // hover doesn't get dropped (one spawn serves grid + hover).
+      if (max_px > it->second) {
+        it->second = max_px;
+        std::queue<WorkItem> rebuilt;
+        while (!m_in.empty()) {
+          WorkItem w = std::move(m_in.front());
+          m_in.pop();
+          if (!w.preview && w.path == path && w.max_px < max_px)
+            w.max_px = max_px;
+          rebuilt.push(std::move(w));
+        }
+        m_in.swap(rebuilt);
+      }
+      return;
+    }
     m_in.push({path, max_px, cache_path, src_mtime, false});
-    m_pending.insert(path);
+    m_pending[path] = max_px;
   }
   m_in_cv.notify_one();
 }
@@ -178,7 +195,7 @@ void VideoThumbWorker::thread_main(int /*thread_id*/) {
       cairo_surface_t* frame = extract_preview_frame(item.path, item.max_px);
       std::lock_guard<std::mutex> lock(m_out_mutex);
       // Bound stale results in case the UI stops polling for them
-      while (m_prev_out.size() >= 4) {
+      while (m_prev_out.size() >= 2) {
         if (m_prev_out.front().surface)
           cairo_surface_destroy(m_prev_out.front().surface);
         m_prev_out.pop();

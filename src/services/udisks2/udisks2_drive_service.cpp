@@ -22,6 +22,9 @@ namespace eh::drives {
 
 namespace {
 
+// Forward: defined with the ISO loop helpers below.
+std::string shell_quote_arg(const std::string& s);
+
 // Detect mounted drives by parsing /proc/mounts
 std::vector<DriveInfo> detect_mounted_drives() {
   std::vector<DriveInfo> drives;
@@ -90,29 +93,38 @@ std::string UDisks2DriveService::mount(const std::string& object_path, const std
                                      sdbus::ServiceName{"org.freedesktop.UDisks2"},
                                      sdbus::ObjectPath{dev_to_udisks_path(object_path)});
     std::map<std::string, sdbus::Variant> mount_opts;
+    // Honor the requested mount options (e.g. "ro" for disk images) instead
+    // of silently mounting everything read-write.
+    if (!options.empty())
+      mount_opts["options"] = sdbus::Variant{options};
     std::string mount_path;
     proxy->callMethod("Mount")
         .onInterface("org.freedesktop.UDisks2.Filesystem")
         .withArguments(mount_opts)
         .storeResultsTo(mount_path);
     return mount_path;
-  } catch (const sdbus::Error&) {
+  } catch (const sdbus::Error& e) {
+    fprintf(stderr, "horizon-files: UDisks2 Mount(%s) failed: %s\n",
+            object_path.c_str(), e.what());
   }
 
-  // Fallback: use udisksctl
-  std::string cmd = "udisksctl mount -b " + object_path + " 2>&1";
+  // Fallback: use udisksctl. Real output is
+  // "Mounted /dev/sdXN at /run/media/$USER/LABEL." — parse the trailing path.
+  std::string cmd = "udisksctl mount -b " + shell_quote_arg(object_path) + " 2>&1";
   FILE* f = popen(cmd.c_str(), "r");
   if (!f) return {};
   char buf[512];
   std::string result;
   while (fgets(buf, sizeof(buf), f)) result += buf;
   pclose(f);
-  auto pos = result.find("Mounted at ");
+  auto pos = result.find(" at ");
   if (pos != std::string::npos) {
-    auto start = pos + 11;
+    auto start = pos + 4;
     auto end = result.find('\n', start);
-    if (end != std::string::npos) return result.substr(start, end - start);
-    return result.substr(start);
+    std::string mp = (end == std::string::npos) ? result.substr(start)
+                                                : result.substr(start, end - start);
+    while (!mp.empty() && (mp.back() == '.' || mp.back() == ' ')) mp.pop_back();
+    if (!mp.empty() && mp[0] == '/') return mp;
   }
   return {};
 }
@@ -128,11 +140,13 @@ bool UDisks2DriveService::unmount(const std::string& object_path) {
         .onInterface("org.freedesktop.UDisks2.Filesystem")
         .withArguments(unmount_opts);
     return true;
-  } catch (const sdbus::Error&) {
+  } catch (const sdbus::Error& e) {
+    fprintf(stderr, "horizon-files: UDisks2 Unmount(%s) failed: %s\n",
+            object_path.c_str(), e.what());
   }
 
   // Fallback
-  std::string cmd = "udisksctl unmount -b " + object_path + " 2>/dev/null";
+  std::string cmd = "udisksctl unmount -b " + shell_quote_arg(object_path) + " 2>/dev/null";
   return std::system(cmd.c_str()) == 0;
 }
 
@@ -297,7 +311,15 @@ static std::vector<std::string> loop_partition_devs(const std::string& loopdev) 
   while ((e = readdir(d)) != nullptr) {
     std::string name = e->d_name;
     if (name == base) continue;
-    if (name.rfind(base, 0) != 0) continue;
+    // Exact child match only: <base>p<digits> (loop0p1). A bare prefix match
+    // would also hit unrelated loops (loop1 vs loop10/loop11).
+    if (name.size() <= base.size() + 1) continue;
+    if (name.compare(0, base.size(), base) != 0) continue;
+    if (name[base.size()] != 'p') continue;
+    bool all_digits = true;
+    for (size_t i = base.size() + 1; i < name.size(); ++i)
+      if (!std::isdigit(static_cast<unsigned char>(name[i]))) { all_digits = false; break; }
+    if (!all_digits) continue;
     out.push_back("/dev/" + name);
   }
   closedir(d);
@@ -325,10 +347,15 @@ std::string UDisks2DriveService::mount_iso(const std::string& iso_path) {
   }
 
   // Native UDisks2 LoopSetup with fd passing (read-only, like Dolphin -r).
+  // Note: sdbus::UnixFd(int) duplicates the fd, so the original stays ours
+  // to close; unique_fd below also closes it on the throw path.
   try {
-    int fd = open(iso_path.c_str(), O_RDONLY | O_CLOEXEC);
-    if (fd >= 0) {
-      sdbus::UnixFd sfd{fd};
+    struct UniqueFd {
+      int fd{-1};
+      ~UniqueFd() { if (fd >= 0) ::close(fd); }
+    } holder{open(iso_path.c_str(), O_RDONLY | O_CLOEXEC)};
+    if (holder.fd >= 0) {
+      sdbus::UnixFd sfd{holder.fd};
       std::map<std::string, sdbus::Variant> opts;
       opts["read-only"] = sdbus::Variant{true};
       auto conn = sdbus::createSystemBusConnection();
@@ -339,7 +366,9 @@ std::string UDisks2DriveService::mount_iso(const std::string& iso_path) {
           .onInterface("org.freedesktop.UDisks2.Manager")
           .withArguments(sfd, opts)
           .storeResultsTo(loopPath);
-      ::close(fd);
+      // sfd holds its own dup; closing the original now is safe.
+      ::close(holder.fd);
+      holder.fd = -1;
       std::string loopStr = loopPath;
       std::string dev = loopStr.substr(loopStr.find_last_of('/') + 1);
       std::string loopdev = "/dev/" + dev;
@@ -365,8 +394,12 @@ std::string UDisks2DriveService::mount_iso(const std::string& iso_path) {
       }
       return proc_mountpoint_for(loopdev);
     }
-  } catch (const sdbus::Error&) {
+  } catch (const sdbus::Error& e) {
+    fprintf(stderr, "horizon-files: UDisks2 LoopSetup(%s) failed: %s\n",
+            iso_path.c_str(), e.what());
   } catch (...) {
+    fprintf(stderr, "horizon-files: UDisks2 LoopSetup(%s) failed: unknown error\n",
+            iso_path.c_str());
   }
 
   // Fallback: udisksctl loop-setup + mount (no fd passing).
@@ -425,7 +458,9 @@ bool UDisks2DriveService::unmount_iso(const std::string& iso_or_loopdev) {
                                     sdbus::ObjectPath{dev_to_udisks_path(loopdev)});
     std::map<std::string, sdbus::Variant> opts;
     proxy->callMethod("Delete").onInterface("org.freedesktop.UDisks2.Loop").withArguments(opts);
-    return find_loop_for_file(loop_backing_file(loopdev)).empty() || ::access(loopdev.c_str(), F_OK) != 0;
+    // Success = the loop device is gone. (Checking only the backing-file map
+    // would mask failure: report strictly on the device node.)
+    return ::access(loopdev.c_str(), F_OK) != 0;
   } catch (const sdbus::Error&) {
   }
   std::string cmd = "udisksctl loop-delete -b " + shell_quote_arg(loopdev) + " >/dev/null 2>&1";

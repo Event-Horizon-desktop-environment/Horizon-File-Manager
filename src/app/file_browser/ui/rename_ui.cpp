@@ -94,22 +94,28 @@ void draw_rename_ui(AppState& app, cairo_t* cr) {
   cairo_set_font_size(cr, 14);
   cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
 
-  // Draw selection highlight
+  // Draw selection highlight (x_advance, not width: width ignores trailing
+  // spaces so the highlight/cursor would stick before a space).
   if (app.rename_ui_sel_start >= 0 && app.rename_ui_sel_start != app.rename_ui_sel_end) {
+    int n = static_cast<int>(app.rename_ui_buf.size());
     int sel_a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
     int sel_b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
-    std::string before_sel = app.rename_ui_buf.substr(0, static_cast<std::size_t>(sel_a));
-    std::string sel_text = app.rename_ui_buf.substr(static_cast<std::size_t>(sel_a), static_cast<std::size_t>(sel_b - sel_a));
-    cairo_text_extents_t te_before, te_sel;
-    cairo_text_extents(cr, before_sel.c_str(), &te_before);
-    cairo_text_extents(cr, sel_text.c_str(), &te_sel);
-    double sel_x = input_x + 12 + te_before.width;
-    double sel_y = static_cast<double>(input_y) + 4;
-    double sel_w = te_sel.width;
-    double sel_h = static_cast<double>(input_h) - 8;
-    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.35);
-    cairo_rectangle(cr, sel_x, sel_y, sel_w, sel_h);
-    cairo_fill(cr);
+    if (sel_a < 0) sel_a = 0;
+    if (sel_b > n) sel_b = n;
+    if (sel_a < sel_b) {
+      std::string before_sel = app.rename_ui_buf.substr(0, static_cast<std::size_t>(sel_a));
+      std::string sel_text = app.rename_ui_buf.substr(static_cast<std::size_t>(sel_a), static_cast<std::size_t>(sel_b - sel_a));
+      cairo_text_extents_t te_before, te_sel;
+      cairo_text_extents(cr, before_sel.c_str(), &te_before);
+      cairo_text_extents(cr, sel_text.c_str(), &te_sel);
+      double sel_x = input_x + 12 + te_before.x_advance;
+      double sel_y = static_cast<double>(input_y) + 4;
+      double sel_w = te_sel.x_advance;
+      double sel_h = static_cast<double>(input_h) - 8;
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.35);
+      cairo_rectangle(cr, sel_x, sel_y, sel_w, sel_h);
+      cairo_fill(cr);
+    }
   }
 
   cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
@@ -120,10 +126,23 @@ void draw_rename_ui(AppState& app, cairo_t* cr) {
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.35);
     cairo_move_to(cr, input_x + 12, input_y + input_h / 2 + 5);
     cairo_show_text(cr, "New name");
-  } else {
+  }
+
+  // Cursor: always drawn (even on an empty buffer) and measured with
+  // x_advance so a trailing space advances it. A space counts as a
+  // character when stepping with the arrow keys.
+  {
+    int n = static_cast<int>(app.rename_ui_buf.size());
+    int cur = app.rename_ui_cursor_pos;
+    if (cur < 0) cur = 0;
+    if (cur > n) cur = n;
+    // Snap mid-codepoint positions back so cairo never sees partial UTF-8.
+    while (cur > 0 && cur < n &&
+           (static_cast<unsigned char>(app.rename_ui_buf[static_cast<std::size_t>(cur)]) & 0xC0) == 0x80)
+      --cur;
     cairo_text_extents_t te;
-    cairo_text_extents(cr, app.rename_ui_buf.substr(0, app.rename_ui_cursor_pos).c_str(), &te);
-    int cx = input_x + 12 + static_cast<int>(te.width);
+    cairo_text_extents(cr, app.rename_ui_buf.substr(0, static_cast<std::size_t>(cur)).c_str(), &te);
+    int cx = input_x + 12 + static_cast<int>(te.x_advance);
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.65);
     cairo_rectangle(cr, cx, input_y + 8, 1, input_h - 16);
     cairo_fill(cr);
@@ -331,7 +350,7 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
     // Cursor
     cairo_text_extents_t te;
     cairo_text_extents(cr, app.batch_rename_template.substr(0, app.batch_rename_template_cursor).c_str(), &te);
-    int cur_x = tf_x + 8 + static_cast<int>(te.width);
+    int cur_x = tf_x + 8 + static_cast<int>(te.x_advance);
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.65);
     cairo_rectangle(cr, cur_x, tf_y + 5, 1, field_h - 10);
     cairo_fill(cr);
@@ -418,7 +437,7 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
     if (app.batch_rename_edit_focus == 0) {
       cairo_text_extents_t te;
       cairo_text_extents(cr, app.batch_rename_find.substr(0, app.batch_rename_find_cursor).c_str(), &te);
-      int cx2 = fld_x + 8 + static_cast<int>(te.width);
+      int cx2 = fld_x + 8 + static_cast<int>(te.x_advance);
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.65);
       cairo_rectangle(cr, cx2, input_y + 5, 1, field_h - 10);
       cairo_fill(cr);
@@ -450,7 +469,7 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
     if (app.batch_rename_edit_focus == 1) {
       cairo_text_extents_t te;
       cairo_text_extents(cr, app.batch_rename_replace.substr(0, app.batch_rename_replace_cursor).c_str(), &te);
-      int cx2 = rf_x + 8 + static_cast<int>(te.width);
+      int cx2 = rf_x + 8 + static_cast<int>(te.x_advance);
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.65);
       cairo_rectangle(cr, cx2, rl_y + 5, 1, field_h - 10);
       cairo_fill(cr);

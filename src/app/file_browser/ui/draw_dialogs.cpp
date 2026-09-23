@@ -3,6 +3,7 @@
 
 #include "../app.hpp"
 #include "../trace.hpp"
+#include "../features/compress.hpp"
 #include "../features/sidebar.hpp"
 #include "../features/view_zoom.hpp"
 #include "app/file_browser/features/thumb_pool.hpp"
@@ -794,7 +795,7 @@ void draw_compress_dialog(AppState& app, cairo_t* cr) {
   int w = app.width;
   int h = app.height;
   int dlg_w = 420;
-  int dlg_h = 310;
+  int dlg_h = 372;
   int dlg_x = (w - dlg_w) / 2;
   int dlg_y = (h - dlg_h) / 2;
 
@@ -934,6 +935,44 @@ void draw_compress_dialog(AppState& app, cairo_t* cr) {
     cairo_set_font_size(cr, 11);
     cairo_move_to(cr, lx + 4, lvl_btn_y + lvl_btn_h / 2 + 4);
     cairo_show_text(cr, level_labels[i]);
+  }
+
+  // ── Threads row ──
+  int th_y = lvl_btn_y + lvl_btn_h + 12;
+  cairo_set_font_size(cr, 12);
+  cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                        app.text_secondary_b, 1.0);
+  cairo_move_to(cr, content_x, th_y);
+  cairo_show_text(cr, "Threads");
+
+  const std::vector<int> thread_opts = compress_thread_options();
+  int th_btn_y = th_y + 18;
+  int th_btn_w = compress_thread_btn_w(static_cast<int>(thread_opts.size()));
+  int th_btn_h = 28;
+  int th_gap = 8;
+  for (size_t ti = 0; ti < thread_opts.size(); ++ti) {
+    int tx = content_x + static_cast<int>(ti) * (th_btn_w + th_gap);
+    if (thread_opts[ti] == app.compress_threads) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.85);
+    } else if (static_cast<int>(ti) == app.compress_hover_threads) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.50);
+    } else {
+      cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.5);
+    }
+    draw_rounded_rect(cr, tx, th_btn_y, th_btn_w, th_btn_h, 6);
+    cairo_fill(cr);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_set_font_size(cr, 11);
+    char th_label[16];
+    if (thread_opts[ti] == 0)
+      snprintf(th_label, sizeof(th_label), "Auto");
+    else
+      snprintf(th_label, sizeof(th_label), "%d", thread_opts[ti]);
+    cairo_text_extents_t th_te;
+    cairo_text_extents(cr, th_label, &th_te);
+    cairo_move_to(cr, tx + (th_btn_w - th_te.x_advance) / 2,
+                  th_btn_y + th_btn_h / 2 + 4);
+    cairo_show_text(cr, th_label);
   }
 
   // ── Buttons ──

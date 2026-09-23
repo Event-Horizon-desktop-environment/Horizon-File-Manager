@@ -236,7 +236,7 @@ void handle_pointer_move(AppState& app, int x, int y) {
   // ── Compress dialog hover ──
   if (app.compress_dialog_open) {
     int dlg_w = 420;
-    int dlg_h = 310;
+    int dlg_h = 372;
     int dlg_x = (app.width - dlg_w) / 2;
     int dlg_y = (app.height - dlg_h) / 2;
     int content_x = dlg_x + 20;
@@ -284,6 +284,20 @@ void handle_pointer_move(AppState& app, int x, int y) {
       }
     }
 
+    const std::vector<int> thread_opts = compress_thread_options();
+    int th_btn_y = lvl_btn_y + lvl_btn_h + 12 + 18;
+    int th_btn_w = compress_thread_btn_w(static_cast<int>(thread_opts.size()));
+    int th_btn_h = 28;
+    int th_gap = 8;
+    int new_hover_thr = -1;
+    for (size_t ti = 0; ti < thread_opts.size(); ++ti) {
+      int tx = content_x + static_cast<int>(ti) * (th_btn_w + th_gap);
+      if (x >= tx && x < tx + th_btn_w && y >= th_btn_y && y < th_btn_y + th_btn_h) {
+        new_hover_thr = static_cast<int>(ti);
+        break;
+      }
+    }
+
     int btn_y = dlg_y + dlg_h - 50;
     int btn_w = 90;
     int btn_h = 32;
@@ -297,10 +311,12 @@ void handle_pointer_move(AppState& app, int x, int y) {
 
     bool changed = (new_hover_fmt != app.compress_hover_format) ||
                    (new_hover_lvl != app.compress_hover_level) ||
+                   (new_hover_thr != app.compress_hover_threads) ||
                    (new_hover_btn != app.compress_hover_btn);
     if (changed) {
       app.compress_hover_format = new_hover_fmt;
       app.compress_hover_level = new_hover_lvl;
+      app.compress_hover_threads = new_hover_thr;
       app.compress_hover_btn = new_hover_btn;
       draw(app);
     }
@@ -1050,12 +1066,7 @@ void handle_pointer_move(AppState& app, int x, int y) {
         int ri = app.cur_tab().visible_entries[vi];
         if (ri >= 0 && ri < static_cast<int>(app.cur_tab().entries.size())) {
           const auto& entry = app.cur_tab().entries[ri];
-          if (entry.type == FileType::Image || entry.type == FileType::Video ||
-              entry.type == FileType::Audio || entry.type == FileType::Text ||
-              entry.type == FileType::Document || entry.type == FileType::Code ||
-              entry.type == FileType::Archive || entry.type == FileType::Web ||
-              entry.type == FileType::Font || entry.type == FileType::Executable ||
-              entry.type == FileType::Markdown) {
+          if (is_supported_preview(entry)) {
             app.preview_entry_idx = app.cur_tab().hover_idx;
             app.preview_path = entry.path;
             timespec ts{};

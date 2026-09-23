@@ -497,6 +497,7 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
     const char* hdr = "FILE OPERATIONS";
     if (p.type == OperationType::Extract) hdr = "EXTRACTION";
     else if (p.type == OperationType::Move) hdr = "MOVE";
+    else if (p.type == OperationType::Compress) hdr = "COMPRESSION";
     else hdr = "COPY";
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.6);
     cairo_set_font_size(cr, 11.0 * zf);
@@ -512,11 +513,14 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
       label = "Extracting";
     else if (p.type == OperationType::Move)
       label = "Moving";
+    else if (p.type == OperationType::Compress)
+      label = "Compressing";
     else
       label = "Copying";
-    if (!p.current_file.empty()) {
+    std::string cur = p.get_current_file();
+    if (!cur.empty()) {
       label += " ";
-      std::string fname = p.current_file;
+      std::string fname = std::move(cur);
       int max_chars = static_cast<int>(content_w / (7.0 * zf));
       if (max_chars < 10) max_chars = 10;
       if (static_cast<int>(fname.size()) > max_chars) {
@@ -542,19 +546,42 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
   }
 
   // ── Progress bar ──
+  // Workers maintain p.progress directly (copy/move/extract mirror done/total;
+  // compress blends file completions, 7z overall % and output growth).
+  // Compress pre-scan (no totals yet) keeps an animated stripe instead.
   {
     int bar_h = static_cast<int>(10 * zf);
-    double bar_pct = counting ? 0.0 : (total > 0 ? static_cast<double>(done) / total : 0.0);
-    int fill_w = static_cast<int>(content_w * bar_pct);
+    double live = p.progress.load();
+    if (live < 0) live = 0;
+    if (live > 1) live = 1;
+    bool indeterminate =
+        (p.type == OperationType::Compress && p.active.load() && counting);
 
     cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.35);
     draw_rounded_rect(cr, content_x, y, content_w, bar_h, static_cast<int>(4 * zf));
     cairo_fill(cr);
 
-    if (fill_w > 0) {
+    if (indeterminate) {
+      double elapsed = std::chrono::duration<double>(
+          std::chrono::steady_clock::now() - p.start_time).count();
+      int stripe_w = std::max(20, content_w / 3);
+      int travel = content_w + stripe_w;
+      int off = static_cast<int>(std::fmod(elapsed * content_w * 0.7,
+                                           static_cast<double>(travel))) - stripe_w;
       cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.8);
-      draw_rounded_rect(cr, content_x, y, fill_w, bar_h, static_cast<int>(4 * zf));
+      cairo_save(cr);
+      draw_rounded_rect(cr, content_x, y, content_w, bar_h, static_cast<int>(4 * zf));
+      cairo_clip(cr);
+      cairo_rectangle(cr, content_x + off, y, stripe_w, bar_h);
       cairo_fill(cr);
+      cairo_restore(cr);
+    } else {
+      int fill_w = counting ? 0 : static_cast<int>(content_w * live);
+      if (fill_w > 0) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.8);
+        draw_rounded_rect(cr, content_x, y, fill_w, bar_h, static_cast<int>(4 * zf));
+        cairo_fill(cr);
+      }
     }
     y += bar_h + 12 * static_cast<int>(zf);
   }
@@ -562,10 +589,15 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
   // ── File count ──
   {
     char buf[64];
-    if (counting) {
+    double live = p.progress.load();
+    if (live < 0) live = 0;
+    if (live > 1) live = 1;
+    if (p.type == OperationType::Compress && p.active.load() && counting) {
+      std::snprintf(buf, sizeof(buf), "Preparing\u2026");
+    } else if (counting) {
       std::snprintf(buf, sizeof(buf), "Counting files\u2026");
     } else {
-      int pct = total > 0 ? static_cast<int>(100.0 * done / total) : 0;
+      int pct = static_cast<int>(100.0 * live);
       std::snprintf(buf, sizeof(buf), "%d%%  (%d / %d files)", pct, done, total);
     }
     cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,

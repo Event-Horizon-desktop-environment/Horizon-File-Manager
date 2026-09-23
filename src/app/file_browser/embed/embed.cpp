@@ -1492,6 +1492,9 @@ static bool create_window(AppState& app) {
     if (app.icon_catchup_frames > 0) {
       --app.icon_catchup_frames;
       app.pendingRedraw = true;
+      // Catchup exists so background-resolved icons pop in; once nothing is
+      // pending the remaining forced frames are pure waste — stop early.
+      if (app.icons.pending_count() == 0) app.icon_catchup_frames = 0;
     }
     int poll_ms = (!app.thumb_pending_queue.empty() || search_pending || app.key_repeat_sym != 0 || mount_wake || op_active || app.icon_catchup_frames > 0) ? 0 : kPollMs;
     // A deferred scan apply must never sit on a 200 ms poll nap.
@@ -1648,52 +1651,131 @@ static bool create_window(AppState& app) {
       auto now = std::chrono::steady_clock::now();
       uint64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
       uint64_t elapsed = now_ms - app.key_repeat_start_ms;
-      constexpr uint64_t kRepeatDelay = 0;
-      constexpr uint64_t kRepeatRate = 100;
+      // 350 ms initial delay (single taps never repeat), then ~33 Hz repeat
+      // for fast-but-smooth hold-to-erase / hold-to-move.
+      constexpr uint64_t kRepeatDelay = 350;
+      constexpr uint64_t kRepeatRate = 30;
       if (elapsed >= kRepeatDelay) {
         uint64_t delta = now_ms - app.key_repeat_last_ms;
         if (delta >= kRepeatRate) {
           int sym = app.key_repeat_sym;
           bool repeat_done = false;
+          auto utf8_prev = [](const std::string& s, int pos) {
+            if (pos <= 0) return 0;
+            int n = static_cast<int>(s.size());
+            if (pos > n) pos = n;
+            --pos;
+            while (pos > 0 &&
+                   (static_cast<unsigned char>(s[static_cast<std::size_t>(pos)]) & 0xC0) == 0x80)
+              --pos;
+            return pos;
+          };
+          auto utf8_next = [](const std::string& s, int pos) {
+            if (pos < 0) return 0;
+            int n = static_cast<int>(s.size());
+            if (pos >= n) return n;
+            ++pos;
+            while (pos < n &&
+                   (static_cast<unsigned char>(s[static_cast<std::size_t>(pos)]) & 0xC0) == 0x80)
+              ++pos;
+            return pos;
+          };
           if (app.rename_ui_open) {
             if (sym == XKB_KEY_BackSpace && !app.rename_ui_buf.empty()) {
-              if (app.rename_ui_cursor_pos > 0) {
-                app.rename_ui_buf.erase(app.rename_ui_cursor_pos - 1, 1);
-                --app.rename_ui_cursor_pos;
-              }
-              app.pendingRedraw = true;
-              if (app.rename_ui_buf.empty()) {
+              if (app.rename_ui_sel_start >= 0 &&
+                  app.rename_ui_sel_start != app.rename_ui_sel_end) {
+                int a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
+                int b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
+                if (a < 0) a = 0;
+                if (b > static_cast<int>(app.rename_ui_buf.size()))
+                  b = static_cast<int>(app.rename_ui_buf.size());
+                app.rename_ui_buf.erase(static_cast<std::size_t>(a),
+                                        static_cast<std::size_t>(b - a));
+                app.rename_ui_cursor_pos = a;
+                app.rename_ui_sel_start = -1;
+                app.rename_ui_sel_end = -1;
+              } else if (app.rename_ui_cursor_pos > 0) {
+                int p = utf8_prev(app.rename_ui_buf, app.rename_ui_cursor_pos);
+                app.rename_ui_buf.erase(static_cast<std::size_t>(p),
+                                        static_cast<std::size_t>(app.rename_ui_cursor_pos - p));
+                app.rename_ui_cursor_pos = p;
+              } else {
+                // At column 0: nothing to erase, stop arming instead of
+                // spinning the event loop at 0 ms poll.
                 app.key_repeat_sym = 0;
                 repeat_done = true;
+              }
+              if (!repeat_done) {
+                app.pendingRedraw = true;
+                if (app.rename_ui_buf.empty()) {
+                  app.key_repeat_sym = 0;
+                  repeat_done = true;
+                }
               }
             } else if (sym == XKB_KEY_Delete && !app.rename_ui_buf.empty()) {
-              if (app.rename_ui_cursor_pos < static_cast<int>(app.rename_ui_buf.size()))
-                app.rename_ui_buf.erase(app.rename_ui_cursor_pos, 1);
-              else
-                app.rename_ui_buf.pop_back();
-              if (app.rename_ui_cursor_pos > static_cast<int>(app.rename_ui_buf.size()))
-                app.rename_ui_cursor_pos = static_cast<int>(app.rename_ui_buf.size());
-              app.pendingRedraw = true;
-              if (app.rename_ui_buf.empty()) {
+              if (app.rename_ui_sel_start >= 0 &&
+                  app.rename_ui_sel_start != app.rename_ui_sel_end) {
+                int a = std::min(app.rename_ui_sel_start, app.rename_ui_sel_end);
+                int b = std::max(app.rename_ui_sel_start, app.rename_ui_sel_end);
+                if (a < 0) a = 0;
+                if (b > static_cast<int>(app.rename_ui_buf.size()))
+                  b = static_cast<int>(app.rename_ui_buf.size());
+                app.rename_ui_buf.erase(static_cast<std::size_t>(a),
+                                        static_cast<std::size_t>(b - a));
+                app.rename_ui_cursor_pos = a;
+                app.rename_ui_sel_start = -1;
+                app.rename_ui_sel_end = -1;
+              } else if (app.rename_ui_cursor_pos <
+                         static_cast<int>(app.rename_ui_buf.size())) {
+                int p = utf8_next(app.rename_ui_buf, app.rename_ui_cursor_pos);
+                app.rename_ui_buf.erase(static_cast<std::size_t>(app.rename_ui_cursor_pos),
+                                        static_cast<std::size_t>(p - app.rename_ui_cursor_pos));
+              } else {
                 app.key_repeat_sym = 0;
                 repeat_done = true;
               }
+              if (!repeat_done) {
+                if (app.rename_ui_cursor_pos >
+                    static_cast<int>(app.rename_ui_buf.size()))
+                  app.rename_ui_cursor_pos =
+                      static_cast<int>(app.rename_ui_buf.size());
+                app.pendingRedraw = true;
+                if (app.rename_ui_buf.empty()) {
+                  app.key_repeat_sym = 0;
+                  repeat_done = true;
+                }
+              }
             } else if (sym == XKB_KEY_Left && app.rename_ui_cursor_pos > 0) {
-              --app.rename_ui_cursor_pos;
+              app.rename_ui_cursor_pos =
+                  utf8_prev(app.rename_ui_buf, app.rename_ui_cursor_pos);
+              if (app.rename_ui_sel_start >= 0)
+                app.rename_ui_sel_end = app.rename_ui_cursor_pos;
               app.pendingRedraw = true;
             } else if (sym == XKB_KEY_Right && app.rename_ui_cursor_pos < static_cast<int>(app.rename_ui_buf.size())) {
-              ++app.rename_ui_cursor_pos;
+              app.rename_ui_cursor_pos =
+                  utf8_next(app.rename_ui_buf, app.rename_ui_cursor_pos);
+              if (app.rename_ui_sel_start >= 0)
+                app.rename_ui_sel_end = app.rename_ui_cursor_pos;
               app.pendingRedraw = true;
             }
           }
           if (!repeat_done && app.create_dialog_open) {
             if (sym == XKB_KEY_BackSpace && !app.create_buf.empty()) {
-              app.create_buf.pop_back();
-              app.create_cursor_pos = static_cast<int>(app.create_buf.size());
-              app.pendingRedraw = true;
-              if (app.create_buf.empty()) {
+              if (app.create_cursor_pos > 0) {
+                int p = utf8_prev(app.create_buf, app.create_cursor_pos);
+                app.create_buf.erase(static_cast<std::size_t>(p),
+                                     static_cast<std::size_t>(app.create_cursor_pos - p));
+                app.create_cursor_pos = p;
+              } else {
                 app.key_repeat_sym = 0;
                 repeat_done = true;
+              }
+              if (!repeat_done) {
+                app.pendingRedraw = true;
+                if (app.create_buf.empty()) {
+                  app.key_repeat_sym = 0;
+                  repeat_done = true;
+                }
               }
             }
           }

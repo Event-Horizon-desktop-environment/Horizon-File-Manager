@@ -846,6 +846,7 @@ struct AppState {
   bool compress_dialog_open = false;
   int compress_format = 1;          // 0=zip, 1=tar.gz, 2=tar.bz2, 3=tar.xz, 4=7z, 5=rar, 6=tar
   int compress_level = 6;           // 0-9
+  int compress_threads = 0;         // 0=Auto (all cores), else explicit count
   std::string compress_name_buf;
   int compress_name_cursor = 0;
   std::vector<std::string> compress_source_paths;
@@ -853,6 +854,7 @@ struct AppState {
   bool compress_format_available[7]{};
   int compress_hover_format = -1;
   int compress_hover_level = -1;
+  int compress_hover_threads = -1;
   int compress_hover_btn = -1;      // 0=Cancel, 1=Compress
 
   // ── Password dialog (for encrypted archives) ──
