@@ -18,7 +18,7 @@
 #include <unordered_set>
 #include <vector>
 
-#include "app/file_browser/features/progress.hpp"
+#include "app/file_browser/features/progress/progress.hpp"
 
 #include "wayland/buffer/shm_buffer.hpp"
 #include "wayland/buffer/cairo_cpu_buffer.hpp"

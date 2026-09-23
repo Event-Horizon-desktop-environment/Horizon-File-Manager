@@ -3,8 +3,8 @@
 
 #include "../app.hpp"
 #include "../trace.hpp"
-#include "../features/sidebar.hpp"
-#include "../features/view_zoom.hpp"
+#include "../features/sidebar/sidebar.hpp"
+#include "../features/view_zoom/view_zoom.hpp"
 
 #include <cairo/cairo.h>
 #include <pango/pangocairo.h>

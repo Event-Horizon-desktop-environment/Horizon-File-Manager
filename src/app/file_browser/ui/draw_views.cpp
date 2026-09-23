@@ -2,10 +2,10 @@
 
 #include "../app.hpp"
 #include "../trace.hpp"
-#include "../features/sidebar.hpp"
-#include "../features/view_zoom.hpp"
-#include "app/file_browser/features/thumb_pool.hpp"
-#include "app/file_browser/features/dir_stats.hpp"
+#include "../features/sidebar/sidebar.hpp"
+#include "../features/view_zoom/view_zoom.hpp"
+#include "app/file_browser/features/thumbnails/thumb_pool.hpp"
+#include "app/file_browser/features/dir_stats/dir_stats.hpp"
 
 #include <cairo/cairo.h>
 #include <pango/pangocairo.h>
@@ -36,12 +36,12 @@
 #include "layout.hpp"
 
 #include "platform/common/icon_cache/icon_cache.hpp"
-#include "app/file_browser/features/svg_preview.hpp"
-#include "app/file_browser/features/video_preview.hpp"
-#include "app/file_browser/features/pdf_preview.hpp"
-#include "app/file_browser/features/epub_preview.hpp"
-#include "app/file_browser/features/image_preview.hpp"
-#include "app/file_browser/features/thumbnail_cache.hpp"
+#include "app/file_browser/features/preview/svg_preview.hpp"
+#include "app/file_browser/features/preview/video_preview.hpp"
+#include "app/file_browser/features/preview/pdf_preview.hpp"
+#include "app/file_browser/features/preview/epub_preview.hpp"
+#include "app/file_browser/features/preview/image_preview.hpp"
+#include "app/file_browser/features/thumbnails/thumbnail_cache.hpp"
 #include "app/file_browser/ui/pixblit.hpp"
 
 namespace fs = std::filesystem;

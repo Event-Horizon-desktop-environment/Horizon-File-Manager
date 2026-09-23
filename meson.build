@@ -33,11 +33,13 @@ dep_openssl    = dependency('libcrypto')
 dep_sdbus      = dependency('sdbus-c++')
 dep_fontconfig = dependency('fontconfig')
 
-# Optional: poppler (PDF preview), libarchive, librsvg, io_uring
+# Optional: poppler (PDF preview), libarchive, librsvg, io_uring, zlib (own compress engine)
 dep_poppler   = dependency('poppler-glib', required: false)
 dep_archive   = dependency('libarchive', required: false)
 dep_librsvg   = dependency('librsvg-2.0', required: false)
 dep_uring     = dependency('liburing', required: false)
+dep_zlib      = dependency('zlib', required: false)
+dep_lzma      = dependency('liblzma', required: false)
 
 if dep_poppler.found()
   cpp_args += ['-DEH_HAVE_POPPLER']
@@ -47,6 +49,12 @@ if dep_uring.found()
 endif
 if dep_archive.found()
   cpp_args += ['-DEH_HAVE_LIBARCHIVE']
+endif
+if dep_zlib.found()
+  cpp_args += ['-DEH_HAVE_ZLIB']
+endif
+if dep_lzma.found()
+  cpp_args += ['-DEH_HAVE_LZMA']
 endif
 if dep_librsvg.found()
   cpp_args += ['-DEH_HAVE_RSVG']
@@ -127,41 +135,47 @@ inc = include_directories(
 sources = files(
   # File browser core
   'src/app/file_browser/embed/embed.cpp',
-  'src/app/file_browser/features/compress.cpp',
-  'src/app/file_browser/features/compare.cpp',
-  'src/app/file_browser/features/desktop_icon_parser.cpp',
-  'src/app/file_browser/features/drag.cpp',
-  'src/app/file_browser/features/epub_preview.cpp',
-  'src/app/file_browser/features/filetype.cpp',
-  'src/app/file_browser/features/scan.cpp',
-  'src/app/file_browser/features/sidebar.cpp',
-  'src/app/file_browser/features/preview_popup.cpp',
-  'src/app/file_browser/features/image_preview.cpp',
-  'src/app/file_browser/features/menu.cpp',
-  'src/app/file_browser/features/context_actions.cpp',
-  'src/app/file_browser/features/context_actions_items.cpp',
-  'src/app/file_browser/features/context_actions_regions.cpp',
-  'src/app/file_browser/features/settings.cpp',
-  'src/app/file_browser/features/properties.cpp',
-  'src/app/file_browser/features/open_with.cpp',
-  'src/app/file_browser/features/nav.cpp',
-  'src/app/file_browser/features/pdf_preview.cpp',
-  'src/app/file_browser/features/progress.cpp',
-  'src/app/file_browser/features/query_match.cpp',
-  'src/app/file_browser/features/dirprops.cpp',
-  'src/app/file_browser/features/recursive_search_worker.cpp',
-  'src/app/file_browser/features/selection.cpp',
-  'src/app/file_browser/features/svg_preview.cpp',
-  'src/app/file_browser/features/tab_history.cpp',
-  'src/app/file_browser/features/tags.cpp',
-  'src/app/file_browser/features/view_zoom.cpp',
-  'src/app/file_browser/features/thumbnail_cache.cpp',
-  'src/app/file_browser/features/video_preview.cpp',
-  'src/app/file_browser/features/video_worker.cpp',
-  'src/app/file_browser/features/thumb_pool.cpp',
-  'src/app/file_browser/features/dir_stats.cpp',
-  'src/app/file_browser/features/dir_watch.cpp',
-  'src/app/file_browser/features/terminal.cpp',
+  'src/app/file_browser/features/compress/compress.cpp',
+  'src/app/file_browser/features/compress/engine/engine_plan.cpp',
+  'src/app/file_browser/features/compress/engine/engine_gzip.cpp',
+  'src/app/file_browser/features/compress/engine/engine_zip.cpp',
+  'src/app/file_browser/features/compress/engine/engine_xz.cpp',
+  'src/app/file_browser/features/compress/engine/engine_7z.cpp',
+  'src/app/file_browser/features/compress/engine/engine.cpp',
+  'src/app/file_browser/features/compare/compare.cpp',
+  'src/app/file_browser/features/desktop_icon_parser/desktop_icon_parser.cpp',
+  'src/app/file_browser/features/drag/drag.cpp',
+  'src/app/file_browser/features/preview/epub_preview.cpp',
+  'src/app/file_browser/features/filetype/filetype.cpp',
+  'src/app/file_browser/features/scan/scan.cpp',
+  'src/app/file_browser/features/sidebar/sidebar.cpp',
+  'src/app/file_browser/features/preview/preview_popup.cpp',
+  'src/app/file_browser/features/preview/image_preview.cpp',
+  'src/app/file_browser/features/menu/menu.cpp',
+  'src/app/file_browser/features/context_actions/context_actions.cpp',
+  'src/app/file_browser/features/context_actions/context_actions_items.cpp',
+  'src/app/file_browser/features/context_actions/context_actions_regions.cpp',
+  'src/app/file_browser/features/settings/settings.cpp',
+  'src/app/file_browser/features/properties/properties.cpp',
+  'src/app/file_browser/features/open_with/open_with.cpp',
+  'src/app/file_browser/features/nav/nav.cpp',
+  'src/app/file_browser/features/preview/pdf_preview.cpp',
+  'src/app/file_browser/features/progress/progress.cpp',
+  'src/app/file_browser/features/query_match/query_match.cpp',
+  'src/app/file_browser/features/dirprops/dirprops.cpp',
+  'src/app/file_browser/features/recursive_search_worker/recursive_search_worker.cpp',
+  'src/app/file_browser/features/selection/selection.cpp',
+  'src/app/file_browser/features/preview/svg_preview.cpp',
+  'src/app/file_browser/features/tab_history/tab_history.cpp',
+  'src/app/file_browser/features/tags/tags.cpp',
+  'src/app/file_browser/features/view_zoom/view_zoom.cpp',
+  'src/app/file_browser/features/thumbnails/thumbnail_cache.cpp',
+  'src/app/file_browser/features/preview/video_preview.cpp',
+  'src/app/file_browser/features/preview/video_worker.cpp',
+  'src/app/file_browser/features/thumbnails/thumb_pool.cpp',
+  'src/app/file_browser/features/dir_stats/dir_stats.cpp',
+  'src/app/file_browser/features/dir_watch/dir_watch.cpp',
+  'src/app/file_browser/features/terminal/terminal.cpp',
   'src/app/file_browser/ui/computer_view.cpp',
   'src/app/file_browser/ui/rename_ui.cpp',
   'src/app/file_browser/ui/pixblit.cpp',
@@ -296,6 +310,8 @@ executable(
     dep_sdbus,
     dep_fontconfig,
     dep_uring,
+    dep_zlib,
+    dep_lzma,
     eh_material_colors_dep,
   ],
   install: true,
@@ -346,6 +362,14 @@ pixblit_test = executable(
 
 test('pixblit', pixblit_test)
 
+# Extraction toolchain stress: byte-identity across unzip/7z/bsdtar on a
+# many-file fixture (or $REFII_ZIP when set). Headless, skips (77) if tools
+# are missing.
+test('extract_stress', find_program('bash'),
+  args: [meson.current_source_dir() / 'tests/stress_extract_many_files.sh'],
+  timeout: 180,
+)
+
 # Headless paint benchmark (manual run, not a pass/fail test): same sources
 # as horizon-files minus standalone_main (bench_paint has its own main()).
 bench_lib_sources = []
@@ -376,6 +400,8 @@ bench_paint_exe = executable(
     dep_sdbus,
     dep_fontconfig,
     dep_uring,
+    dep_zlib,
+    dep_lzma,
     eh_material_colors_dep,
   ],
   install: false,

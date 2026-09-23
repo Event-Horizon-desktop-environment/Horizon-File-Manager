@@ -2,8 +2,8 @@
 // Moved wholesale from ui/draw.cpp (byte-identical bodies).
 
 #include "../app.hpp"
-#include "../features/sidebar.hpp"
-#include "app/file_browser/features/thumb_pool.hpp"
+#include "../features/sidebar/sidebar.hpp"
+#include "app/file_browser/features/thumbnails/thumb_pool.hpp"
 #include "draw_thumbnails.hpp"
 
 #include <cairo/cairo.h>
@@ -20,12 +20,12 @@
 #include <unistd.h>
 
 #include "platform/common/icon_cache/icon_cache.hpp"
-#include "app/file_browser/features/svg_preview.hpp"
-#include "app/file_browser/features/video_preview.hpp"
-#include "app/file_browser/features/pdf_preview.hpp"
-#include "app/file_browser/features/epub_preview.hpp"
-#include "app/file_browser/features/image_preview.hpp"
-#include "app/file_browser/features/thumbnail_cache.hpp"
+#include "app/file_browser/features/preview/svg_preview.hpp"
+#include "app/file_browser/features/preview/video_preview.hpp"
+#include "app/file_browser/features/preview/pdf_preview.hpp"
+#include "app/file_browser/features/preview/epub_preview.hpp"
+#include "app/file_browser/features/preview/image_preview.hpp"
+#include "app/file_browser/features/thumbnails/thumbnail_cache.hpp"
 
 namespace fs = std::filesystem;
 

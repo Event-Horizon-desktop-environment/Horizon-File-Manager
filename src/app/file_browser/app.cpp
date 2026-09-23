@@ -1,6 +1,6 @@
 #include "app/file_browser/app.hpp"
-#include "app/file_browser/features/sidebar.hpp"
-#include "app/file_browser/features/selection.hpp"
+#include "app/file_browser/features/sidebar/sidebar.hpp"
+#include "app/file_browser/features/selection/selection.hpp"
 #include "app/file_browser/trace.hpp"
 
 #include <cairo/cairo.h>

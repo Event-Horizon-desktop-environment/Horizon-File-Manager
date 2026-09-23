@@ -1,7 +1,7 @@
 #include "app/file_browser/embed/embed.hpp"
 #include "../trace.hpp"
 #include "../app.hpp"
-#include "app/file_browser/features/view_zoom.hpp"
+#include "app/file_browser/features/view_zoom/view_zoom.hpp"
 
 #include <algorithm>
 #include <array>
@@ -23,10 +23,10 @@
 
 #include "config/shell_config.hpp"
 #include "services/udisks2/udisks2_drive_service.hpp"
-#include "app/file_browser/features/drag.hpp"
-#include "app/file_browser/features/thumb_pool.hpp"
-#include "app/file_browser/features/dir_stats.hpp"
-#include "app/file_browser/features/dir_watch.hpp"
+#include "app/file_browser/features/drag/drag.hpp"
+#include "app/file_browser/features/thumbnails/thumb_pool.hpp"
+#include "app/file_browser/features/dir_stats/dir_stats.hpp"
+#include "app/file_browser/features/dir_watch/dir_watch.hpp"
 #include "base/thread/thread_dispatch.hpp"
 #include "platform/common/asset/asset_loader.hpp"
 #include "platform/common/bench/startup_trace.hpp"

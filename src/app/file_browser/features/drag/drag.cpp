@@ -1,0 +1,1073 @@
+#include "app/file_browser/features/drag/drag.hpp"
+#include "app/file_browser/features/progress/progress.hpp"
+#include "app/file_browser/app.hpp"
+
+#include <unistd.h>
+#include <sys/mman.h>
+
+#include <cstring>
+#include <chrono>
+#include <fcntl.h>
+#include <filesystem>
+#include <string>
+#include <vector>
+
+#include <poll.h>
+
+#include <cairo/cairo.h>
+
+#include "wayland/core/protocols.hpp"
+#include "wayland/core/memfd.hpp"
+
+namespace eh::file_browser {
+
+namespace {
+
+// ── URI encoding helpers (mirrors ClipboardService) ────────────
+
+std::string file_uri_for_path(const std::string& abs_path) {
+  std::string out = "file://";
+  for (unsigned char c : abs_path) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+        c == '/' || c == '-' || c == '_' || c == '.' || c == '~')
+      out += static_cast<char>(c);
+    else if (c == ' ')
+      out += "%20";
+    else {
+      char buf[8];
+      std::snprintf(buf, sizeof(buf), "%%%02X", c);
+      out += buf;
+    }
+  }
+  return out;
+}
+
+// True when both paths resolve to the same directory
+bool is_same_directory(const std::filesystem::path& a, const std::filesystem::path& b) {
+  std::error_code ec;
+  if (std::filesystem::exists(a, ec) && std::filesystem::exists(b, ec)) {
+    bool eq = std::filesystem::equivalent(a, b, ec);
+    if (!ec) return eq;
+  }
+  return a.lexically_normal() == b.lexically_normal();
+}
+
+std::string canonical_abs_path(const std::string& path) {
+  std::error_code ec;
+  auto c = std::filesystem::weakly_canonical(path, ec);
+  if (!ec && !c.empty()) return c.string();
+  return std::filesystem::absolute(path, ec).string();
+}
+
+// ── wl_data_source listener table ─────────────────────────────
+
+constexpr wl_data_source_listener kDataSourceListener = {
+  .target = data_source_target,
+  .send = data_source_send,
+  .cancelled = data_source_cancelled,
+  .dnd_drop_performed = data_source_dnd_drop_performed,
+  .dnd_finished = data_source_dnd_finished,
+  .action = data_source_action,
+};
+
+} // namespace
+
+// ── wl_data_source callbacks ──────────────────────────────────
+
+void data_source_target(void*, wl_data_source*, const char*) {
+}
+
+void data_source_send(void* data, wl_data_source*, const char* mime, int32_t fd) {
+  auto& app = *static_cast<AppState*>(data);
+  if (fd < 0) return;
+
+  // Non-blocking: the compositor may not read the pipe promptly,
+  // and a blocking write would freeze the entire event loop.
+  int fl = fcntl(fd, F_GETFL, 0);
+  if (fl >= 0) fcntl(fd, F_SETFL, fl | O_NONBLOCK);
+
+  std::string_view mime_sv(mime ? mime : "");
+
+  if (mime_sv == "text/uri-list") {
+    std::string body;
+    for (const auto& p : app.drag_paths) {
+      std::string canon = canonical_abs_path(p);
+      if (canon.empty()) continue;
+      body += file_uri_for_path(canon) + "\r\n";
+    }
+    if (!body.empty()) {
+      write(fd, body.data(), body.size());
+    }
+  } else if (mime_sv == "x-special/gnome-copied-files") {
+    std::string body = "copy\n";
+    for (const auto& p : app.drag_paths) {
+      std::string canon = canonical_abs_path(p);
+      if (canon.empty()) continue;
+      body += file_uri_for_path(canon) + "\n";
+    }
+    if (body.size() > 5) {
+      write(fd, body.data(), body.size());
+    }
+  }
+
+  close(fd);
+}
+
+void data_source_cancelled(void* data, wl_data_source*) {
+  auto& app = *static_cast<AppState*>(data);
+  cancel_drag(app);
+}
+
+void data_source_dnd_drop_performed(void*, wl_data_source*) {
+}
+
+void data_source_dnd_finished(void* data, wl_data_source*) {
+  auto& app = *static_cast<AppState*>(data);
+  cancel_drag(app);
+}
+
+void data_source_action(void*, wl_data_source*, uint32_t dnd_action) {
+  // The compositor has chosen an action for our drag.
+  // For within-app drops this isn't used (we Ctrl-check instead),
+  // but for other apps receiving our drag it's informational.
+}
+
+// ── Start drag ────────────────────────────────────────────────
+
+void start_drag(AppState& app) {
+  if (!app.data_device || app.drag_paths.empty()) {
+    cancel_drag(app);
+    return;
+  }
+
+  // Create data source
+  auto* mgr = app.wl.data_device_manager();
+  if (!mgr) {
+    cancel_drag(app);
+    return;
+  }
+
+  app.drag_source = wl_data_device_manager_create_data_source(mgr);
+  if (!app.drag_source) {
+    cancel_drag(app);
+    return;
+  }
+
+  // Offer MIME types
+  wl_data_source_offer(app.drag_source, "text/uri-list");
+  wl_data_source_offer(app.drag_source, "x-special/gnome-copied-files");
+
+  wl_data_source_set_actions(app.drag_source,
+      WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
+      WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
+  wl_data_source_add_listener(app.drag_source, &kDataSourceListener, &app);
+
+  // Determine file info for the ghost icon
+  FileType drag_ft = FileType::File;
+  std::string drag_label;
+  if (!app.drag_paths.empty()) {
+    drag_label = std::filesystem::path(app.drag_paths[0]).filename().string();
+    for (const auto& e : app.cur_tab().entries) {
+      if (e.path == app.drag_paths[0]) {
+        drag_ft = e.is_dir ? FileType::Folder : e.type;
+        break;
+      }
+    }
+  }
+
+  auto icon_name_for_type = [](FileType ft) -> const char* {
+    switch (ft) {
+      case FileType::Folder:     return "folder";
+      case FileType::Image:      return "image-x-generic";
+      case FileType::Audio:      return "audio-x-generic";
+      case FileType::Video:      return "video-x-generic";
+      case FileType::Text:       return "text-x-generic";
+      case FileType::Markdown:   return "text-x-markdown";
+      case FileType::Code:       return "text-x-code";
+      case FileType::Document:   return "x-office-document";
+      case FileType::Font:       return "font-x-generic";
+      case FileType::Archive:    return "application-x-archive";
+      case FileType::Executable: return "application-x-executable";
+      default:                   return "text-x-generic";
+    }
+  };
+
+  // word-wrap helper (mirrors the one in ui/draw.cpp)
+  auto word_wrap_lines = [](cairo_t* cr, const std::string& text, double max_width) {
+    std::vector<std::string> lines;
+    std::istringstream stream(text);
+    cairo_text_extents_t te;
+    std::string word;
+    std::string cur;
+
+    while (stream >> word) {
+      cairo_text_extents(cr, word.c_str(), &te);
+      bool fits_anywhere = te.width <= max_width;
+
+      if (fits_anywhere && cur.empty()) {
+        cur = word;
+      } else if (fits_anywhere) {
+        cairo_text_extents(cr, (cur + " " + word).c_str(), &te);
+        if (te.width <= max_width) {
+          cur += " " + word;
+        } else {
+          lines.push_back(cur);
+          cur = word;
+        }
+      } else {
+        if (!cur.empty()) {
+          lines.push_back(cur);
+          cur.clear();
+        }
+        std::vector<std::string> parts;
+        size_t seg_start = 0;
+        for (size_t i = 0; i < word.size(); i++) {
+          if (word[i] == '-') {
+            parts.push_back(word.substr(seg_start, i - seg_start + 1));
+            seg_start = i + 1;
+          }
+        }
+        if (seg_start < word.size())
+          parts.push_back(word.substr(seg_start));
+        if (parts.empty())
+          parts.push_back(word);
+        std::string line;
+        for (const auto& part : parts) {
+          std::string test = line + part;
+          cairo_text_extents(cr, test.c_str(), &te);
+          if (te.width > max_width) {
+            if (!line.empty()) {
+              lines.push_back(line);
+              line.clear();
+            }
+            cairo_text_extents(cr, part.c_str(), &te);
+            if (te.width > max_width) {
+              std::string frag;
+              for (char ch : part) {
+                cairo_text_extents(cr, (frag + ch).c_str(), &te);
+                if (te.width > max_width) {
+                  if (!frag.empty()) {
+                    lines.push_back(frag);
+                    frag.clear();
+                  }
+                  frag = ch;
+                } else {
+                  frag += ch;
+                }
+              }
+              if (!frag.empty()) line = frag;
+            } else {
+              line = part;
+            }
+          } else {
+            line += part;
+          }
+        }
+        if (!line.empty())
+          cur = line;
+      }
+    }
+    if (!cur.empty())
+      lines.push_back(cur);
+
+    for (auto& line : lines) {
+      cairo_text_extents(cr, line.c_str(), &te);
+      if (te.width > max_width) {
+        while (!line.empty() && te.width > max_width) {
+          line.pop_back();
+          cairo_text_extents(cr, (line + "...").c_str(), &te);
+        }
+        line += "...";
+      }
+    }
+    return lines;
+  };
+
+  // Create drag icon surface (GNOME 51 style: stacked cards, pill badge, drop shadow)
+  const int icon_size = 48;
+  const int label_font_size = 12;
+  const int pad_x = 12;
+  const int pad_top = 10;
+  const int pad_bot = 10;
+  const int icon_gap = 6;
+  const double line_height = label_font_size * 1.3;
+  const int ghost_w = 140;
+  const int shadow_layers = 3;     // stacked card layers behind main card
+  const int shadow_offset = 2;     // px offset per layer
+  const int cursor_off_x = 16;     // shift ghost right of cursor
+  const int cursor_off_y = 16;     // shift ghost below cursor
+
+  if (!app.drag_icon_surface) {
+    app.drag_icon_surface = wl_compositor_create_surface(app.wl.compositor());
+  }
+
+  if (app.drag_icon_surface) {
+    // Open a temporary cairo context to compute word-wrap
+    auto* tmp_surf = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
+    auto* tmp_cr = cairo_create(tmp_surf);
+    cairo_select_font_face(tmp_cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(tmp_cr, label_font_size);
+
+    double text_max_w = ghost_w - pad_x * 2;
+    auto lines = word_wrap_lines(tmp_cr, drag_label, text_max_w);
+
+    // Limit lines shown (3 max, rest get "...")
+    if (lines.size() > 3) {
+      lines.resize(3);
+      lines.back() = "...";
+    }
+
+    double text_block_h = lines.size() * line_height;
+    int card_h = pad_top + icon_size + icon_gap + static_cast<int>(text_block_h) + pad_bot;
+    // Total surface includes room for shadow/stacked cards
+    int total_w = ghost_w + shadow_layers * shadow_offset + 4;
+    int total_h = card_h + shadow_layers * shadow_offset + 4;
+
+    cairo_destroy(tmp_cr);
+    cairo_surface_destroy(tmp_surf);
+
+    int stride = cairo_format_stride_for_width(CAIRO_FORMAT_ARGB32, total_w);
+    int buf_size = stride * total_h;
+
+    int memfd = eh::wayland::memfd_create_compat("eh-dnd-icon", 0);
+    if (memfd >= 0 && ftruncate(memfd, buf_size) == 0) {
+      auto* pool = wl_shm_create_pool(app.shm, memfd, buf_size);
+      if (pool) {
+        auto* buf = wl_shm_pool_create_buffer(pool, 0, total_w, total_h, stride, WL_SHM_FORMAT_ARGB8888);
+        wl_shm_pool_destroy(pool);
+
+        auto* data = static_cast<unsigned char*>(
+            mmap(nullptr, static_cast<size_t>(buf_size), PROT_READ | PROT_WRITE, MAP_SHARED, memfd, 0));
+        if (data && data != MAP_FAILED) {
+          std::memset(data, 0, static_cast<size_t>(buf_size));
+          cairo_surface_t* cairo_surf =
+              cairo_image_surface_create_for_data(data, CAIRO_FORMAT_ARGB32, total_w, total_h, stride);
+          cairo_t* cr = cairo_create(cairo_surf);
+
+          cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+          cairo_set_font_size(cr, label_font_size);
+
+          // Helper: draw a rounded card background at offset
+          auto draw_card = [&](double ox, double oy, double alpha) {
+            cairo_set_source_rgba(cr, 0.12, 0.12, 0.14, alpha);
+            draw_rounded_rect(cr, ox, oy, ghost_w, card_h, 10.0);
+            cairo_fill(cr);
+          };
+
+          // Draw drop shadow (soft blur approximation: 3 expanding layers)
+          for (int i = shadow_layers; i >= 1; --i) {
+            double s_ox = 2.0 + i * shadow_offset;
+            double s_oy = 2.0 + i * shadow_offset;
+            double s_alpha = 0.08 / i;
+            draw_card(s_ox, s_oy, s_alpha);
+          }
+
+          // Draw stacked card layers (GNOME 51 style)
+          for (int i = shadow_layers - 1; i >= 1; --i) {
+            double c_ox = 2.0 + i * shadow_offset;
+            double c_oy = 2.0 + i * shadow_offset;
+            draw_card(c_ox, c_oy, 0.15);
+          }
+
+          // Draw main card
+          draw_card(2.0, 2.0, 0.92);
+
+          // Main card border (subtle)
+          cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.12);
+          cairo_set_line_width(cr, 1.0);
+          draw_rounded_rect(cr, 2.0, 2.0, ghost_w, card_h, 10.0);
+          cairo_stroke(cr);
+
+          // Draw the file icon from icon cache
+          int icon_cy = 2.0 + pad_top;
+          int icon_cx = 2.0 + (ghost_w - icon_size) / 2;
+          const auto* icon_entry = app.icons.tray_icon(icon_name_for_type(drag_ft));
+          if (icon_entry && icon_entry->surface) {
+            double iw = static_cast<double>(icon_entry->width);
+            double ih = static_cast<double>(icon_entry->height);
+            if (iw > 0 && ih > 0) {
+              double scale = icon_size / std::max(1.0, std::max(iw, ih));
+              cairo_save(cr);
+              cairo_translate(cr, icon_cx, icon_cy);
+              cairo_scale(cr, scale, scale);
+              cairo_set_source_surface(cr, icon_entry->surface,
+                                       (icon_size / scale - iw) / 2,
+                                       (icon_size / scale - ih) / 2);
+              cairo_paint(cr);
+              cairo_restore(cr);
+            }
+          }
+
+          // Draw label text (word-wrapped, centered)
+          int text_y = 2.0 + pad_top + icon_size + icon_gap + static_cast<int>(line_height);
+
+          double label_area_h = static_cast<double>(card_h) - pad_top - icon_size - icon_gap - pad_bot;
+          double text_block_offset = (label_area_h - lines.size() * line_height) / 2.0;
+
+          cairo_set_source_rgba(cr, 0.92, 0.92, 0.95, 0.9);
+          for (size_t i = 0; i < lines.size(); i++) {
+            cairo_text_extents_t te;
+            cairo_text_extents(cr, lines[i].c_str(), &te);
+            double lx = 2.0 + (ghost_w - te.width) / 2.0;
+            double ly = text_y + i * line_height + text_block_offset;
+            cairo_move_to(cr, lx, ly);
+            cairo_show_text(cr, lines[i].c_str());
+          }
+
+          // Draw pill-style count badge (M3 style) if multiple files
+          if (app.drag_paths.size() > 1) {
+            std::string count = std::to_string(app.drag_paths.size()) + " items";
+            cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+            cairo_set_font_size(cr, 11);
+            cairo_text_extents_t te;
+            cairo_text_extents(cr, count.c_str(), &te);
+
+            double badge_w = te.width + 14.0;  // padding
+            double badge_h = 18.0;
+            double badge_x = 2.0 + ghost_w - badge_w - 6.0;
+            double badge_y = 2.0 + 4.0;
+
+            // Pill background (M3 accent container)
+            cairo_set_source_rgba(cr, 0.40, 0.65, 0.95, 0.95);
+            draw_rounded_rect(cr, badge_x, badge_y, badge_w, badge_h, badge_h / 2.0);
+            cairo_fill(cr);
+
+            // Pill text
+            cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.98);
+            cairo_move_to(cr, badge_x + 7.0, badge_y + badge_h / 2.0 + te.height / 2.0 + 1.0);
+            cairo_show_text(cr, count.c_str());
+          }
+
+          // Draw action badge (bottom-left) when copy is active
+          if (app.drag_initial_is_copy) {
+            const char* action_text = "Copy";
+            cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+            cairo_set_font_size(cr, 10);
+            cairo_text_extents_t ate;
+            cairo_text_extents(cr, action_text, &ate);
+
+            double ab_w = ate.width + 12.0;
+            double ab_h = 16.0;
+            double ab_x = 2.0 + 6.0;
+            double ab_y = 2.0 + card_h - ab_h - 5.0;
+
+            // Pill background (muted accent)
+            cairo_set_source_rgba(cr, 0.35, 0.60, 0.90, 0.90);
+            draw_rounded_rect(cr, ab_x, ab_y, ab_w, ab_h, ab_h / 2.0);
+            cairo_fill(cr);
+
+            // Pill text
+            cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 0.98);
+            cairo_move_to(cr, ab_x + 6.0, ab_y + ab_h / 2.0 + ate.height / 2.0 + 1.0);
+            cairo_show_text(cr, action_text);
+          }
+
+          cairo_destroy(cr);
+          cairo_surface_destroy(cairo_surf);
+          munmap(data, static_cast<size_t>(buf_size));
+        }
+        close(memfd);
+        wl_surface_attach(app.drag_icon_surface, buf,
+                          -cursor_off_x - 2,
+                          -cursor_off_y - 2);
+        wl_surface_commit(app.drag_icon_surface);
+        app.drag_icon_attached = true;
+      } else {
+        close(memfd);
+      }
+    } else if (memfd >= 0) {
+      close(memfd);
+    }
+  }
+
+  // Start the drag session
+  wl_data_device_start_drag(
+      app.data_device,
+      app.drag_source,
+      app.surface,
+      app.drag_icon_surface,
+      app.drag_button_serial);
+
+  app.drag_potential = false;
+
+  // Determine the initial action for the badge (checked once at drag start)
+  {
+    bool ctrl = false;
+    if (auto* xkb = app.seat.xkb_state_ptr()) {
+      ctrl = xkb_state_mod_name_is_active(xkb, XKB_MOD_NAME_CTRL,
+                                           XKB_STATE_MODS_EFFECTIVE) != 0;
+    }
+    app.drag_initial_is_copy = ctrl;
+  }
+}
+
+// ── Cancel drag ───────────────────────────────────────────────
+
+void cancel_drag(AppState& app) {
+  if (app.drag_source) {
+    wl_data_source_destroy(app.drag_source);
+    app.drag_source = nullptr;
+  }
+  if (app.drag_icon_surface && app.drag_icon_attached) {
+    wl_surface_attach(app.drag_icon_surface, nullptr, 0, 0);
+    wl_surface_commit(app.drag_icon_surface);
+    app.drag_icon_attached = false;
+  }
+  app.drag_paths.clear();
+  app.drag_potential = false;
+  app.drag_potential_idx = -1;
+  // Clear drop target state
+  app.drop_target_path.clear();
+  app.drop_target_idx = -1;
+  app.drop_target_is_sidebar = false;
+  app.drop_target_sidebar_idx = -1;
+  app.drop_target_is_valid = false;
+  app.drop_x = 0;
+  app.drop_y = 0;
+  app.drop_enter_serial = 0;
+  app.drop_chosen_action = WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
+  app.drop_hover_open_start_ms = 0;
+  app.drop_hover_open_path.clear();
+  app.drop_target_tab_idx = -1;
+  app.drop_tab_switch_start_ms = 0;
+}
+
+void update_drag_icon(AppState& app) {
+  (void)app;
+}
+
+// ── Drop receiver (wl_data_device listener) ─────────────────────
+
+namespace {
+
+struct DropOfferData {
+  AppState* app;
+  std::vector<std::string> mime_types;
+};
+
+void data_offer_offer(void* data, wl_data_offer*, const char* mime_type) {
+  auto& od = *static_cast<DropOfferData*>(data);
+  od.mime_types.emplace_back(mime_type);
+}
+
+void data_offer_source_actions(void* data, wl_data_offer*, uint32_t source_actions) {
+  auto& od = *static_cast<DropOfferData*>(data);
+  od.app->drop_chosen_action = source_actions;
+}
+void data_offer_action(void* data, wl_data_offer*, uint32_t dnd_action) {
+  auto& od = *static_cast<DropOfferData*>(data);
+  if (dnd_action != WL_DATA_DEVICE_MANAGER_DND_ACTION_NONE)
+    od.app->drop_chosen_action = dnd_action;
+}
+
+constexpr wl_data_offer_listener kDataOfferListener = {
+  .offer = data_offer_offer,
+  .source_actions = data_offer_source_actions,
+  .action = data_offer_action,
+};
+
+bool has_mime(const DropOfferData& od, const std::string_view target) {
+  for (const auto& m : od.mime_types) {
+    if (m == target) return true;
+  }
+  return false;
+}
+
+} // namespace
+
+// While dragging, activate whichever split pane is under the cursor so all
+// drop-target hit testing (and the eventual drop) acts on that pane —
+// mirrors Dolphin activating a pane when files are dragged onto it.
+static void activate_pane_under_dnd(AppState& app, int sx) {
+  if (!app.split_view) return;
+  int s_w = app.sidebar_w();
+  int content_w = app.width - s_w - (app.info_panel_open ? app.info_panel_width : 0);
+  int split = app.split_divider_x;
+  if (split <= 0) split = content_w / 2;
+  int pane = (sx >= s_w + split + 4) ? 1 : 0;
+  if (pane != app.active_pane) {
+    app.active_pane = pane;
+    app.pendingRedraw = true;
+  }
+}
+
+void data_device_data_offer(void* data, wl_data_device*, wl_data_offer* offer) {
+  auto& app = *static_cast<AppState*>(data);
+  if (app.drop_offer) {
+    auto* old = static_cast<DropOfferData*>(wl_data_offer_get_user_data(app.drop_offer));
+    delete old;
+    wl_data_offer_destroy(app.drop_offer);
+  }
+  app.drop_offer = offer;
+  auto* offer_data = new DropOfferData{&app, {}};
+  wl_data_offer_set_user_data(offer, offer_data);
+  wl_data_offer_add_listener(offer, &kDataOfferListener, offer_data);
+}
+
+void data_device_enter(void* data, wl_data_device*, uint32_t serial, wl_surface*,
+                       wl_fixed_t x, wl_fixed_t y, wl_data_offer* offer) {
+  auto& app = *static_cast<AppState*>(data);
+  app.drop_enter_serial = serial;
+  app.drop_chosen_action = WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
+  auto* offer_data = static_cast<DropOfferData*>(wl_data_offer_get_user_data(offer));
+  if (offer_data && has_mime(*offer_data, "text/uri-list")) {
+    wl_data_offer_accept(offer, serial, "text/uri-list");
+    wl_data_offer_set_actions(offer,
+        WL_DATA_DEVICE_MANAGER_DND_ACTION_COPY |
+        WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE,
+        WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE);
+  }
+
+  // Perform initial hit test so the drop target is set from the very start,
+  // rather than waiting for the first motion event.
+  int sx = wl_fixed_to_int(x);
+  int sy = wl_fixed_to_int(y);
+  app.drop_x = sx;
+  app.drop_y = sy;
+  activate_pane_under_dnd(app, sx);
+
+  // Check tab bar
+  int tab_bar_top = app.top_bar_height;
+  int tab_bar_bot = app.top_bar_height + app.tab_bar_height;
+  if (app.tab_bar_height > 0 && sy >= tab_bar_top && sy < tab_bar_bot &&
+      app.tabs.size() > 1) {
+    for (size_t i = 0; i < app.tab_hits.size(); ++i) {
+      auto& th = app.tab_hits[i];
+      if (sx >= th.x && sx < th.x + th.w && static_cast<int>(i) != app.active_tab) {
+        app.drop_target_tab_idx = static_cast<int>(i);
+        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        app.drop_tab_switch_start_ms = static_cast<uint64_t>(now_ms);
+        app.pendingRedraw = true;
+        return;
+      }
+    }
+    return;
+  }
+
+  // Check content area first (folders in the content area get priority)
+  int idx = -1;
+  if (app.cur_tab().view_mode == ViewMode::List) {
+    idx = hit_test_list(app, sx, sy);
+  } else {
+    idx = hit_test_grid(app, sx, sy);
+  }
+  if (idx >= 0 && idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+    int real_idx = app.cur_tab().visible_entries[idx];
+    if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
+        app.cur_tab().entries[real_idx].is_dir) {
+      app.drop_target_path = app.cur_tab().entries[real_idx].path;
+      app.drop_target_idx = idx;
+      app.drop_target_is_sidebar = false;
+      app.drop_target_sidebar_idx = -1;
+      app.drop_target_is_valid = true;
+      app.pendingRedraw = true;
+      return;
+    }
+  }
+
+  // Check favorites section
+  if (hit_test_fav_section(app, sx, sy)) {
+    app.drop_target_fav_section = true;
+    app.drop_target_is_sidebar = false;
+    app.drop_target_sidebar_idx = -1;
+    app.drop_target_path.clear();
+    app.drop_target_is_valid = true;
+    app.pendingRedraw = true;
+    return;
+  }
+
+  // Check sidebar (lowest priority — only when cursor is actually in sidebar area)
+  int sb_idx = hit_test_sidebar(app, sx, sy);
+  if (sb_idx >= 0 && sb_idx < static_cast<int>(app.sidebar_locations.size())) {
+    const auto& loc = app.sidebar_locations[sb_idx];
+    std::error_code ec;
+    if (std::filesystem::is_directory(loc.path, ec)) {
+      app.drop_target_path = loc.path;
+      app.drop_target_idx = -1;
+      app.drop_target_is_sidebar = true;
+      app.drop_target_sidebar_idx = sb_idx;
+      app.drop_target_is_valid = true;
+      app.pendingRedraw = true;
+      return;
+    }
+  }
+}
+
+void data_device_leave(void* data, wl_data_device*) {
+  auto& app = *static_cast<AppState*>(data);
+  app.drop_target_path.clear();
+  app.drop_target_idx = -1;
+  app.drop_target_is_sidebar = false;
+  app.drop_target_sidebar_idx = -1;
+  app.drop_target_fav_section = false;
+  app.drop_target_is_valid = false;
+  app.drop_x = 0;
+  app.drop_y = 0;
+  app.drop_enter_serial = 0;
+  app.drop_chosen_action = WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
+  app.drop_hover_open_start_ms = 0;
+  app.drop_hover_open_path.clear();
+  app.drop_target_tab_idx = -1;
+  app.drop_tab_switch_start_ms = 0;
+  app.pendingRedraw = true;
+  if (app.drop_offer) {
+    auto* offer_data = static_cast<DropOfferData*>(wl_data_offer_get_user_data(app.drop_offer));
+    delete offer_data;
+    wl_data_offer_destroy(app.drop_offer);
+    app.drop_offer = nullptr;
+  }
+}
+
+void data_device_motion(void* data, wl_data_device*, uint32_t, wl_fixed_t x, wl_fixed_t y) {
+  auto& app = *static_cast<AppState*>(data);
+  int sx = wl_fixed_to_int(x);
+  int sy = wl_fixed_to_int(y);
+  app.drop_x = sx;
+  app.drop_y = sy;
+  activate_pane_under_dnd(app, sx);
+
+  // Re-accept the offer on every motion so the compositor knows we're still interested
+  if (app.drop_offer) {
+    wl_data_offer_accept(app.drop_offer, app.drop_enter_serial, "text/uri-list");
+  }
+
+  // Check tab bar first (highest priority — auto-switch tabs on hover)
+  int tab_bar_top = app.top_bar_height;
+  int tab_bar_bot = app.top_bar_height + app.tab_bar_height;
+  if (app.tab_bar_height > 0 && sy >= tab_bar_top && sy < tab_bar_bot &&
+      app.tabs.size() > 1) {
+    int hit_tab = -1;
+    for (size_t i = 0; i < app.tab_hits.size(); ++i) {
+      auto& th = app.tab_hits[i];
+      if (sx >= th.x && sx < th.x + th.w) {
+        hit_tab = static_cast<int>(i);
+        break;
+      }
+    }
+    if (hit_tab >= 0 && hit_tab != app.active_tab) {
+      if (app.drop_target_tab_idx != hit_tab) {
+        app.drop_target_tab_idx = hit_tab;
+        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        app.drop_tab_switch_start_ms = static_cast<uint64_t>(now_ms);
+        app.pendingRedraw = true;
+      }
+      return;
+    }
+    // Over tab bar but not on a non-active tab — clear
+    if (app.drop_target_tab_idx >= 0) {
+      app.drop_target_tab_idx = -1;
+      app.drop_tab_switch_start_ms = 0;
+      app.pendingRedraw = true;
+    }
+    return;
+  }
+  // Not in tab bar area — clear tab target
+  if (app.drop_target_tab_idx >= 0) {
+    app.drop_target_tab_idx = -1;
+    app.drop_tab_switch_start_ms = 0;
+    app.pendingRedraw = true;
+  }
+
+  // Check visible entries first (content-area folders get highest priority)
+  int idx = -1;
+  if (app.cur_tab().view_mode == ViewMode::List) {
+    idx = hit_test_list(app, sx, sy);
+  } else {
+    idx = hit_test_grid(app, sx, sy);
+  }
+
+  if (idx >= 0 && idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+    int real_idx = app.cur_tab().visible_entries[idx];
+    if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
+        app.cur_tab().entries[real_idx].is_dir) {
+      const auto& folder_path = app.cur_tab().entries[real_idx].path;
+      if (app.drop_target_idx != idx || app.drop_target_is_sidebar) {
+        app.drop_target_path = folder_path;
+        app.drop_target_idx = idx;
+        app.drop_target_is_sidebar = false;
+        app.drop_target_sidebar_idx = -1;
+        app.drop_target_fav_section = false;
+        app.drop_target_is_valid = true;
+        app.pendingRedraw = true;
+      }
+      // Start / reset hover-to-open timer for this folder
+      if (app.drop_hover_open_path != folder_path) {
+        app.drop_hover_open_path = folder_path;
+        auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
+        app.drop_hover_open_start_ms = static_cast<uint64_t>(now_ms);
+      }
+      return;
+    }
+  }
+
+  // Check if dragging over the Favorites section (to add a new favorite)
+  if (hit_test_fav_section(app, sx, sy)) {
+    if (!app.drop_target_fav_section) {
+      app.drop_target_fav_section = true;
+      app.drop_target_is_sidebar = false;
+      app.drop_target_sidebar_idx = -1;
+      app.drop_target_path.clear();
+      app.drop_target_is_valid = true;
+      app.drop_hover_open_start_ms = 0;
+      app.drop_hover_open_path.clear();
+      app.pendingRedraw = true;
+    }
+    return;
+  }
+
+  // Check sidebar (lowest priority — only when cursor is actually in sidebar area)
+  int sb_idx = hit_test_sidebar(app, sx, sy);
+  if (sb_idx >= 0 && sb_idx < static_cast<int>(app.sidebar_locations.size())) {
+    // If over a sidebar item, clear the favorites section indicator
+    if (app.drop_target_fav_section) {
+      app.drop_target_fav_section = false;
+      app.pendingRedraw = true;
+    }
+    const auto& loc = app.sidebar_locations[sb_idx];
+    std::error_code ec;
+    if (std::filesystem::is_directory(loc.path, ec)) {
+      if (!app.drop_target_is_sidebar || app.drop_target_sidebar_idx != sb_idx) {
+        app.drop_target_fav_section = false;
+        app.drop_target_path = loc.path;
+        app.drop_target_idx = -1;
+        app.drop_target_is_sidebar = true;
+        app.drop_target_sidebar_idx = sb_idx;
+        app.drop_target_is_valid = true;
+        app.drop_hover_open_start_ms = 0;
+        app.drop_hover_open_path.clear();
+        app.pendingRedraw = true;
+      }
+      return;
+    }
+  }
+
+  // No valid target under cursor — clear hover-to-open timer
+  if (app.drop_target_is_valid || app.drop_target_fav_section) {
+    app.drop_target_path.clear();
+    app.drop_target_idx = -1;
+    app.drop_target_is_sidebar = false;
+    app.drop_target_sidebar_idx = -1;
+    app.drop_target_fav_section = false;
+    app.drop_target_is_valid = false;
+    app.drop_hover_open_start_ms = 0;
+    app.drop_hover_open_path.clear();
+    app.pendingRedraw = true;
+  }
+}
+
+void data_device_selection(void*, wl_data_device*, wl_data_offer*) {}
+
+void data_device_drop(void* data, wl_data_device*) {
+  auto& app = *static_cast<AppState*>(data);
+  if (!app.drop_offer) return;
+
+  // ── Within-app drop ─────────────────────────────────────────────
+  if (app.drag_source && !app.drag_paths.empty()) {
+    auto* offer_data = static_cast<DropOfferData*>(wl_data_offer_get_user_data(app.drop_offer));
+    delete offer_data;
+    wl_data_offer_destroy(app.drop_offer);
+    app.drop_offer = nullptr;
+
+    // Drop on Favorites section — add dragged folders as favorites
+    if (app.drop_target_fav_section) {
+      for (const auto& p : app.drag_paths) {
+        std::error_code ec;
+        if (std::filesystem::is_directory(p, ec)) {
+          if (std::find(app.favorites.begin(), app.favorites.end(), p) == app.favorites.end()) {
+            app.favorites.push_back(p);
+          }
+        }
+      }
+      save_file_browser_settings(app);
+      refresh_sidebar(app);
+      app.drop_target_fav_section = false;
+      app.drop_target_is_valid = false;
+      app.drop_target_path.clear();
+      app.pendingRedraw = true;
+      return;
+    }
+
+    // Drop on a tab header — switch to that tab and drop into its directory
+    if (app.drop_target_tab_idx >= 0 &&
+        app.drop_target_tab_idx != app.active_tab &&
+        app.drop_target_tab_idx < static_cast<int>(app.tabs.size())) {
+      int target_tab = app.drop_target_tab_idx;
+      app.drop_target_tab_idx = -1;
+      app.drop_tab_switch_start_ms = 0;
+      app.active_tab = target_tab;
+      reload_dir(app);
+      // Fall through with the now-active tab's path as target
+    }
+
+    // Use drop target if valid, otherwise current directory
+    std::string target = app.drop_target_is_valid ? app.drop_target_path : app.cur_tab().current_path;
+
+    // Filter out items already inside the target directory — dropping them
+    // back where they came from is a no-op, just release
+    std::vector<std::string> ops;
+    ops.reserve(app.drag_paths.size());
+    for (const auto& src : app.drag_paths) {
+      if (!is_same_directory(std::filesystem::path(src).parent_path(),
+                             std::filesystem::path(target)))
+        ops.push_back(src);
+    }
+    if (ops.empty()) {
+      app.drop_target_path.clear();
+      app.drop_target_idx = -1;
+      app.drop_target_is_sidebar = false;
+      app.drop_target_sidebar_idx = -1;
+      app.drop_target_fav_section = false;
+      app.drop_target_is_valid = false;
+      app.drop_x = 0;
+      app.drop_y = 0;
+      app.pendingRedraw = true;
+      return;
+    }
+
+    // Ask the user how to handle the drop before starting any file I/O.
+    open_drop_chooser(app, std::move(ops), std::move(target));
+    return;
+  }
+
+  // ── External drop: read URI data through the compositor ─────────
+  int fds[2];
+  if (pipe2(fds, O_CLOEXEC) < 0) return;
+
+  wl_data_offer_receive(app.drop_offer, "text/uri-list", fds[1]);
+  close(fds[1]);
+
+  // The receive request must be flushed before the compositor will
+  // send the data.  After flushing, poll both the Wayland display fd
+  // and the pipe fd so we can dispatch the incoming events (e.g. the
+  // source client's data-source.send) while waiting for the pipe.
+  wl_display_flush(app.wl.display());
+
+  int dpy_fd = wl_display_get_fd(app.wl.display());
+  std::string buf;
+  char tmp[4096];
+
+  for (;;) {
+    struct pollfd pf[2];
+    pf[0].fd = dpy_fd;
+    pf[0].events = POLLIN;
+    pf[1].fd = fds[0];
+    pf[1].events = POLLIN;
+
+    int pr = poll(pf, 2, -1);
+    if (pr < 0) break;
+
+    if (pf[0].revents & POLLIN) {
+      if (wl_display_dispatch(app.wl.display()) < 0) break;
+    }
+
+    if (pf[1].revents & (POLLIN | POLLHUP)) {
+      ssize_t n = read(fds[0], tmp, sizeof(tmp));
+      if (n > 0) {
+        buf.append(tmp, static_cast<size_t>(n));
+      } else {
+        break;
+      }
+    }
+  }
+
+  close(fds[0]);
+
+  // Parse all file:// URIs from the received data
+  std::vector<std::string> paths;
+  size_t pos = 0;
+  while (pos < buf.size()) {
+    auto end = buf.find_first_of("\r\n", pos);
+    if (end == std::string::npos) end = buf.size();
+    std::string line = buf.substr(pos, end - pos);
+    if (!line.empty() && line.back() == '\r') line.pop_back();
+    if (!line.empty() && line.starts_with("file://")) {
+      std::string raw = line.substr(7);
+      std::string decoded;
+      for (size_t i = 0; i < raw.size(); i++) {
+        if (raw[i] == '%' && i + 2 < raw.size()) {
+          char hex[3] = {raw[i + 1], raw[i + 2], 0};
+          decoded += static_cast<char>(std::strtol(hex, nullptr, 16));
+          i += 2;
+        } else {
+          decoded += raw[i];
+        }
+      }
+      paths.push_back(decoded);
+    }
+    if (end >= buf.size()) break;
+    pos = end + 1;
+  }
+
+  {
+    auto* offer_data = static_cast<DropOfferData*>(wl_data_offer_get_user_data(app.drop_offer));
+    delete offer_data;
+  }
+  wl_data_offer_destroy(app.drop_offer);
+  app.drop_offer = nullptr;
+
+  if (paths.empty()) return;
+
+  // Determine target directory
+  std::string target = app.drop_target_is_valid ? app.drop_target_path : app.cur_tab().current_path;
+
+  // Skip items already inside the target directory
+  std::vector<std::string> ops;
+  ops.reserve(paths.size());
+  for (auto& p : paths) {
+    if (!is_same_directory(std::filesystem::path(p).parent_path(),
+                           std::filesystem::path(target)))
+      ops.push_back(std::move(p));
+  }
+  if (ops.empty()) return;
+
+  // Ask the user how to handle the drop before starting any file I/O.
+  open_drop_chooser(app, std::move(ops), std::move(target));
+}
+
+void setup_drop_receiver(AppState& app) {
+  if (!app.data_device) return;
+
+  static constexpr wl_data_device_listener kDataDeviceListener = {
+    .data_offer = data_device_data_offer,
+    .enter = data_device_enter,
+    .leave = data_device_leave,
+    .motion = data_device_motion,
+    .drop = data_device_drop,
+    .selection = data_device_selection,
+  };
+  wl_data_device_add_listener(app.data_device, &kDataDeviceListener, &app);
+}
+
+// ── Drop action chooser (Copy/Move prompt) ───────────────────────
+
+void open_drop_chooser(AppState& app, std::vector<std::string> ops,
+                       std::string target) {
+  app.drop_chooser_srcs = std::move(ops);
+  app.drop_chooser_target = std::move(target);
+  app.drop_chooser_x = app.drop_x;
+  app.drop_chooser_y = app.drop_y;
+  app.drop_chooser_hover = -1;
+  app.drop_chooser_open = true;
+  app.pendingRedraw = true;
+}
+
+void resolve_drop_chooser(AppState& app, int choice) {
+  app.drop_chooser_open = false;
+  app.drop_chooser_hover = -1;
+  auto srcs = std::move(app.drop_chooser_srcs);
+  app.drop_chooser_srcs.clear();
+  std::string target = std::move(app.drop_chooser_target);
+  app.drop_chooser_target.clear();
+  if (srcs.empty() || target.empty() || choice < 0 || choice > 1) {
+    app.pendingRedraw = true;
+    return;
+  }
+  bool is_move = (choice == 1);
+  request_fs_operation(app, srcs, target, is_move,
+                       is_move ? "Moved" : "Copied", false);
+}
+
+} // namespace eh::file_browser

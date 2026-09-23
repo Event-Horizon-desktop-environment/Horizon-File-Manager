@@ -3,10 +3,10 @@
 
 #include "../app.hpp"
 #include "../trace.hpp"
-#include "../features/compress.hpp"
-#include "../features/sidebar.hpp"
-#include "../features/view_zoom.hpp"
-#include "app/file_browser/features/thumb_pool.hpp"
+#include "../features/compress/compress.hpp"
+#include "../features/sidebar/sidebar.hpp"
+#include "../features/view_zoom/view_zoom.hpp"
+#include "app/file_browser/features/thumbnails/thumb_pool.hpp"
 #include "draw_helpers.hpp"
 #include "draw_file_icons.hpp"
 
