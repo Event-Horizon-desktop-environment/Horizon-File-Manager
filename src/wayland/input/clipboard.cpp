@@ -272,6 +272,7 @@ bool ClipboardService::bind(void* manager, const DataControlOps* ops, wl_seat* s
 void ClipboardService::cleanup() {
   selectionOffer_ = nullptr;
   selectionMimes_.clear();
+  offerMimes_.clear();
   outgoingData_.clear();
 
   if (outgoingSource_) {
@@ -305,7 +306,10 @@ void ClipboardService::notify_changed() {
 void ClipboardService::ext_data_offer(void* data, ext_data_control_device_v1*, ext_data_control_offer_v1* offer) {
   auto* self = static_cast<ClipboardService*>(data);
   if (!offer) return;
-  self->selectionMimes_.clear();
+  // Track each offer separately; do NOT clear the live selection mimes here.
+  // data_offer also fires for primary-selection offers which must not clobber
+  // the clipboard selection (the old global clear broke paste from other FMs).
+  self->offerMimes_[offer];  // ensure entry exists
   ext_data_control_offer_v1_add_listener(offer, &kExtOfferListener_, self);
 }
 
@@ -317,8 +321,8 @@ void ClipboardService::ext_finished(void* data, ext_data_control_device_v1*) {
   static_cast<ClipboardService*>(data)->handle_device_finished();
 }
 
-void ClipboardService::ext_offer_offer(void* data, ext_data_control_offer_v1*, const char* mime) {
-  static_cast<ClipboardService*>(data)->handle_offer_mime_type(mime);
+void ClipboardService::ext_offer_offer(void* data, ext_data_control_offer_v1* offer, const char* mime) {
+  static_cast<ClipboardService*>(data)->handle_offer_mime_type(offer, mime);
 }
 
 void ClipboardService::ext_source_send(void* data, ext_data_control_source_v1*, const char* mime, int32_t fd) {
@@ -334,7 +338,8 @@ void ClipboardService::ext_source_cancelled(void* data, ext_data_control_source_
 void ClipboardService::wlr_data_offer(void* data, zwlr_data_control_device_v1*, zwlr_data_control_offer_v1* offer) {
   auto* self = static_cast<ClipboardService*>(data);
   if (!offer) return;
-  self->selectionMimes_.clear();
+  // See ext_data_offer: per-offer tracking, never clear live selection here.
+  self->offerMimes_[offer];  // ensure entry exists
   zwlr_data_control_offer_v1_add_listener(offer, &kWlrOfferListener_, self);
 }
 
@@ -346,8 +351,8 @@ void ClipboardService::wlr_finished(void* data, zwlr_data_control_device_v1*) {
   static_cast<ClipboardService*>(data)->handle_device_finished();
 }
 
-void ClipboardService::wlr_offer_offer(void* data, zwlr_data_control_offer_v1*, const char* mime) {
-  static_cast<ClipboardService*>(data)->handle_offer_mime_type(mime);
+void ClipboardService::wlr_offer_offer(void* data, zwlr_data_control_offer_v1* offer, const char* mime) {
+  static_cast<ClipboardService*>(data)->handle_offer_mime_type(offer, mime);
 }
 
 void ClipboardService::wlr_source_send(void* data, zwlr_data_control_source_v1*, const char* mime, int32_t fd) {
@@ -360,9 +365,11 @@ void ClipboardService::wlr_source_cancelled(void* data, zwlr_data_control_source
 
 // ── Internal protocol handlers ───────────────────────────────────────────
 
-void ClipboardService::handle_offer_mime_type(const char* mime) {
-  if (!mime) return;
-  selectionMimes_.emplace_back(mime);
+void ClipboardService::handle_offer_mime_type(void* offer, const char* mime) {
+  if (!mime || !offer) return;
+  offerMimes_[offer].emplace_back(mime);
+  // If mime events trail the selection event, keep the live list in sync.
+  if (offer == selectionOffer_) selectionMimes_.emplace_back(mime);
 }
 
 void ClipboardService::handle_selection(void* offer) {
@@ -371,9 +378,26 @@ void ClipboardService::handle_selection(void* offer) {
     selectionOffer_ = nullptr;
     selectionMimes_.clear();
   } else {
-    // MIME types have already been populated by offer.offer events
-    // before selection fires — do NOT clear selectionMimes_.
+    // Snapshot this offer's mimes; primary-selection offers never reach here
+    // (their listener is a no-op) so they can't clobber the clipboard list.
     selectionOffer_ = offer;
+    auto it = offerMimes_.find(offer);
+    if (it != offerMimes_.end()) {
+      selectionMimes_ = it->second;
+    }
+    // Prune stale offers so the map can't grow without bound. Keep the live
+    // selection offer plus a few recent ones; destroy the rest.
+    if (offerMimes_.size() > 8) {
+      for (auto m = offerMimes_.begin(); m != offerMimes_.end();) {
+        if (m->first == selectionOffer_) {
+          ++m;
+          continue;
+        }
+        if (ops_) ops_->destroyOffer(m->first);
+        m = offerMimes_.erase(m);
+        if (offerMimes_.size() <= 8) break;
+      }
+    }
   }
   notify_changed();
 }

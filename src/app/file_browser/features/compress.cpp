@@ -224,6 +224,14 @@ bool is_archive_extension(const std::string& path) {
   return false;
 }
 
+// Disk images that UDisks2 can loop-mount (iso9660/udf filesystems).
+// Proprietary layouts (.bin/.cue, .nrg, .mdf) are excluded — offer Extract.
+bool is_iso_image(const std::string& path) {
+  std::string lower = path;
+  for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return lower.ends_with(".iso") || lower.ends_with(".img") || lower.ends_with(".udf");
+}
+
 std::string default_extract_dir(const std::string& archive_path) {
   fs::path p(archive_path);
   std::string stem = p.stem().string();

@@ -2,12 +2,21 @@
 
 #include <sdbus-c++/sdbus-c++.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
+#include <dirent.h>
+#include <fcntl.h>
+#include <filesystem>
 #include <fstream>
 #include <map>
 #include <string>
 #include <thread>
+#include <unistd.h>
+
+namespace fs = std::filesystem;
 
 namespace eh::drives {
 
@@ -158,5 +167,281 @@ void UDisks2DriveService::add_fstab_async(const std::string&, const std::string&
 }
 
 void UDisks2DriveService::bind_signals() {}
+
+// ── ISO loop helpers ───────────────────────────────────────────────
+
+namespace {
+
+std::string canonical_iso_path(const std::string& p) {
+  std::error_code ec;
+  auto c = fs::weakly_canonical(p, ec);
+  if (!ec && !c.empty()) return c.string();
+  return fs::absolute(p, ec).string();
+}
+
+std::string read_first_line(const std::string& path) {
+  std::ifstream f(path);
+  std::string line;
+  if (f && std::getline(f, line)) {
+    while (!line.empty() && (line.back() == '\n' || line.back() == '\r' || line.back() == ' '))
+      line.pop_back();
+    return line;
+  }
+  return {};
+}
+
+// Parent loop for a device: /dev/loop0p1 -> loop0, /dev/loop0 -> loop0.
+std::string loop_base_name(const std::string& dev) {
+  auto name = dev.substr(dev.find_last_of('/') + 1);
+  if (name.rfind("loop", 0) != 0) return name;
+  // Strip partition suffix: loop0p1 -> loop0, loop12p3 -> loop12.
+  auto ppos = name.rfind('p');
+  if (ppos != std::string::npos && ppos > 4) {
+    bool all_digits = ppos + 1 < name.size();
+    for (size_t i = ppos + 1; all_digits && i < name.size(); ++i)
+      if (!std::isdigit(static_cast<unsigned char>(name[i]))) all_digits = false;
+    if (all_digits) {
+      std::string base = name.substr(0, ppos);
+      if (base.size() > 4 && base.rfind("loop", 0) == 0) {
+        bool base_digits = true;
+        for (size_t i = 4; i < base.size(); ++i)
+          if (!std::isdigit(static_cast<unsigned char>(base[i]))) { base_digits = false; break; }
+        if (base_digits) return base;
+      }
+    }
+  }
+  return name;
+}
+
+std::string shell_quote_arg(const std::string& s) {
+  std::string out = "'";
+  for (char c : s) {
+    if (c == '\'') out += "'\\''";
+    else out += c;
+  }
+  out += '\'';
+  return out;
+}
+
+std::string run_capture(const std::string& cmd) {
+  FILE* f = popen(cmd.c_str(), "r");
+  if (!f) return {};
+  char buf[512];
+  std::string out;
+  while (fgets(buf, sizeof(buf), f)) out += buf;
+  pclose(f);
+  return out;
+}
+
+} // namespace
+
+std::string UDisks2DriveService::loop_backing_file(const std::string& loopdev) {
+  std::string base = loop_base_name(loopdev);
+  std::string sysfs = "/sys/block/" + base + "/loop/backing_file";
+  std::string backing = read_first_line(sysfs);
+  return backing;
+}
+
+std::string UDisks2DriveService::find_loop_for_file(const std::string& iso_path) {
+  std::string want = canonical_iso_path(iso_path);
+  if (want.empty()) return {};
+  DIR* d = opendir("/sys/block");
+  if (!d) return {};
+  std::string found;
+  struct dirent* e;
+  while ((e = readdir(d)) != nullptr) {
+    std::string name = e->d_name;
+    if (name.rfind("loop", 0) != 0) continue;
+    // Skip partitions (loop0p1): only probe whole loop devices.
+    bool is_part = false;
+    auto ppos = name.rfind('p');
+    if (ppos != std::string::npos && ppos > 4) {
+      bool digits = ppos + 1 < name.size();
+      for (size_t i = ppos + 1; digits && i < name.size(); ++i)
+        if (!std::isdigit(static_cast<unsigned char>(name[i]))) digits = false;
+      is_part = digits;
+    }
+    if (is_part) continue;
+    std::string backing = read_first_line("/sys/block/" + name + "/loop/backing_file");
+    if (backing.empty()) continue;
+    if (canonical_iso_path(backing) == want) {
+      found = "/dev/" + name;
+      break;
+    }
+  }
+  closedir(d);
+  return found;
+}
+
+static std::string proc_mountpoint_for(const std::string& dev) {
+  std::ifstream mounts("/proc/mounts");
+  std::string line;
+  while (std::getline(mounts, line)) {
+    auto sp = line.find(' ');
+    if (sp == std::string::npos) continue;
+    if (line.compare(0, sp, dev) != 0) continue;
+    auto rest = line.substr(sp + 1);
+    auto mp_end = rest.find(' ');
+    if (mp_end == std::string::npos) continue;
+    return rest.substr(0, mp_end);
+  }
+  return {};
+}
+
+static std::vector<std::string> loop_partition_devs(const std::string& loopdev) {
+  std::vector<std::string> out;
+  std::string base = loop_base_name(loopdev);
+  DIR* d = opendir(("/sys/block/" + base).c_str());
+  if (!d) return out;
+  struct dirent* e;
+  while ((e = readdir(d)) != nullptr) {
+    std::string name = e->d_name;
+    if (name == base) continue;
+    if (name.rfind(base, 0) != 0) continue;
+    out.push_back("/dev/" + name);
+  }
+  closedir(d);
+  std::sort(out.begin(), out.end());
+  return out;
+}
+
+std::string UDisks2DriveService::mount_iso(const std::string& iso_path) {
+  std::error_code ec;
+  if (!fs::exists(iso_path, ec)) return {};
+
+  // Reuse an already-attached loop device (idempotent mount).
+  std::string existing = find_loop_for_file(iso_path);
+  if (!existing.empty()) {
+    if (!proc_mountpoint_for(existing).empty()) return proc_mountpoint_for(existing);
+    std::string mp = mount(existing);
+    if (!mp.empty()) return mp;
+    // Partitioned image: try child partitions (loop0p1...).
+    for (const auto& part : loop_partition_devs(existing)) {
+      if (!proc_mountpoint_for(part).empty()) return proc_mountpoint_for(part);
+      std::string pmp = mount(part);
+      if (!pmp.empty()) return pmp;
+    }
+    if (!existing.empty()) return proc_mountpoint_for(existing);
+  }
+
+  // Native UDisks2 LoopSetup with fd passing (read-only, like Dolphin -r).
+  try {
+    int fd = open(iso_path.c_str(), O_RDONLY | O_CLOEXEC);
+    if (fd >= 0) {
+      sdbus::UnixFd sfd{fd};
+      std::map<std::string, sdbus::Variant> opts;
+      opts["read-only"] = sdbus::Variant{true};
+      auto conn = sdbus::createSystemBusConnection();
+      auto mgr = sdbus::createProxy(*conn, sdbus::ServiceName{"org.freedesktop.UDisks2"},
+                                    sdbus::ObjectPath{"/org/freedesktop/UDisks2/Manager"});
+      sdbus::ObjectPath loopPath;
+      mgr->callMethod("LoopSetup")
+          .onInterface("org.freedesktop.UDisks2.Manager")
+          .withArguments(sfd, opts)
+          .storeResultsTo(loopPath);
+      ::close(fd);
+      std::string loopStr = loopPath;
+      std::string dev = loopStr.substr(loopStr.find_last_of('/') + 1);
+      std::string loopdev = "/dev/" + dev;
+      // Wait for the kernel device + udev probe (Filesystem iface).
+      for (int i = 0; i < 50; ++i) {
+        if (::access(loopdev.c_str(), F_OK) == 0) break;
+        usleep(100 * 1000);
+      }
+      // UDisks may need extra time after the device node appears before the
+      // Filesystem interface is probed; retry the mount briefly.
+      for (int attempt = 0; attempt < 25; ++attempt) {
+        std::string mp = mount(loopdev);
+        if (!mp.empty()) return mp;
+        usleep(200 * 1000);
+      }
+      for (const auto& part : loop_partition_devs(loopdev)) {
+        for (int i = 0; i < 20 && ::access(part.c_str(), F_OK) != 0; ++i) usleep(100 * 1000);
+        for (int attempt = 0; attempt < 10; ++attempt) {
+          std::string pmp = mount(part);
+          if (!pmp.empty()) return pmp;
+          usleep(200 * 1000);
+        }
+      }
+      return proc_mountpoint_for(loopdev);
+    }
+  } catch (const sdbus::Error&) {
+  } catch (...) {
+  }
+
+  // Fallback: udisksctl loop-setup + mount (no fd passing).
+  std::string setup_out = run_capture("udisksctl loop-setup -r -f " + shell_quote_arg(iso_path) + " 2>&1");
+  auto pos = setup_out.find("/dev/loop");
+  if (pos == std::string::npos) return {};
+  std::string loopdev;
+  for (size_t i = pos; i < setup_out.size(); ++i) {
+    char c = setup_out[i];
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '/' || c == '_' || c == '-') loopdev += c;
+    else break;
+  }
+  if (loopdev.empty()) return {};
+  std::string mp = mount(loopdev);
+  if (!mp.empty()) return mp;
+  for (const auto& part : loop_partition_devs(loopdev)) {
+    std::string pmp = mount(part);
+    if (!pmp.empty()) return pmp;
+  }
+  return proc_mountpoint_for(loopdev);
+}
+
+bool UDisks2DriveService::unmount_iso(const std::string& iso_or_loopdev) {
+  std::string loopdev;
+  if (iso_or_loopdev.rfind("/org/freedesktop/UDisks2/", 0) == 0) {
+    std::string base = iso_or_loopdev.substr(iso_or_loopdev.find_last_of('/') + 1);
+    loopdev = "/dev/" + base;
+  } else if (iso_or_loopdev.rfind("/dev/loop", 0) == 0) {
+    loopdev = loop_base_name(iso_or_loopdev);
+    loopdev = "/dev/" + loopdev;
+    // If a partition was given, unmount it first, then operate on the parent.
+    if (iso_or_loopdev != loopdev) unmount(iso_or_loopdev);
+  } else {
+    loopdev = find_loop_for_file(iso_or_loopdev);
+  }
+  if (loopdev.empty()) return false;
+  std::string base = loop_base_name(loopdev);
+  loopdev = "/dev/" + base;
+
+  // Unmount the loop + any child partitions first (order matters).
+  for (const auto& part : loop_partition_devs(loopdev)) {
+    if (!proc_mountpoint_for(part).empty()) unmount(part);
+  }
+  if (!proc_mountpoint_for(loopdev).empty()) {
+    if (!unmount(loopdev)) return false;
+  }
+
+  // Loop.Delete via D-Bus, fallback to udisksctl loop-delete.
+  try {
+    auto conn = sdbus::createSystemBusConnection();
+    auto proxy = sdbus::createProxy(*conn, sdbus::ServiceName{"org.freedesktop.UDisks2"},
+                                    sdbus::ObjectPath{dev_to_udisks_path(loopdev)});
+    std::map<std::string, sdbus::Variant> opts;
+    proxy->callMethod("Delete").onInterface("org.freedesktop.UDisks2.Loop").withArguments(opts);
+    return find_loop_for_file(loop_backing_file(loopdev)).empty() || ::access(loopdev.c_str(), F_OK) != 0;
+  } catch (const sdbus::Error&) {
+  }
+  std::string cmd = "udisksctl loop-delete -b " + shell_quote_arg(loopdev) + " >/dev/null 2>&1";
+  return std::system(cmd.c_str()) == 0;
+}
+
+void UDisks2DriveService::mount_iso_async(const std::string& iso_path,
+                                          std::function<void(bool, std::string)> cb) {
+  std::thread([this, iso_path, cb = std::move(cb)] {
+    std::string mp = mount_iso(iso_path);
+    if (cb) cb(!mp.empty(), mp);
+  }).detach();
+}
+
+void UDisks2DriveService::unmount_iso_async(const std::string& iso_or_loopdev,
+                                            std::function<void(bool)> cb) {
+  std::thread([this, iso_or_loopdev, cb = std::move(cb)] {
+    bool ok = unmount_iso(iso_or_loopdev);
+    if (cb) cb(ok);
+  }).detach();
+}
 
 }

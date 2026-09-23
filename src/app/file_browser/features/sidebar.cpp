@@ -763,7 +763,7 @@ void refresh_sidebar(AppState& app) {
     SidebarLocation loc;
     loc.kind = SidebarLocation::Kind::Drive;
     loc.label = label;
-    loc.icon_name = "drive-harddisk";
+    loc.icon_name = drives::is_iso_loop_device(dev) ? "drive-optical" : "drive-harddisk";
 
     if (ui != udisk_map.end()) {
       loc.drive_id = ui->second->object_path;
@@ -934,6 +934,15 @@ void refresh_sidebar(AppState& app) {
           }
         }
         closedir(plabel);
+      }
+    }
+    if (label.empty()) {
+      // ISO loop without a volume label: show the image filename (Dolphin-style).
+      std::string backing = drives::iso_loop_backing_file(d.device);
+      if (!backing.empty()) {
+        auto slash = backing.find_last_of('/');
+        std::string base = (slash == std::string::npos) ? backing : backing.substr(slash + 1);
+        if (!base.empty()) label = base;
       }
     }
     if (label.empty()) {

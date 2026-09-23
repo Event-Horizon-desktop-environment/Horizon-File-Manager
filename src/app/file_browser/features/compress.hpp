@@ -20,6 +20,7 @@ std::string format_compress_cmd(const std::vector<std::string>& source_paths,
                                  int format_idx, int level);
 
 bool is_archive_extension(const std::string& path);
+bool is_iso_image(const std::string& path);
 std::string format_extract_cmd(const std::string& archive_path,
                                 const std::string& dest_dir);
 std::string default_extract_dir(const std::string& archive_path);

@@ -53,6 +53,22 @@ public:
   // Async unmount.
   void unmount_async(const std::string& object_path, std::function<void(bool)> cb);
 
+  // ── ISO loop mount (right-click > Mount ISO) ─────────────────────
+  // Dolphin-style native UDisks2 flow: LoopSetup(fd, read-only) + Mount.
+  // Returns mount point on success, empty on failure.
+  std::string mount_iso(const std::string& iso_path);
+  // Unmount + Loop.Delete. Accepts an ISO path, /dev/loopN, or UDisks path.
+  bool unmount_iso(const std::string& iso_or_loopdev);
+  // Attached loop device for an ISO path (e.g. "/dev/loop0"), or empty.
+  std::string find_loop_for_file(const std::string& iso_path);
+  // Backing file for a loop device (via /sys), or empty.
+  std::string loop_backing_file(const std::string& loopdev);
+
+  void mount_iso_async(const std::string& iso_path,
+                       std::function<void(bool, std::string)> cb);
+  void unmount_iso_async(const std::string& iso_or_loopdev,
+                         std::function<void(bool)> cb);
+
   // Async add fstab entry.
   void add_fstab_async(const std::string& object_path, const std::string& mount_point,
                        const std::string& fstype, const std::string& uuid,

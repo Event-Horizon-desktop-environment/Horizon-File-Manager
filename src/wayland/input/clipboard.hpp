@@ -83,7 +83,7 @@ public:
 
   // Protocol callback entrypoints used by the C-style listeners
   void handle_data_offer(void* offer);
-  void handle_offer_mime_type(const char* mime);
+  void handle_offer_mime_type(void* offer, const char* mime);
   void handle_selection(void* offer);
   void handle_device_finished();
   void handle_source_send(const char* mime, int fd);
@@ -160,6 +160,12 @@ private:
 
   void* selectionOffer_ = nullptr;
   std::vector<std::string> selectionMimes_{};
+  // Per-offer MIME tracking. data_offer fires for both regular and primary
+  // selections; the old code cleared the single global list on every
+  // data_offer, so a primary offer arriving after the clipboard selection
+  // wiped the file mimes (external FMs) while our own copy worked (same
+  // mimes for both). Track each offer separately and snapshot on selection.
+  std::unordered_map<void*, std::vector<std::string>> offerMimes_;
 
   std::unordered_map<std::string, std::vector<char>> outgoingData_{};
   void* outgoingSource_ = nullptr;

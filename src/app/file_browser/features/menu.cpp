@@ -34,6 +34,7 @@
 #include "platform/desktop/entries/desktop_xdg_ops.hpp"
 #include "dialog/file_chooser_dialog.hpp"
 #include "platform/widgets/app_drawer/list/desktop_list.hpp"
+#include "services/udisks2/udisks2_drive_service.hpp"
 
 namespace fs = std::filesystem;
 namespace xdg = eh::shell::desktop::xdg;
@@ -555,6 +556,25 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
       app.context_menu_items.push_back(
         AppState::menu_item(AppState::ContextMenuAction::AddToFavorites, "Add to Favorites"));
     }
+    // Disk images get a Dolphin-style top-level Mount/Unmount toggle so it is
+    // visible without opening the Archive submenu.
+    if (!is_dir) {
+      const std::string* iso_path = nullptr;
+      if (tree_row)
+        iso_path = &app.context_menu_tree_entry.path;
+      else if (item_idx >= 0 &&
+               item_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+        int real_idx = app.cur_tab().visible_entries[item_idx];
+        if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()))
+          iso_path = &app.cur_tab().entries[real_idx].path;
+      }
+      if (iso_path && is_iso_image(*iso_path)) {
+        bool mounted = !drives::UDisks2DriveService::instance().find_loop_for_file(*iso_path).empty();
+        app.context_menu_items.push_back(AppState::menu_item(
+            mounted ? AppState::ContextMenuAction::UnmountIso : AppState::ContextMenuAction::MountIso,
+            mounted ? "Unmount" : "Mount"));
+      }
+    }
     app.context_menu_items.push_back(AppState::menu_separator());
     app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Copy, "Copy"));
     app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Paste, "Paste"));
@@ -662,6 +682,13 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
           archive_item.sub_items.push_back(AppState::menu_item(AppState::ContextMenuAction::BrowseArchive, "Browse Archive"));
           archive_item.sub_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Extract, "Extract"));
           archive_item.sub_items.push_back(AppState::menu_item(AppState::ContextMenuAction::ExtractTo, "Extract to..."));
+        }
+        // Disk images get a Dolphin-style Mount/Unmount toggle (UDisks2 loop).
+        if (archive_path && is_iso_image(*archive_path)) {
+          bool mounted = !drives::UDisks2DriveService::instance().find_loop_for_file(*archive_path).empty();
+          archive_item.sub_items.push_back(AppState::menu_item(
+              mounted ? AppState::ContextMenuAction::UnmountIso : AppState::ContextMenuAction::MountIso,
+              mounted ? "Unmount" : "Mount"));
         }
       }
       app.context_menu_items.push_back(std::move(archive_item));

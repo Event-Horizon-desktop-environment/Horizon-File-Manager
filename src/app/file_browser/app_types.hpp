@@ -679,6 +679,8 @@ struct AppState {
     BrowseArchive,
     Extract,
     ExtractTo,
+    MountIso,
+    UnmountIso,
     Settings,
     OpenInNewTab,
     OpenInNewWindow,

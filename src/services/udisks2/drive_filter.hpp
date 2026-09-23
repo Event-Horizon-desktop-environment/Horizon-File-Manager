@@ -46,6 +46,44 @@ inline bool is_hidden_device(const std::string& device) {
          name.starts_with("snap") || name.starts_with("dm-");
 }
 
+// ── ISO loop exemption ─────────────────────────────────────────────
+// Mounted ISOs must show as drives in the sidebar (Dolphin-style), so loop
+// devices backed by .iso/.img/.udf files are exempt from the loop hide rule.
+// Snap squashfs loops (backing *.snap) stay hidden.
+inline std::string iso_loop_backing_file(const std::string& device) {
+  auto name = device.substr(device.find_last_of('/') + 1);
+  if (name.rfind("loop", 0) != 0) return {};
+  // Strip partition suffix loop0p1 -> loop0 for the sysfs lookup.
+  std::string base = name;
+  auto ppos = name.rfind('p');
+  if (ppos != std::string::npos && ppos > 4) {
+    bool all_digits = ppos + 1 < name.size();
+    for (size_t i = ppos + 1; all_digits && i < name.size(); ++i)
+      if (!std::isdigit(static_cast<unsigned char>(name[i]))) all_digits = false;
+    if (all_digits) base = name.substr(0, ppos);
+  }
+  std::string sysfs = "/sys/block/" + base + "/loop/backing_file";
+  FILE* f = fopen(sysfs.c_str(), "r");
+  if (!f) return {};
+  char buf[1024];
+  std::string out;
+  if (fgets(buf, sizeof(buf), f)) {
+    out = buf;
+    while (!out.empty() && (out.back() == '\n' || out.back() == '\r' || out.back() == ' '))
+      out.pop_back();
+  }
+  fclose(f);
+  return out;
+}
+
+inline bool is_iso_loop_device(const std::string& device) {
+  std::string backing = iso_loop_backing_file(device);
+  if (backing.empty()) return false;
+  std::string lower = backing;
+  for (auto& c : lower) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return lower.ends_with(".iso") || lower.ends_with(".img") || lower.ends_with(".udf");
+}
+
 // ── Partition label strings to hide (fallback when GUID unavailable) ──
 
 inline bool is_hidden_partition_label(const std::string& label) {
@@ -216,7 +254,8 @@ inline bool should_hide_drive(const std::string& device,
                               const std::string& fs_type = {},
                               const std::string& partition_label = {}) {
   // 1. Hidden device name patterns (loop, zram, snap, device-mapper)
-  if (is_hidden_device(device))
+  // ISO loop mounts are exempt so mounted ISOs show as sidebar drives.
+  if (is_hidden_device(device) && !is_iso_loop_device(device))
     return true;
 
   // 2. Hidden mount points

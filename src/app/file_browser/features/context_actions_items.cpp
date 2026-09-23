@@ -36,6 +36,7 @@
 #include "platform/desktop/entries/desktop_xdg_ops.hpp"
 #include "dialog/file_chooser_dialog.hpp"
 #include "platform/widgets/app_drawer/list/desktop_list.hpp"
+#include "services/udisks2/udisks2_drive_service.hpp"
 
 namespace fs = std::filesystem;
 namespace xdg = eh::shell::desktop::xdg;
@@ -481,6 +482,50 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
           execute_extract_async(app, app.cur_tab().entries[r].path, dest);
         }
       }
+      draw(app);
+      return;
+    }
+
+    case AppState::ContextMenuAction::MountIso: {
+      std::string iso = entry.path;
+      app.operation_status = "Mounting disk image...";
+      app.operation_status_expires_ms = menu_expiry_3s();
+      draw(app);
+      drives::UDisks2DriveService::instance().mount_iso_async(
+          iso, [&app, iso](bool ok, std::string mnt) {
+            DeferredCall::callLater([&app, ok, mnt, iso]() {
+              if (ok && !mnt.empty()) {
+                app.operation_status = "Mounted";
+                app.sidebar_needs_refresh = true;
+                app.computer_needs_refresh = true;
+                navigate_to(app, mnt);
+              } else {
+                app.operation_status = "Mount failed";
+                app.operation_status_expires_ms = menu_expiry_3s();
+                draw(app);
+              }
+            });
+          });
+      draw(app);
+      return;
+    }
+
+    case AppState::ContextMenuAction::UnmountIso: {
+      std::string iso = entry.path;
+      app.operation_status = "Unmounting disk image...";
+      app.operation_status_expires_ms = menu_expiry_3s();
+      draw(app);
+      drives::UDisks2DriveService::instance().unmount_iso_async(
+          iso, [&app](bool ok) {
+            DeferredCall::callLater([&app, ok]() {
+              app.operation_status = ok ? "Unmounted" : "Unmount failed";
+              app.operation_status_expires_ms = menu_expiry_3s();
+              app.sidebar_needs_refresh = true;
+              app.computer_needs_refresh = true;
+              reload_dir(app);
+              draw(app);
+            });
+          });
       draw(app);
       return;
     }
