@@ -407,12 +407,16 @@ bool UDisks2DriveService::unmount_iso(const std::string& iso_or_loopdev) {
   loopdev = "/dev/" + base;
 
   // Unmount the loop + any child partitions first (order matters).
+  // Always re-check /proc/mounts afterwards: if anything is still mounted,
+  // Loop.Delete would fail, so bail out instead of leaking a half-torn-down loop.
   for (const auto& part : loop_partition_devs(loopdev)) {
     if (!proc_mountpoint_for(part).empty()) unmount(part);
   }
-  if (!proc_mountpoint_for(loopdev).empty()) {
-    if (!unmount(loopdev)) return false;
+  if (!proc_mountpoint_for(loopdev).empty()) unmount(loopdev);
+  for (const auto& part : loop_partition_devs(loopdev)) {
+    if (!proc_mountpoint_for(part).empty()) return false;
   }
+  if (!proc_mountpoint_for(loopdev).empty()) return false;
 
   // Loop.Delete via D-Bus, fallback to udisksctl loop-delete.
   try {

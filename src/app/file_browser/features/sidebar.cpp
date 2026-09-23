@@ -760,6 +760,10 @@ void refresh_sidebar(AppState& app) {
 
     if (drives::should_hide_drive(dev, mp, fs, label)) return;
 
+    // ISO loop devices only show while mounted; an attached-but-unmounted
+    // loop (e.g. after Unmount, before Loop.Delete completes) must not linger.
+    if (mp.empty() && drives::is_iso_loop_device(dev)) return;
+
     SidebarLocation loc;
     loc.kind = SidebarLocation::Kind::Drive;
     loc.label = label;

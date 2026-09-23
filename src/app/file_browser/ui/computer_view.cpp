@@ -205,7 +205,7 @@ void refresh_computer(AppState& app) {
       }
 
       // Determine icon
-      item.icon_name = "drive-harddisk";
+      item.icon_name = eh::drives::is_iso_loop_device(dev) ? "drive-optical" : "drive-harddisk";
       item.show_progress = true;
       app.computer_items.push_back(item);
     }
@@ -232,6 +232,8 @@ void refresh_computer(AppState& app) {
         dev = target;
       if (dev.size() < 5 || dev.substr(0, 5) != "/dev/") continue;
       if (drives::should_hide_drive(dev)) continue;
+      // Attached-but-unmounted ISO loops never show (they vanish on unmount).
+      if (drives::is_iso_loop_device(dev)) continue;
       if (std::find(seen_devs.begin(), seen_devs.end(), dev) != seen_devs.end())
         continue;
       seen_devs.push_back(dev);
@@ -265,6 +267,8 @@ void refresh_computer(AppState& app) {
       if (dev.size() < 5 || dev.substr(0, 5) != "/dev/") continue;
       std::string part_label = unescape_name(entry.path().filename().string());
       if (drives::should_hide_drive(dev, {}, {}, part_label)) continue;
+      // Attached-but-unmounted ISO loops never show (they vanish on unmount).
+      if (drives::is_iso_loop_device(dev)) continue;
       if (std::find(seen_devs.begin(), seen_devs.end(), dev) != seen_devs.end())
         continue;
       seen_devs.push_back(dev);
