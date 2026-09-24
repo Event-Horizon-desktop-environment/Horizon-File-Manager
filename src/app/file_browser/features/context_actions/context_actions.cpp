@@ -101,6 +101,7 @@ void execute_context_menu_action(AppState& app, int item_idx) {
   if (ctx_empty_trash(app, item_idx, action)) return;
   if (ctx_add_to_favorites(app, item_idx, action)) return;
   if (ctx_settings(app, item_idx, action)) return;
+  if (ctx_toolbar_overflow(app, item_idx, action)) return;
   // ── Open in new tab ──
   if (ctx_open_in_new_tab(app, item_idx, action)) return;
   // ── Tab context menu actions ──

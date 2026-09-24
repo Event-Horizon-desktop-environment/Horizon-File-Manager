@@ -54,7 +54,7 @@ public:
   void unmount_async(const std::string& object_path, std::function<void(bool)> cb);
 
   // ── ISO loop mount (right-click > Mount ISO) ─────────────────────
-  // Dolphin-style native UDisks2 flow: LoopSetup(fd, read-only) + Mount.
+  // Native UDisks2 flow: LoopSetup(fd, read-only) + Mount.
   // Returns mount point on success, empty on failure.
   std::string mount_iso(const std::string& iso_path);
   // Unmount + Loop.Delete. Accepts an ISO path, /dev/loopN, or UDisks path.

@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include "draw_helpers.hpp"
+#include "ui/design.hpp"
 #include "draw_file_icons.hpp"
 #include "draw_thumbnails.hpp"
 #include "layout.hpp"
@@ -141,10 +142,10 @@ void draw_filter_dropdown(AppState& app, cairo_t* cr, int section) {
 
     // Header
       bool hdr_hit = (glob_idx == (app.active_pane ? app.r_filter_dropdown_hover : app.filter_dropdown_hover));
+    app.hit_main.add(hui::Hit::menu(hui::Hit::kMenuFilter, 200 + sec_num), menu_x, y, kFilterW,
+                     kFilterHdrH);
     if (hdr_hit) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
-      draw_rounded_rect(cr, menu_x + 4, y, kFilterW - 8, kFilterHdrH, 4);
-      cairo_fill(cr);
+      hui::design::row_hover(cr, app, menu_x + 4, y + 2, kFilterW - 8, kFilterHdrH - 4);
     }
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.7);
     cairo_move_to(cr, menu_x + 10, y + kFilterHdrH / 2 + 4);
@@ -162,12 +163,12 @@ void draw_filter_dropdown(AppState& app, cairo_t* cr, int section) {
     // Items
     if (expanded) {
       for (int i = 0; i < info.count; ++i) {
+        app.hit_main.add(hui::Hit::menu(hui::Hit::kMenuFilter, glob_idx), menu_x, y, kFilterW,
+                         kFilterItemH);
         bool ihover = (glob_idx == (app.active_pane ? app.r_filter_dropdown_hover : app.filter_dropdown_hover));
         bool iactive = (i == info.cur_idx);
         if (ihover) {
-          cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.12);
-          draw_rounded_rect(cr, menu_x + 8, y, kFilterW - 16, kFilterItemH, 4);
-          cairo_fill(cr);
+          hui::design::row_hover(cr, app, menu_x + 8, y + 2, kFilterW - 16, kFilterItemH - 4);
         }
         int tx = menu_x + 16;
         if (iactive) {
@@ -224,19 +225,11 @@ void draw_tooltip_card(AppState& app, cairo_t* cr) {
   int y = py + pad + 6;
 
   // Title
-  std::string title = app.tooltip_title;
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
   cairo_set_font_size(cr, 12);
+  std::string title = hui::design::clip_end(cr, app.tooltip_title, pw - pad * 2);
   cairo_text_extents_t te;
   cairo_text_extents(cr, title.c_str(), &te);
-  if (te.width > pw - pad * 2) {
-    while (title.size() > 4 &&
-           (cairo_text_extents(cr, (title + "...").c_str(), &te), te.width > pw - pad * 2)) {
-      title.pop_back();
-    }
-    title += "...";
-    cairo_text_extents(cr, title.c_str(), &te);
-  }
   cairo_set_source_rgba(cr, app.text_r * 0.9, app.text_g * 0.9, app.text_b * 0.9, 0.95);
   cairo_move_to(cr, px + pad, y);
   cairo_show_text(cr, title.c_str());
@@ -246,15 +239,7 @@ void draw_tooltip_card(AppState& app, cairo_t* cr) {
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 11);
   for (const auto& row : app.tooltip_rows) {
-    std::string line = row;
-    cairo_text_extents(cr, line.c_str(), &te);
-    if (te.width > pw - pad * 2) {
-      while (line.size() > 4 &&
-             (cairo_text_extents(cr, (line + "...").c_str(), &te), te.width > pw - pad * 2)) {
-        line.pop_back();
-      }
-      line += "...";
-    }
+    std::string line = hui::design::clip_end(cr, row, pw - pad * 2);
     cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                           app.text_secondary_b, 0.95);
     cairo_move_to(cr, px + pad, y);
@@ -1072,25 +1057,7 @@ void draw_hover_preview(AppState& app, cairo_t* cr) {
   // extension so the type stays visible — long names must read in full.
   {
     const int avail = std::max(40, pw - 24);
-    cairo_text_extents_t mte;
-    cairo_text_extents(cr, name.c_str(), &mte);
-    if (mte.width > avail) {
-      std::string ext;
-      auto dot = name.rfind('.');
-      if (dot != std::string::npos && dot + 1 < name.size()) {
-        ext = name.substr(dot);      // includes the '.'
-        name = name.substr(0, dot);  // stem only
-      }
-      std::size_t k = name.size();
-      bool fit = false;
-      while (k > 0) {
-        std::string cand = name.substr(0, k) + "..." + ext;
-        cairo_text_extents(cr, cand.c_str(), &mte);
-        if (mte.width <= avail) { name = cand; fit = true; break; }
-        --k;
-      }
-      if (!fit) name = "..." + ext; // even one char + ext is too wide
-    }
+    name = hui::design::clip_keep_ext(cr, name, avail);
   }
   cairo_set_source_rgba(cr, app.text_r * color_adj, app.text_g * color_adj, app.text_b * color_adj, 0.9);
   cairo_text_extents_t te;
@@ -1259,7 +1226,7 @@ void draw_sort_menu(AppState& app, cairo_t* cr) {
   int n = sort_menu_row_count();
   int menu_w = 210;
 
-  // Anchored to the sort button's top-right corner (like Nautilus's popover)
+  // Anchored to the sort button's top-right corner
   // so it can use the full height below the top bar ("open from top right").
   int menu_top = app.top_bar_height;
   if (app.split_view && app.active_pane) menu_top += app.top_bar_height + app.tab_bar_height;
@@ -1299,6 +1266,8 @@ void draw_sort_menu(AppState& app, cairo_t* cr) {
   cairo_set_line_width(cr, 1);
   draw_rounded_rect(cr, dm_sort_menu_x + 0.5, dm_sort_menu_y + 0.5, menu_w - 1, menu_h - 1, 5.5);
   cairo_stroke(cr);
+  app.hit_main.add(hui::Hit::menu(hui::Hit::kMenuSort, 255), dm_sort_menu_x, dm_sort_menu_y, menu_w,
+                   menu_h);
 
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                           CAIRO_FONT_WEIGHT_NORMAL);
@@ -1308,6 +1277,7 @@ void draw_sort_menu(AppState& app, cairo_t* cr) {
   for (int i0 = 0; i0 < visible; ++i0) {
     int i = dm_sort_scroll + i0;
     int row_y = dm_sort_menu_y + kPad + i0 * kItemH;
+    app.hit_main.add(hui::Hit::menu(hui::Hit::kMenuSort, i), dm_sort_menu_x, row_y, menu_w, kItemH);
     const SortMenuRow& row = sort_menu_row(i);
     bool hovered = (i == dm_sort_menu_hover);
 
@@ -1368,9 +1338,7 @@ void draw_sort_menu(AppState& app, cairo_t* cr) {
     }
 
     if (hovered) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
-      draw_rounded_rect(cr, dm_sort_menu_x + 4, row_y + 2, menu_w - 8, kItemH - 4, 4);
-      cairo_fill(cr);
+      hui::design::row_hover(cr, app, dm_sort_menu_x + 4, row_y + 2, menu_w - 8, kItemH - 4);
     }
 
     // Leading icon for the row kind
@@ -1454,6 +1422,7 @@ void draw_columns_menu(AppState& app, cairo_t* cr) {
   cairo_set_line_width(cr, 1);
   draw_rounded_rect(cr, cm_x + 0.5, cm_y + 0.5, menu_w - 1, menu_h - 1, 5.5);
   cairo_stroke(cr);
+  app.hit_main.add(hui::Hit::menu(hui::Hit::kMenuColumns, 255), cm_x, cm_y, menu_w, menu_h);
 
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                           CAIRO_FONT_WEIGHT_NORMAL);
@@ -1461,10 +1430,9 @@ void draw_columns_menu(AppState& app, cairo_t* cr) {
 
   for (int i = 0; i < kRows; ++i) {
     int row_y = cm_y + kSortMenuPad + i * kSortMenuItemH;
+    app.hit_main.add(hui::Hit::menu(hui::Hit::kMenuColumns, i), cm_x, row_y, menu_w, kSortMenuItemH);
     if (i == cm_hover) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
-      draw_rounded_rect(cr, cm_x + 4, row_y, menu_w - 8, kSortMenuItemH, 4);
-      cairo_fill(cr);
+      hui::design::row_hover(cr, app, cm_x + 4, row_y + 2, menu_w - 8, kSortMenuItemH - 4);
     }
     if (*rows[i].val) {
       cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 1.0);

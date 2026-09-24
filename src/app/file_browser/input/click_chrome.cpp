@@ -84,26 +84,12 @@ bool click_scrollbar(AppState& app, int x, int y, int button) {
 
 bool click_path_edit_cancel(AppState& app, int x, int y, int button) {
   // ── Click outside the nav/path field cancels path editing ──
+  // Field bounds come from the retained registry (stored during paint).
   if ((app.active_pane ? app.r_path_editing : app.path_editing) && button == 0x110) {
-    double zf = app.zoom_pct / 100.0;
-    int bar_y = y;
-    if (app.split_view) {
-      int content_y = app.top_bar_height + app.tab_bar_height;
-      if (y >= content_y && y < content_y + app.top_bar_height)
-        bar_y = y - content_y;
-    }
-    int arrow_w = static_cast<int>(36.0 * zf);
-    int gap4 = static_cast<int>(6.0 * zf);
-    int mx6 = static_cast<int>(24.0 * zf);
-    int path_pad = static_cast<int>(12.0 * zf);
-    int house_w = static_cast<int>(16.0 * zf);
-    int gap12 = static_cast<int>(12.0 * zf);
-    int nav_origin = app.nav_origin_x();
-    int path_x = nav_origin + 3 * arrow_w + 2 * gap4 + mx6 + path_pad + house_w + gap12;
-    auto& in_search_btn_x = app.active_pane ? app.r_search_btn_x : app.search_btn_x;
-    int path_w = in_search_btn_x - static_cast<int>(6.0 * zf) - path_x;
-    bool in_nav_field =
-        bar_y >= 0 && bar_y < app.top_bar_height && x >= path_x && x < path_x + path_w;
+    const hui::HitRegion* bar =
+        app.hit_main.find_id(hui::Hit::topbar(app.active_pane, hui::Hit::kTopPathBar));
+    bool in_nav_field = bar != nullptr && x >= bar->x && x < bar->x + bar->w &&
+                        y >= bar->y && y < bar->y + bar->h;
     if (!in_nav_field) {
       (app.active_pane ? app.r_path_editing : app.path_editing) = false;
       (app.active_pane ? app.r_path_edit_dragging : app.path_edit_dragging) = false;
@@ -212,17 +198,14 @@ bool click_sidebar_drag(AppState& app, int x, int y, int button) {
 bool click_columns_menu(AppState& app, int x, int y, int button) {
   // ── Sort menu item click (handle before top bar, so menu stays on top) ──
   // ── Column chooser popup clicks ──
+  // Rows resolved through the retained hit registry.
   if ((app.active_pane ? app.r_columns_menu_open : app.columns_menu_open)) {
     auto& cmo = app.active_pane ? app.r_columns_menu_open : app.columns_menu_open;
-    auto& cmx = app.active_pane ? app.r_columns_menu_x : app.columns_menu_x;
-    auto& cmy = app.active_pane ? app.r_columns_menu_y : app.columns_menu_y;
-    auto& cmw = app.active_pane ? app.r_columns_menu_w : app.columns_menu_w;
-    auto& cmh = app.active_pane ? app.r_columns_menu_h : app.columns_menu_h;
-    if (x >= cmx && x < cmx + cmw && y >= cmy && y < cmy + cmh) {
-      int rel_y = y - cmy - kSortMenuPad;
-      int idx = rel_y / kSortMenuItemH;
-      bool changed = false;
-      switch (idx) {
+    const uint32_t hid = app.hit_main.query(x, y);
+    bool changed = false;
+    if ((hid & hui::Hit::kGroupMask) == hui::Hit::kMenu &&
+        hui::Hit::menu_id(hid) == hui::Hit::kMenuColumns) {
+      switch (hui::Hit::menu_row(hid)) {
         case 0: app.col_owner = !app.col_owner; changed = true; break;
         case 1: app.col_group = !app.col_group; changed = true; break;
         case 2: app.col_perms = !app.col_perms; changed = true; break;
@@ -236,24 +219,23 @@ bool click_columns_menu(AppState& app, int x, int y, int button) {
         draw(app);
       }
       return true;
-    } else {
-      cmo = false;
-      draw(app);
-      return true;
     }
+    cmo = false;
+    draw(app);
+    return true;
   }
   return false;
 }
 
 bool click_sort_menu(AppState& app, int x, int y, int button) {
   if ((app.active_pane ? app.r_sort_menu_open : app.sort_menu_open)) {
-    if (x >= (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) && x < (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) + (app.active_pane ? app.r_sort_menu_w : app.sort_menu_w) &&
-        y >= (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) && y < (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) + (app.active_pane ? app.r_sort_menu_h : app.sort_menu_h)) {
-      int rel_y = y - (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) - kSortMenuPad;
-      int idx = rel_y / kSortMenuItemH +
-                (app.active_pane ? app.r_sort_menu_scroll : app.sort_menu_scroll);
-      if (idx >= 0 && idx < sort_menu_row_count()) {
-        const SortMenuRow& row = sort_menu_row(idx);
+    const uint32_t hid = app.hit_main.query(x, y);
+    int idx = -1;
+    if ((hid & hui::Hit::kGroupMask) == hui::Hit::kMenu &&
+        hui::Hit::menu_id(hid) == hui::Hit::kMenuSort)
+      idx = hui::Hit::menu_row(hid);
+    if (idx >= 0 && idx < sort_menu_row_count()) {
+      const SortMenuRow& row = sort_menu_row(idx);
         bool changed = false;
         switch (row.kind) {
           case SortMenuRow::Kind::Field:
@@ -296,11 +278,14 @@ bool click_sort_menu(AppState& app, int x, int y, int button) {
         }
         return true;
       }
-    } else {
-      (app.active_pane ? app.r_sort_menu_open : app.sort_menu_open) = false;
-      draw(app);
+    // Click on menu padding (card, no row): keep open.
+    if ((hid & hui::Hit::kGroupMask) == hui::Hit::kMenu &&
+        hui::Hit::menu_id(hid) == hui::Hit::kMenuSort)
       return true;
-    }
+    // Click outside the menu rows: dismiss.
+    (app.active_pane ? app.r_sort_menu_open : app.sort_menu_open) = false;
+    draw(app);
+    return true;
   }
   return false;
 }
@@ -317,39 +302,26 @@ bool click_filter_dropdown(AppState& app, int x, int y, int button) {
   auto& click_filter_size = app.active_pane ? app.r_filter_size_idx : app.filter_size_idx;
   auto& click_filter_date = app.active_pane ? app.r_filter_date_idx : app.filter_date_idx;
   if (click_filter_section > 0) {
-    if (x >= click_filter_dd_x && x < click_filter_dd_x + click_filter_dd_w &&
-        y >= click_filter_dd_y && y < click_filter_dd_y + click_filter_dd_h) {
-      // Map click to global index, then to section+item or header
-      int rel_y = y - click_filter_dd_y - kFilterPD;
-      int gy = 0;
-      int section = click_filter_section;
-      int clicked_section = 0, clicked_item = -1;
-      for (int si = 1; si <= 3; ++si) {
-        // Header
-        if (rel_y >= gy && rel_y < gy + kFilterHdrH) {
-          clicked_section = si;
-          clicked_item = -1; // header click
-          break;
-        }
-        gy += kFilterHdrH;
-
-        // Items if expanded
-        if (section == si) {
-          int cnt = (si == 1) ? 13 : (si == 2) ? 7 : 5;
-          int item_y = gy;
-          for (int i = 0; i < cnt; ++i) {
-            if (rel_y >= item_y && rel_y < item_y + kFilterItemH) {
-              clicked_section = si;
-              clicked_item = i;
-              break;
-            }
-            item_y += kFilterItemH;
+    const uint32_t hid = app.hit_main.query(x, y);
+    int clicked_section = 0, clicked_item = -1;
+    if ((hid & hui::Hit::kGroupMask) == hui::Hit::kMenu &&
+        hui::Hit::menu_id(hid) == hui::Hit::kMenuFilter) {
+      int ctrl = hui::Hit::menu_row(hid);
+      if (ctrl >= 200) {
+        clicked_section = ctrl - 200; // header: toggle expansion
+      } else {
+        // Item glob → (section, item) by count walk (no pixel math).
+        int glob = ctrl;
+        int section = click_filter_section;
+        for (int si = 1; si <= 3; ++si) {
+          if (glob == 0) { clicked_section = si; break; }
+          --glob;
+          if (section == si) {
+            int cnt = (si == 1) ? 13 : (si == 2) ? 7 : 5;
+            if (glob < cnt) { clicked_section = si; clicked_item = glob; break; }
+            glob -= cnt;
           }
-          gy = item_y;
-          if (clicked_item >= 0) break;
         }
-
-        gy += kFilterSep;
       }
 
       if (clicked_item >= 0) {
@@ -377,7 +349,7 @@ bool click_filter_dropdown(AppState& app, int x, int y, int button) {
   return false;
 }
 
-bool click_top_bar(AppState& app, int x, int y, int button) {
+bool click_top_bar(AppState& app, int x, int y, int button, uint64_t now_ns) {
   int bar_y = y;
   if (app.split_view) {
     int content_y = app.top_bar_height + app.tab_bar_height;
@@ -443,16 +415,15 @@ bool click_top_bar(AppState& app, int x, int y, int button) {
       }
     }
 
-    // Settings gear button
-    {
-      int gap4 = static_cast<int>(6.0 * zf);
-      int gear_w = static_cast<int>(36.0 * zf);
-      int gear_x = in_sort_btn_x + in_sort_btn_w + gap4;
-      if (x >= gear_x && x < gear_x + gear_w) {
-        open_settings(app);
-        draw(app);
-        return true;
-      }
+    // Retained top-bar regions for the recomputed controls below
+    // (gear, arrows); the rest read paint-stored rects.
+    const uint32_t hid = app.hit_main.query(x, y);
+
+    // Settings gear button (retained region; see ui/hit.hpp)
+    if (hid == hui::Hit::topbar(app.active_pane, hui::Hit::kTopGear)) {
+      open_settings(app);
+      draw(app);
+      return true;
     }
 
     // Path bar dots menu button
@@ -481,34 +452,58 @@ bool click_top_bar(AppState& app, int x, int y, int button) {
         AppState::menu_item(AppState::ContextMenuAction::Separator, ""),
         AppState::menu_item(AppState::ContextMenuAction::Properties, "Properties"),
       };
+      // Overflow for top-bar buttons hidden by the responsive hide loop
+      // (narrow windows). Paint-stored state only: stored widths are 0 when
+      // hidden, and a hidden gear leaves no registry region.
+      {
+        bool gear_hidden =
+            app.hit_main.find_id(hui::Hit::topbar(app.active_pane, hui::Hit::kTopGear)) ==
+            nullptr;
+        bool need_overflow = gear_hidden || in_folder_search_btn_w == 0 || in_search_btn_w == 0 ||
+                             in_view_btn_w == 0 || in_sort_btn_w == 0;
+        if (need_overflow)
+          app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Separator, ""));
+        if (in_folder_search_btn_w == 0)
+          app.context_menu_items.push_back(AppState::menu_item(
+              AppState::ContextMenuAction::ToolbarSearchFolder, "Search in Folder"));
+        if (in_search_btn_w == 0)
+          app.context_menu_items.push_back(AppState::menu_item(
+              AppState::ContextMenuAction::ToolbarSearchHome, "Search Home"));
+        if (in_view_btn_w == 0)
+          app.context_menu_items.push_back(AppState::menu_item(
+              AppState::ContextMenuAction::ToolbarCycleView, "Cycle View"));
+        if (in_sort_btn_w == 0)
+          app.context_menu_items.push_back(AppState::menu_item(
+              AppState::ContextMenuAction::ToolbarSortMenu, "Sort Options\u2026"));
+        if (gear_hidden)
+          app.context_menu_items.push_back(
+              AppState::menu_item(AppState::ContextMenuAction::Settings, "Settings"));
+      }
       insert_template_submenu(app, 2);
       draw(app);
       return true;
     }
 
-    // Navigation arrows (back, forward, up)
-    int bx = app.nav_origin_x();
-    int btn_w = static_cast<int>(36.0 * zf);
-    int gap4 = static_cast<int>(6.0 * zf);
+    // Navigation arrows (back, forward, up) — retained regions.
     // Sidebar fold toggle (drawn before the arrows when folded)
     if (sidebar_toggle_hit(app, x, y)) {
       toggle_sidebar_flap(app);
       draw(app);
       return true;
     }
-    if (x >= bx && x < bx + btn_w && !app.cur_tab().nav_history.empty()) {
+    if (hid == hui::Hit::topbar(app.active_pane, hui::Hit::kTopNavBack) &&
+        !app.cur_tab().nav_history.empty()) {
       navigate_back(app);
       draw(app);
       return true;
     }
-    bx += btn_w + gap4;
-    if (x >= bx && x < bx + btn_w && !app.cur_tab().nav_forward.empty()) {
+    if (hid == hui::Hit::topbar(app.active_pane, hui::Hit::kTopNavForward) &&
+        !app.cur_tab().nav_forward.empty()) {
       navigate_forward(app);
       draw(app);
       return true;
     }
-    bx += btn_w + gap4;
-    if (x >= bx && x < bx + btn_w && can_navigate_up(app)) {
+    if (hid == hui::Hit::topbar(app.active_pane, hui::Hit::kTopNavUp) && can_navigate_up(app)) {
       navigate_up(app);
       draw(app);
       return true;
@@ -706,18 +701,13 @@ bool click_top_bar(AppState& app, int x, int y, int button) {
       auto& pe_sel_end = app.active_pane ? app.r_path_edit_sel_end : app.path_edit_sel_end;
       auto& pe_dragging = app.active_pane ? app.r_path_edit_dragging : app.path_edit_dragging;
       double zf = app.zoom_pct / 100.0;
-      int arrow_w = static_cast<int>(36.0 * zf);
-      int gap4 = static_cast<int>(6.0 * zf);
-      int mx6 = static_cast<int>(24.0 * zf);
-      int path_pad = static_cast<int>(12.0 * zf);
-      int house_w = static_cast<int>(16.0 * zf);
-      int gap12 = static_cast<int>(12.0 * zf);
-      int nav_origin = app.nav_origin_x();
-      int path_x_inner = nav_origin + 3 * arrow_w + 2 * gap4 + mx6 + path_pad + house_w + gap12;
-      int path_w_inner = in_search_btn_x - static_cast<int>(6.0 * zf) - path_x_inner;
-      int text_x = path_x_inner;
-      int field_right = path_x_inner + path_w_inner - static_cast<int>(14.0 * zf);
-      if (x >= path_x_inner && x < field_right) {
+      const hui::HitRegion* field =
+          app.hit_main.find_id(hui::Hit::topbar(app.active_pane, hui::Hit::kTopPathText));
+      if (field == nullptr) return true;
+      int path_w_inner = field->w;
+      int text_x = field->x;
+      int field_right = field->x + field->w - static_cast<int>(14.0 * zf);
+      if (x >= text_x && x < field_right) {
         cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
         cairo_t* cr_tmp = cairo_create(tmp);
         cairo_select_font_face(cr_tmp, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
@@ -768,30 +758,53 @@ bool click_top_bar(AppState& app, int x, int y, int button) {
       return true;
     }
 
-    // Breadcrumb click
+    // Double-click on the nav bar copies the current location to the
+    // clipboard instead of editing it. Single clicks fall through to the
+    // existing breadcrumb / path-editing behavior below.
+    {
+      bool same_pos = std::abs(x - app.nav_dblclick_x) < 8 &&
+                      std::abs(y - app.nav_dblclick_y) < 8;
+      uint64_t elapsed_ns = now_ns - app.nav_dblclick_ns;
+      if (app.nav_dblclick_ns != 0 && same_pos && elapsed_ns < 400000000ull) {
+        app.clipboard.copy_text(app.cur_tab().current_path);
+        app.nav_dblclick_ns = 0;
+        (app.active_pane ? app.r_path_editing : app.path_editing) = false;
+        (app.active_pane ? app.r_path_edit_dragging : app.path_edit_dragging) = false;
+        app.operation_status = "Path copied to clipboard";
+        app.operation_status_expires_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+          (std::chrono::steady_clock::now() + std::chrono::milliseconds(3000)).time_since_epoch()).count();
+        draw(app);
+        return true;
+      }
+      app.nav_dblclick_ns = now_ns;
+      app.nav_dblclick_x = x;
+      app.nav_dblclick_y = y;
+    }
+
+    // Breadcrumb click: other locations navigate; clicking the current
+    // location enters path editing instead of a no-op reload — at narrow
+    // widths the label fills the whole bar, leaving no empty area to
+    // click for edit mode.
     for (size_t i = 0; i < in_breadcrumbs.size(); ++i) {
       auto& seg = in_breadcrumbs[i];
       if (x >= seg.x && x < seg.x + seg.w) {
-        navigate_to(app, seg.path);
-        draw(app);
-        return true;
+        if (seg.path != app.cur_tab().current_path) {
+          navigate_to(app, seg.path);
+          draw(app);
+          return true;
+        }
+        break;
       }
     }
     // Click on empty area in top bar → enter path editing mode
     (app.active_pane ? app.r_path_edit_buf : app.path_edit_buf) = app.cur_tab().current_path;
     (app.active_pane ? app.r_path_editing : app.path_editing) = true;
     {
+      const hui::HitRegion* field =
+          app.hit_main.find_id(hui::Hit::topbar(app.active_pane, hui::Hit::kTopPathText));
       double zf = app.zoom_pct / 100.0;
-      int arrow_w = static_cast<int>(36.0 * zf);
-      int gap4 = static_cast<int>(6.0 * zf);
-      int mx6 = static_cast<int>(24.0 * zf);
-      int path_pad = static_cast<int>(12.0 * zf);
-      int house_w = static_cast<int>(16.0 * zf);
-      int gap12 = static_cast<int>(12.0 * zf);
-      int nav_origin = app.nav_origin_x();
-      int path_x = nav_origin + 3 * arrow_w + 2 * gap4 + mx6 + path_pad + house_w + gap12;
-int path_w = in_search_btn_x - static_cast<int>(6.0 * zf) - path_x;
-      int text_x = path_x;
+      int text_x = field ? field->x : 0;
+      int path_w = field ? field->w : 0;
       cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
       cairo_t* cr_tmp = cairo_create(tmp);
       cairo_select_font_face(cr_tmp, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
@@ -840,47 +853,50 @@ int path_w = in_search_btn_x - static_cast<int>(6.0 * zf) - path_x;
 
 bool click_tab_bar(AppState& app, int x, int y, int button) {
   // ── Tab bar click ──
-  if (y >= app.top_bar_height && y < app.top_bar_height + app.tab_bar_height) {
-    app.last_click_ns = 0;
-    for (size_t i = 0; i < app.tab_hits.size(); ++i) {
-      auto& hit = app.tab_hits[i];
-      if (x >= hit.x && x < hit.x + hit.w) {
-        if (button == 0x110 && hit.close_x > 0 && x >= hit.close_x) {
-          // Left-click on close button
-          if (i < app.tabs.size()) {
-            app.active_tab = static_cast<int>(i);
-            close_tab(app);
-            draw(app);
-            return true;
-          }
-        }
-        if (button == 0x110 && i < app.tabs.size()) {
-          // Left-click on tab — set up drag potential
-          app.tab_drag_from = static_cast<int>(i);
-          app.tab_drag_start_x = x;
-          if (static_cast<int>(i) != app.active_tab ||
-              (app.split_view && app.active_pane == 1)) {
-            open_tab_in_active_pane(app, static_cast<int>(i));
-          }
-          draw(app);
-          return true;
-        }
-        if (button == 0x210 && i < app.tabs.size()) {
-          // Middle-click on tab → close
-          app.active_tab = static_cast<int>(i);
-          close_tab(app);
-          draw(app);
-          return true;
-        }
-        if (button == 0x210 && i < app.tabs.size()) {
-          // Middle-click on tab → close (only reached for left-clicks due to outer scope)
-          app.active_tab = static_cast<int>(i);
-          close_tab(app);
-          draw(app);
-          return true;
-        }
-      }
+  // Resolved through the retained hit registry (rects stored during paint),
+  // never re-derived here: the band geometry cannot drift (see
+  // ui/hit_registry.hpp). A miss falls through to the sidebar/content.
+  uint32_t hid = app.hit_main.query(x, y);
+  if ((hid & hui::Hit::kGroupMask) != hui::Hit::kTab &&
+      (hid & hui::Hit::kGroupMask) != hui::Hit::kTabClose)
+    return false;
+  int i = static_cast<int>(hid & hui::Hit::kIndexMask);
+  if (i < 0 || i >= static_cast<int>(app.tab_hits.size())) return false;
+
+  app.last_click_ns = 0;
+  if ((hid & hui::Hit::kGroupMask) == hui::Hit::kTabClose) {
+    if (button == 0x110 && i < static_cast<int>(app.tabs.size())) {
+      // Left-click on close button
+      app.active_tab = i;
+      close_tab(app);
+      draw(app);
+      return true;
     }
+    if (button == 0x210 && i < static_cast<int>(app.tabs.size())) {
+      // Middle-click on tab → close
+      app.active_tab = i;
+      close_tab(app);
+      draw(app);
+      return true;
+    }
+    return false;
+  }
+  if (button == 0x110 && i < static_cast<int>(app.tabs.size())) {
+    // Left-click on tab — set up drag potential
+    app.tab_drag_from = i;
+    app.tab_drag_start_x = x;
+    if (i != app.active_tab ||
+        (app.split_view && app.active_pane == 1)) {
+      open_tab_in_active_pane(app, i);
+    }
+    draw(app);
+    return true;
+  }
+  if (button == 0x210 && i < static_cast<int>(app.tabs.size())) {
+    // Middle-click on tab → close
+    app.active_tab = i;
+    close_tab(app);
+    draw(app);
     return true;
   }
   return false;
@@ -917,6 +933,13 @@ bool click_flap_swallow(AppState& app, int x, int y, int button) {
 
 bool click_column_header(AppState& app, int x, int y, int button) {
   // ── Column header click (list view) ──
+  // Segments/dividers resolved through the retained hit registry (rects
+  // stored during paint); the width recomputation is gone.
+  if (app.cur_tab().view_mode != ViewMode::List) return false;
+  const uint32_t hid = app.hit_main.query(x, y);
+  const bool on_seg = (hid & hui::Hit::kGroupMask) == hui::Hit::kHeaderSeg;
+  const bool on_div = (hid & hui::Hit::kGroupMask) == hui::Hit::kHeaderDiv;
+  if (!on_seg && !on_div) return false;
   if (app.cur_tab().view_mode == ViewMode::List && y >= app.top_bar_height + app.tab_bar_height &&
       y < app.top_bar_height + app.tab_bar_height + app.entry_height) {
     // Right-click → column chooser
@@ -934,41 +957,22 @@ bool click_column_header(AppState& app, int x, int y, int button) {
       return true;
     }
     int s_w = app.sidebar_w();
-    double zf = app.zoom_pct / 100.0;
-    int text_x = s_w + static_cast<int>(28.0 * zf);
     int content_w = app.width - s_w;
-    int name_w = static_cast<int>(content_w * app.col_name_frac);
-    int size_w = static_cast<int>(content_w * app.col_size_frac);
-    int date_w = static_cast<int>(content_w * app.col_date_frac);
-    int x1 = text_x + name_w;
-    int x2 = x1 + size_w;
-    int x3 = x2 + date_w;
 
-    if (std::abs(x - x1) < 4) {
-      app.col_resizing = 0;
-      app.col_resize_start_frac = static_cast<double>(x - s_w) /
-                                   static_cast<double>(std::max(1, content_w));
-      draw(app); return true;
-    }
-    if (std::abs(x - x2) < 4) {
-      app.col_resizing = 1;
-      app.col_resize_start_frac = static_cast<double>(x - s_w) /
-                                   static_cast<double>(std::max(1, content_w));
-      draw(app); return true;
-    }
-    if (std::abs(x - x3) < 4) {
-      app.col_resizing = 2;
+    if (on_div) {
+      app.col_resizing = static_cast<int>(hid & 0xFF);
       app.col_resize_start_frac = static_cast<double>(x - s_w) /
                                    static_cast<double>(std::max(1, content_w));
       draw(app); return true;
     }
 
     SortField clicked = SortField::Name;
-    if (x >= text_x && x < x1) clicked = SortField::Name;
-    else if (x >= x1 && x < x2) clicked = SortField::Size;
-    else if (x >= x2 && x < x3) clicked = SortField::Modified;
-    else if (x >= x3) clicked = SortField::Type;
-    else { draw(app); return true; }
+    switch (static_cast<int>(hid & 0xFF)) {
+      case 1: clicked = SortField::Size; break;
+      case 2: clicked = SortField::Modified; break;
+      case 3: clicked = SortField::Type; break;
+      default: break;
+    }
 
     if (app.cur_tab().sort_field == clicked)
       app.cur_tab().sort_descending = !app.cur_tab().sort_descending;

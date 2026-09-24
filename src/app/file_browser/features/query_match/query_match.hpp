@@ -4,7 +4,7 @@
 
 namespace eh::file_browser {
 
-// Filter-bar query modes (Dolphin-style).
+// Filter-bar query modes.
 enum class QueryMode {
   Plain = 0, // substring
   Glob = 1,  // shell wildcards (* ? [..])

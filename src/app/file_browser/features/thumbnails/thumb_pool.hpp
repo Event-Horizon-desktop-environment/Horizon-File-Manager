@@ -1,4 +1,4 @@
-// Background thumbnail decoding pool — Dolphin/Nemo style.
+// Background thumbnail decoding pool.
 //
 // Iron rule: the UI thread never decodes. Paint only does cache lookups;
 // a miss enqueues a request here and draws a placeholder. The single

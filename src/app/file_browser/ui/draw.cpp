@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "draw_helpers.hpp"
+#include "ui/design.hpp"
 #include "draw_file_icons.hpp"
 #include "draw_thumbnails.hpp"
 #include "layout.hpp"
@@ -116,80 +117,24 @@ void draw_scrollbar(AppState& app, cairo_t* cr, int x, int y, int h,
 // ── hit testing ──────────────────────────────────────────────────
 
 int hit_test_list(AppState& app, int x, int y) {
-  PaneViewRect r = pane_view_rect_at(app, x);
+  // Resolved through the retained hit registry (row rects stored during
+  // paint); no geometry is re-derived here.
+  const uint32_t hid = app.hit_main.query(x, y);
+  if ((hid & hui::Hit::kGroupMask) != hui::Hit::kViewRow) return -1;
   Tab& tab = pane_tab_at(app, x);
-
-  if (x < r.x || x >= r.x + r.w) return -1;
-  if (y < r.y || y >= r.y + r.h) return -1;
-
-  int col_header_h = app.entry_height;
-  int scroll = tab.scroll_px;
-
-  int rel_y = y - r.y - col_header_h + scroll;
-  if (rel_y < 0) return -1;
-
-  if (!tab.group_by_type) {
-    int idx = rel_y / app.entry_height;
-    if (idx < 0 || idx >= static_cast<int>(tab.visible_entries.size()))
-      return -1;
-    return idx;
-  }
-
-  int hdr_h = static_cast<int>(app.entry_height * 0.55);
-  int acc = 0;
-  int prev_type = -1;
-  for (int vi = 0; vi < static_cast<int>(tab.visible_entries.size()); ++vi) {
-    int ri = tab.visible_entries[vi];
-    if (ri >= 0 && ri < static_cast<int>(tab.entries.size())) {
-      int t = static_cast<int>(tab.entries[ri].type);
-      if (t != prev_type) { acc += hdr_h; prev_type = t; }
-    }
-    if (rel_y >= acc && rel_y < acc + app.entry_height) return vi;
-    acc += app.entry_height;
-  }
-  return -1;
+  int vi = static_cast<int>(hid & hui::Hit::kIndexMask);
+  if (vi < 0 || vi >= static_cast<int>(tab.visible_entries.size())) return -1;
+  return vi;
 }
 
 int hit_test_grid(AppState& app, int x, int y) {
-  PaneViewRect r = pane_view_rect_at(app, x);
+  // Same registry path as list view (cells stored during paint).
+  const uint32_t hid = app.hit_main.query(x, y);
+  if ((hid & hui::Hit::kGroupMask) != hui::Hit::kViewRow) return -1;
   Tab& tab = pane_tab_at(app, x);
-
-  if (x < r.x || x >= r.x + r.w) return -1;
-  if (y < r.y || y >= r.y + r.h) return -1;
-
-  // Recompute layout from THIS pane's width — same single source of truth
-  // that draw_grid_view uses (layout.cpp). No more stale app.grid_* globals
-  // in split view, and the bucket_down snap is applied identically.
-  GridLayout gl = compute_grid_layout(r.w, app.zoom_pct / 100.0);
-  int cols = gl.cols;
-  int cell_size = gl.cell_w;
-  int icon_size = gl.icon_size;
-  int label_h = gl.label_h;
-  int text_gap = gl.text_gap;
-  int item_h = gl.item_h;
-  int row_h = gl.row_h;
-  int row_gap = gl.row_gap;
-  int col_gap = gl.col_gap;
-  int grid_w = gl.grid_w;
-  int grid_offset_x = gl.grid_offset_x;
-  if (row_h <= 0) return -1;
-
-  int rel_x = x - r.x - grid_offset_x;
-  int rel_y = y - r.y - row_gap + tab.scroll_px;
-
-  int col = (rel_x + col_gap / 2) / (cell_size + col_gap);
-  int row = (rel_y + row_gap / 2) / row_h;
-
-  int idx = row * cols + col;
-  if (idx < 0 || idx >= static_cast<int>(tab.visible_entries.size()))
-    return -1;
-
-  int cx = col * (cell_size + col_gap);
-  int cy = row * row_h;
-  if (rel_x < cx || rel_x > cx + cell_size) return -1;
-  if (rel_y < cy || rel_y > cy + item_h) return -1;
-
-  return idx;
+  int vi = static_cast<int>(hid & hui::Hit::kIndexMask);
+  if (vi < 0 || vi >= static_cast<int>(tab.visible_entries.size())) return -1;
+  return vi;
 }
 
 // ── Open With dialog ──────────────────────────────────────────────
@@ -231,24 +176,28 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
     app.info_panel_hit_tabs[i][2] = static_cast<double>(tab_w);
     app.info_panel_hit_tabs[i][3] = static_cast<double>(tab_h);
 
-    if (i == app.info_panel_tab) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.12);
-      cairo_rectangle(cr, static_cast<double>(tx), static_cast<double>(py),
-                      static_cast<double>(tab_w), static_cast<double>(tab_h));
+    bool active = (i == app.info_panel_tab);
+    if (active) {
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.10);
+      draw_rounded_rect(cr, static_cast<double>(tx + 3), static_cast<double>(py + 3),
+                        static_cast<double>(tab_w - 6), static_cast<double>(tab_h - 6), 7);
       cairo_fill(cr);
     }
 
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
-                          i == app.info_panel_tab ? 0.95 : 0.55);
+                          active ? 0.95 : 0.5);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                           active ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 12 * zf);
     cairo_text_extents_t te;
     cairo_text_extents(cr, kTabNames[i], &te);
     cairo_move_to(cr, tx + (tab_w - te.x_advance) / 2.0,
                   py + tab_h / 2.0 + te.height * 0.35);
     cairo_show_text(cr, kTabNames[i]);
 
-    if (i == app.info_panel_tab) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.85);
-      cairo_rectangle(cr, tx + 6.0, py + tab_h - 2.5, tab_w - 12.0, 2.5);
+    if (active) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.9);
+      draw_rounded_rect(cr, tx + 12.0, py + tab_h - 5, tab_w - 24.0, 2, 1);
       cairo_fill(cr);
     }
   }
@@ -303,18 +252,9 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
         }
       }
       // File name below preview
-      std::string name = app.info_panel_name;
-      if (name.size() > 24) {
-        auto dot = name.rfind('.');
-        if (dot != std::string::npos && dot > 0) {
-          std::string ext = name.substr(dot);
-          name = name.substr(0, 21 - ext.size()) + "..." + ext;
-        } else {
-          name = name.substr(0, 21) + "...";
-        }
-      }
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.85);
       cairo_set_font_size(cr, 11 * zf);
+      std::string name = hui::design::clip_keep_ext(cr, app.info_panel_name, pw - 24);
       cairo_text_extents_t te;
       cairo_text_extents(cr, name.c_str(), &te);
       cairo_move_to(cr, px + (pw - te.x_advance) / 2.0,
@@ -328,8 +268,9 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
         cairo_set_font_size(cr, px_size * zf);
       };
       // Line 1: type
-      std::string meta_type = app.info_panel_mime_type;
-      if (meta_type.size() > 30) meta_type = meta_type.substr(0, 29) + "\u2026";
+      std::string meta_type = hui::design::friendly_type(app.info_panel_mime_type, false);
+      if (app.info_panel_mime_type.empty()) meta_type.clear();
+      else meta_type = hui::design::clip_end(cr, meta_type, pw - 32);
       if (!meta_type.empty()) {
         meta_font(10);
         cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
@@ -339,25 +280,8 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
         cairo_show_text(cr, meta_type.c_str());
       }
       // Line 2: size · modified
-      auto fmt_meta_size = [](uint64_t bytes) {
-        char buf[32];
-        double v = static_cast<double>(bytes);
-        const char* units[] = {"B", "KB", "MB", "GB", "TB"};
-        int ui = 0;
-        while (v >= 1024.0 && ui < 4) { v /= 1024.0; ++ui; }
-        if (ui == 0) snprintf(buf, sizeof(buf), "%llu B",
-                              static_cast<unsigned long long>(bytes));
-        else snprintf(buf, sizeof(buf), "%.1f %s", v, units[ui]);
-        return std::string(buf);
-      };
-      char meta_time[32];
-      {
-        time_t mt = static_cast<time_t>(app.info_panel_modified_sec);
-        struct tm* tm_local = localtime(&mt);
-        strftime(meta_time, sizeof(meta_time), "%Y-%m-%d %H:%M", tm_local);
-      }
       std::string meta_line =
-          fmt_meta_size(app.info_panel_size) + " \u00b7 " + meta_time;
+          hui::design::size_human(app.info_panel_size) + " · " + hui::design::date_md(app.info_panel_modified_sec);
       meta_font(10);
       cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                             app.text_secondary_b, 0.75);
@@ -370,17 +294,10 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
   // ── Properties tab ──
   else if (app.info_panel_tab == 1) {
     auto fmt_size = [](uint64_t bytes) -> std::string {
-      if (bytes < 1024ULL) return std::to_string(bytes) + " B";
-      if (bytes < 1024ULL * 1024) return std::to_string(bytes / 1024) + " KB";
-      if (bytes < 1024ULL * 1024 * 1024) return std::to_string(bytes / (1024 * 1024)) + " MB";
-      return std::to_string(bytes / (1024 * 1024 * 1024)) + " GB";
+      return hui::design::size_human(bytes);
     };
     auto fmt_date = [](int64_t sec) -> std::string {
-      char buf[32];
-      struct tm tm;
-      localtime_r(&sec, &tm);
-      strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", &tm);
-      return buf;
+      return hui::design::date_md(sec);
     };
 
     int ly = content_y + 16;
@@ -520,22 +437,9 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
     std::string cur = p.get_current_file();
     if (!cur.empty()) {
       label += " ";
-      std::string fname = std::move(cur);
-      int max_chars = static_cast<int>(content_w / (7.0 * zf));
-      if (max_chars < 10) max_chars = 10;
-      if (static_cast<int>(fname.size()) > max_chars) {
-        auto dot = fname.rfind('.');
-        if (dot != std::string::npos && dot > 0) {
-          std::string ext = fname.substr(dot);
-          int keep = max_chars - 3 - static_cast<int>(ext.size());
-          if (keep > 0)
-            fname = fname.substr(0, static_cast<size_t>(keep)) + "..." + ext;
-          else
-            fname = fname.substr(0, static_cast<size_t>(max_chars - 3)) + "...";
-        } else {
-          fname = fname.substr(0, static_cast<size_t>(max_chars - 3)) + "...";
-        }
-      }
+      cairo_set_font_size(cr, 13.0 * zf);
+      std::string fname =
+          hui::design::clip_keep_ext(cr, cur, content_w - (7.0 * 8) - 20);
       label += fname;
     }
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
@@ -557,9 +461,8 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
     bool indeterminate =
         (p.type == OperationType::Compress && p.active.load() && counting);
 
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.35);
-    draw_rounded_rect(cr, content_x, y, content_w, bar_h, static_cast<int>(4 * zf));
-    cairo_fill(cr);
+    hui::design::bar(cr, app, content_x, y, content_w, indeterminate ? 0 : live,
+                static_cast<double>(bar_h));
 
     if (indeterminate) {
       double elapsed = std::chrono::duration<double>(
@@ -575,13 +478,6 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
       cairo_rectangle(cr, content_x + off, y, stripe_w, bar_h);
       cairo_fill(cr);
       cairo_restore(cr);
-    } else {
-      int fill_w = counting ? 0 : static_cast<int>(content_w * live);
-      if (fill_w > 0) {
-        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.8);
-        draw_rounded_rect(cr, content_x, y, fill_w, bar_h, static_cast<int>(4 * zf));
-        cairo_fill(cr);
-      }
     }
     y += bar_h + 12 * static_cast<int>(zf);
   }
@@ -654,8 +550,15 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
     app.ops_cancel_w = btn_size;
     app.ops_cancel_h = btn_size;
 
+    bool hov = (app.pointerX >= btn_x && app.pointerX < btn_x + btn_size &&
+                app.pointerY >= btn_y && app.pointerY < btn_y + btn_size);
+    if (hov) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.14);
+      draw_rounded_rect(cr, btn_x - 5, btn_y - 5, btn_size + 10, btn_size + 10, 12);
+      cairo_fill(cr);
+    }
     int pad = static_cast<int>(4 * zf);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.5);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, hov ? 0.9 : 0.5);
     cairo_set_line_width(cr, 1.5);
     cairo_move_to(cr, btn_x + pad, btn_y + pad);
     cairo_line_to(cr, btn_x + btn_size - pad, btn_y + btn_size - pad);
@@ -708,34 +611,21 @@ void prewarm_tab_icons(AppState& app) {
 
 // ── Hit-test: tree view ──────────────────────────────────────────
 int hit_test_tree(AppState& app, int x, int y, bool for_click) {
-  PaneViewRect r = pane_view_rect_at(app, x);
   Tab& tab = pane_tab_at(app, x);
   if (tab.tree_entries.empty() || tab.tree_entries_dirty) build_tree_entries(app);
   if (tab.tree_entries.empty()) return -1;
 
-  double zf = app.zoom_pct / 100.0;
-  int entry_h = static_cast<int>(28.0 * zf);
-  int indent_step = static_cast<int>(24.0 * zf);
-  int arrow_w = static_cast<int>(16.0 * zf);
-
-  int content_x = r.x;
-  int content_y = r.y;
-  if (x < content_x || x >= content_x + r.w || y < content_y ||
-      y >= content_y + r.h)
-    return -1;
-
-  int rel_y = y - content_y + tab.scroll_px;
-  int idx = rel_y / entry_h;
-  if (idx < 0 || idx >= static_cast<int>(tab.tree_entries.size())) return -1;
-
-  // Check if click is on expand/collapse arrow
-  auto& te = tab.tree_entries[idx];
-  int indent = te.depth * indent_step;
-  int arrow_x_min = content_x + indent + 4;
-  int arrow_x_max = arrow_x_min + arrow_w;
-  int arrow_y = content_y + idx * entry_h - tab.scroll_px + (entry_h - arrow_w) / 2;
-  if (te.is_dir && x >= arrow_x_min && x < arrow_x_max &&
-      y >= arrow_y && y < arrow_y + arrow_w) {
+  // Rows and expander arrows come from the retained registry (rects stored
+  // during paint); the arrow toggle behavior is unchanged.
+  const uint32_t hid = app.hit_main.query(x, y);
+  if ((hid & hui::Hit::kGroupMask) == hui::Hit::kViewArrow) {
+    int idx = static_cast<int>(hid & hui::Hit::kIndexMask);
+    if (idx < 0 || idx >= static_cast<int>(tab.tree_entries.size())) return -1;
+    auto& te = tab.tree_entries[idx];
+    if (!te.is_dir) {
+      // Not an expander: treat as a row hit.
+      return idx;
+    }
     if (for_click) {
       if (tab.tree_expanded.count(te.path))
         tab.tree_expanded.erase(te.path);
@@ -745,24 +635,21 @@ int hit_test_tree(AppState& app, int x, int y, bool for_click) {
     }
     return -2; // arrow hit
   }
-
+  if ((hid & hui::Hit::kGroupMask) != hui::Hit::kViewRow) return -1;
+  int idx = static_cast<int>(hid & hui::Hit::kIndexMask);
+  if (idx < 0 || idx >= static_cast<int>(tab.tree_entries.size())) return -1;
   return idx;
 }
 
 // ── Hit-test: compact view ───────────────────────────────────────
 int hit_test_compact(AppState& app, int x, int y) {
-  PaneViewRect r = pane_view_rect_at(app, x);
+  // Same registry path as list view (rows stored during paint).
+  const uint32_t hid = app.hit_main.query(x, y);
+  if ((hid & hui::Hit::kGroupMask) != hui::Hit::kViewRow) return -1;
   Tab& tab = pane_tab_at(app, x);
-  if (tab.visible_entries.empty()) return -1;
-  if (x < r.x || x >= r.x + r.w || y < r.y || y >= r.y + r.h) return -1;
-
-  double zf = app.zoom_pct / 100.0;
-  int entry_h = static_cast<int>(24.0 * zf);
-
-  int rel_y = y - r.y + tab.scroll_px;
-  int idx = rel_y / entry_h;
-  if (idx < 0 || idx >= static_cast<int>(tab.visible_entries.size())) return -1;
-  return idx;
+  int vi = static_cast<int>(hid & hui::Hit::kIndexMask);
+  if (vi < 0 || vi >= static_cast<int>(tab.visible_entries.size())) return -1;
+  return vi;
 }
 
 } // namespace eh::file_browser

@@ -30,6 +30,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <thread>
+
 #include "config/shell_config.hpp"
 #include "base/thread/thread_dispatch.hpp"
 #include "platform/common/palette/matugen_palette.hpp"
@@ -43,9 +45,38 @@ using menu_clock = std::chrono::steady_clock;
 
 namespace eh::file_browser {
 
+// Recursive file/dir/byte totals for one directory tree. Runs on a worker
+// thread (see show_properties): never call on the UI thread for large trees.
+struct DirSize {
+  uint64_t files = 0;
+  uint64_t dirs = 0;
+  uint64_t bytes = 0;
+};
+
+static DirSize walk_dir_size(const std::string& path) {
+  DirSize r;
+  std::error_code ec;
+  for (auto& entry :
+       fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied, ec)) {
+    if (ec) break;
+    std::error_code ec2;
+    if (entry.is_regular_file(ec2) && !ec2) {
+      ++r.files;
+      struct stat fst;
+      if (stat(entry.path().c_str(), &fst) == 0)
+        r.bytes += static_cast<uint64_t>(fst.st_size);
+    } else if (entry.is_directory(ec2) && !ec2) {
+      ++r.dirs;
+    }
+  }
+  return r;
+}
+
 void show_properties(AppState& app, const std::string& path, const std::string& icon_name) {
   auto& p = app.properties;
+  const uint64_t gen = p.props_gen + 1;
   p = AppState::PropertiesState{};
+  p.props_gen = gen;
   p.open = true;
   p.path = path;
   p.icon_name = icon_name;
@@ -56,23 +87,21 @@ void show_properties(AppState& app, const std::string& path, const std::string& 
 
   p.is_dir = S_ISDIR(st.st_mode);
   if (p.is_dir) {
-    uint64_t total = 0;
-    p.contained_files = 0;
-    p.contained_dirs = 0;
-    std::error_code ec;
-    for (auto& entry : fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied, ec)) {
-      if (ec) break;
-      std::error_code ec2;
-      if (entry.is_regular_file(ec2) && !ec2) {
-        ++p.contained_files;
-        struct stat fst;
-        if (stat(entry.path().c_str(), &fst) == 0)
-          total += static_cast<uint64_t>(fst.st_size);
-      } else if (entry.is_directory(ec2) && !ec2) {
-        ++p.contained_dirs;
-      }
-    }
-    p.size = total;
+    // Large trees blocked the UI thread here (recursive walk + stat storm
+    // on folders like Home). Open immediately and size in the background.
+    p.dir_size_pending = true;
+    std::thread([&app, path, gen]() {
+      DirSize r = walk_dir_size(path);
+      DeferredCall::callLater([&app, path, gen, r]() {
+        auto& p = app.properties;
+        if (!p.open || p.multi || p.props_gen != gen || p.path != path) return;
+        p.contained_files = r.files;
+        p.contained_dirs = r.dirs;
+        p.size = r.bytes;
+        p.dir_size_pending = false;
+        draw_props_window(app);
+      });
+    }).detach();
   } else {
     p.size = static_cast<uint64_t>(st.st_size);
   }
@@ -181,9 +210,16 @@ void show_properties(AppState& app, const std::string& path, const std::string& 
     return r;
   };
 
-  // Image dimensions
+  // Image dimensions — ext list mirrors detect_file_type()'s Image set plus
+  // common raster containers identify/ffprobe can read (jxl, jp2, tga, dds,
+  // exr, hdr, qoi, cur, icns). MIME is the backstop so renamed/odd
+  // extensions still get an Image tab when xdg-mime says image/*.
   static const std::vector<std::string> img_exts = {
-    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tiff", ".tif"
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg", ".avif",
+    ".tif", ".tiff", ".ico", ".heic", ".heif", ".psd", ".xcf", ".ai",
+    ".eps", ".raw", ".cr2", ".nef", ".arw", ".dng", ".orf", ".raf",
+    ".pbm", ".pgm", ".ppm", ".xbm", ".xpm", ".jxl", ".jp2", ".j2k",
+    ".jpx", ".tga", ".dds", ".exr", ".hdr", ".cur", ".icns", ".qoi"
   };
   std::string ext;
   auto dot = p.name.rfind('.');
@@ -192,12 +228,14 @@ void show_properties(AppState& app, const std::string& path, const std::string& 
     for (auto& c : ext) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
   }
   bool is_image = !ext.empty() && std::find(img_exts.begin(), img_exts.end(), ext) != img_exts.end();
+  if (!is_image && p.mime_type.rfind("image/", 0) == 0) is_image = true;
   if (is_image) {
-    // First pass: dimensions via identify
-    std::string icmd = "identify -format '%w %h|%[colorspace]|%[bit-depth]|%A|%C|%x|%y' " + sq(path) + " 2>/dev/null";
+    // First pass: dimensions via identify (first frame wins for GIF/TIFF).
+    // %U carries the resolution unit so 72 DPI isn't misread as DPCM.
+    std::string icmd = "identify -format '%w %h|%[colorspace]|%[bit-depth]|%A|%C|%x|%y|%U' " + sq(path) + " 2>/dev/null";
     FILE* f = popen(icmd.c_str(), "r");
     if (f) {
-      char buf[256];
+      char buf[1024];
       if (fgets(buf, sizeof(buf), f)) {
         std::string line(buf);
         while (!line.empty() && (line.back() == '\n' || line.back() == '\r')) line.pop_back();
@@ -220,10 +258,13 @@ void show_properties(AppState& app, const std::string& path, const std::string& 
         p.image_colorspace = next_field();
         p.image_bit_depth = next_field();
         std::string alpha = next_field();
-        p.image_has_alpha = !alpha.empty() && alpha != "None";
+        // %A is Undefined/False/None/Off when there is no alpha channel;
+        // Blend/True/Activate mean real transparency.
+        p.image_has_alpha = (alpha == "True" || alpha == "Blend" || alpha == "Activate");
         p.image_compression = next_field();
         std::string res_x = next_field();
         std::string res_y = next_field();
+        std::string res_unit = next_field();
         if (!res_x.empty() && !res_y.empty()) {
           try {
             double rx = std::stod(res_x);
@@ -232,7 +273,10 @@ void show_properties(AppState& app, const std::string& path, const std::string& 
               char rbuf[32];
               snprintf(rbuf, sizeof(rbuf), "%.0f \u00d7 %.0f", rx, ry);
               p.image_resolution = rbuf;
-              p.image_res_unit = (rx > 100) ? "DPI" : "DPCM";
+              if (res_unit.find("Centimeter") != std::string::npos)
+                p.image_res_unit = "DPCM";
+              else
+                p.image_res_unit = "DPI"; // PixelsPerInch or Undefined (SVG/WEBP default 96)
             }
           } catch (...) {}
         }
@@ -435,13 +479,16 @@ void show_properties(AppState& app, const std::string& path, const std::string& 
 
 void show_properties_multi(AppState& app, const std::vector<std::string>& paths) {
   auto& p = app.properties;
+  const uint64_t gen = p.props_gen + 1;
   p = AppState::PropertiesState{};
+  p.props_gen = gen;
   p.open = true;
   p.multi = true;
   p.paths = paths;
 
   uint64_t total_size = 0;
   bool have_representative = false;
+  std::vector<std::string> multi_dirs;
 
   // Executable-capable extensions (same list as single-item properties)
   static const std::vector<std::string> exec_exts = {
@@ -458,17 +505,7 @@ void show_properties_multi(AppState& app, const std::vector<std::string>& paths)
 
     if (S_ISDIR(st.st_mode)) {
       ++p.dir_count;
-      uint64_t total = 0;
-      std::error_code ec;
-      for (auto& entry : fs::recursive_directory_iterator(path, fs::directory_options::skip_permission_denied, ec)) {
-        if (ec) break;
-        if (entry.is_regular_file(ec)) {
-          struct stat fst;
-          if (stat(entry.path().c_str(), &fst) == 0)
-            total += static_cast<uint64_t>(fst.st_size);
-        }
-      }
-      total_size += total;
+      multi_dirs.push_back(path);
     } else {
       ++p.file_count;
       total_size += static_cast<uint64_t>(st.st_size);
@@ -509,6 +546,21 @@ void show_properties_multi(AppState& app, const std::vector<std::string>& paths)
   }
 
   p.size = total_size;
+  if (!multi_dirs.empty()) {
+    // Size the directory portions off the UI thread (see show_properties).
+    p.dir_size_pending = true;
+    std::thread([&app, paths, gen, multi_dirs, total_size]() {
+      uint64_t dir_bytes = 0;
+      for (const auto& d : multi_dirs) dir_bytes += walk_dir_size(d).bytes;
+      DeferredCall::callLater([&app, paths, gen, total_size, dir_bytes]() {
+        auto& p = app.properties;
+        if (!p.open || !p.multi || p.props_gen != gen || p.paths != paths) return;
+        p.size = total_size + dir_bytes;
+        p.dir_size_pending = false;
+        draw_props_window(app);
+      });
+    }).detach();
+  }
   p.name = std::to_string(paths.size()) + (paths.size() == 1 ? " item" : " items");
   if (!paths.empty())
     p.location = fs::path(paths.front()).parent_path().string();

@@ -530,22 +530,22 @@ bool ClipboardService::copy_files(bool cut, const std::vector<std::string>& abs_
   if (!is_available() || abs_paths.empty()) return false;
 
   // Build x-special/gnome-copied-files data
-  std::string gnome = cut ? "cut\n" : "copy\n";
+  std::string payload = cut ? "cut\n" : "copy\n";
   std::string uri_list;
   std::string plain;
   for (const auto& p : abs_paths) {
     std::string canon = canonical_abs_path(p);
     if (canon.empty()) continue;
     std::string uri = file_uri_for_path(canon);
-    gnome += uri + "\n";
+    payload += uri + "\n";
     uri_list += uri + "\r\n";
     if (!plain.empty()) plain += "\n";
     plain += canon;
   }
-  if (gnome.size() < 6) return false;  // header only ("cut\n"/"copy\n"), no paths
+  if (payload.size() < 6) return false;  // header only ("cut\n"/"copy\n"), no paths
 
   outgoingData_.clear();
-  outgoingData_[std::string(kGnomeCopiedFiles)] = std::vector<char>(gnome.begin(), gnome.end());
+  outgoingData_[std::string(kGnomeCopiedFiles)] = std::vector<char>(payload.begin(), payload.end());
   outgoingData_[std::string(kUriList)] = std::vector<char>(uri_list.begin(), uri_list.end());
   outgoingData_[std::string(kTextPlain)] = std::vector<char>(plain.begin(), plain.end());
 

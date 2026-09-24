@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include "draw_helpers.hpp"
+#include "ui/design.hpp"
 #include "draw_file_icons.hpp"
 #include "draw_thumbnails.hpp"
 #include "layout.hpp"
@@ -63,18 +64,8 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
   app.settings_w = card_w;
   app.settings_h = card_h;
 
-  // Card shadow
-  cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
-  draw_rounded_rect(cr, cx + 2, cy + 4, card_w, card_h, 12);
-  cairo_fill(cr);
-
-  // Card background
-  double dlg_bg_alpha = app.dialog_opacity_pct / 100.0;
-  double tr, tg, tb;
-  wallpaper_tint_surface(app, kPopupWallpaperTint, tr, tg, tb);
-  cairo_set_source_rgba(cr, tr, tg, tb, dlg_bg_alpha);
-  draw_rounded_rect(cr, cx, cy, card_w, card_h, 12);
-  cairo_fill(cr);
+  // Card (shared dialog chrome; honors the dialog opacity slider)
+  draw_dialog_card(app, cr, cx, cy, card_w, card_h, 14, app.dialog_opacity_pct / 100.0);
 
   // Title bar
   cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
@@ -89,24 +80,28 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
   bool close_hov = (app.pointerX >= close_x && app.pointerX < close_x + 24 &&
                     app.pointerY >= close_y && app.pointerY < close_y + 24);
   if (close_hov) {
-    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.15);
-    cairo_arc(cr, close_x + 12, close_y + 12, 12, 0, 2 * M_PI);
+    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.14);
+    draw_rounded_rect(cr, close_x, close_y, 24, 24, 12);
     cairo_fill(cr);
   }
   // Draw X
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.6);
-  cairo_set_line_width(cr, 2);
-  cairo_move_to(cr, close_x + 6, close_y + 6);
-  cairo_line_to(cr, close_x + 18, close_y + 18);
+  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, close_hov ? 0.85 : 0.6);
+  cairo_set_line_width(cr, 1.6);
+  cairo_move_to(cr, close_x + 7, close_y + 7);
+  cairo_line_to(cr, close_x + 17, close_y + 17);
   cairo_stroke(cr);
-  cairo_move_to(cr, close_x + 18, close_y + 6);
-  cairo_line_to(cr, close_x + 6, close_y + 18);
+  cairo_move_to(cr, close_x + 17, close_y + 7);
+  cairo_line_to(cr, close_x + 7, close_y + 17);
   cairo_stroke(cr);
+  app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsClose), static_cast<int>(close_x), static_cast<int>(close_y), static_cast<int>(24), static_cast<int>(24));
 
   // Tabs
   int tab_y = cy + top_bar_h + 4;
   int tab_w = (card_w - 2 * pad) / 3;
   const char* tab_names[] = {"General", "Appearance", "Preview"};
+  hui::design::card_fill(cr, app, 0.45);
+  draw_rounded_rect(cr, cx + pad, tab_y, card_w - 2 * pad, tab_h, 10);
+  cairo_fill(cr);
   for (int t = 0; t < 3; ++t) {
     int tx = cx + pad + t * tab_w;
     bool active = (t == app.settings_tab);
@@ -116,20 +111,26 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_tab_hit[t][1] = tab_y;
     app.settings_tab_hit[t][2] = tab_w;
     app.settings_tab_hit[t][3] = tab_h;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsTabBase + t),
+                         tx, tab_y, tab_w, tab_h);
 
     if (active) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.15);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.10);
+      draw_rounded_rect(cr, tx + 3, tab_y, tab_w - 6, tab_h, 7);
+      cairo_fill(cr);
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.9);
+      draw_rounded_rect(cr, tx + 16, tab_y + tab_h - 6, tab_w - 32, 2, 1);
+      cairo_fill(cr);
     } else if (tab_hov) {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.06);
-    } else {
-      cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.15);
+      cairo_set_source_rgba(cr, 0.5, 0.5, 0.5, 0.08);
+      draw_rounded_rect(cr, tx + 3, tab_y, tab_w - 6, tab_h, 7);
+      cairo_fill(cr);
     }
-    draw_rounded_rect(cr, tx, tab_y, tab_w, tab_h, 6);
-    cairo_fill(cr);
 
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, active ? 1.0 : 0.6);
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 14);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, active ? 0.95 : 0.5);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                           active ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 13);
     cairo_text_extents_t te;
     cairo_text_extents(cr, tab_names[t], &te);
     cairo_move_to(cr, tx + (tab_w - te.x_advance) / 2, tab_y + tab_h / 2 + te.height * 0.35);
@@ -137,6 +138,19 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
   }
 
   int content_y = tab_y + tab_h + 12;
+
+  // DS slider: 6px bar + white knob. Hit rects are assigned at each site below.
+  auto ds_slider = [&](int sx, int sy, int sw, double frac) {
+    hui::design::bar(cr, app, sx, sy, sw, frac, 6);
+    double kx = sx + sw * std::clamp(frac, 0.0, 1.0);
+    cairo_set_source_rgba(cr, 1, 1, 1, 0.95);
+    cairo_arc(cr, kx, sy + 3, 7, 0, 2 * M_PI);
+    cairo_fill(cr);
+    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.4);
+    cairo_set_line_width(cr, 1);
+    cairo_arc(cr, kx, sy + 3, 7, 0, 2 * M_PI);
+    cairo_stroke(cr);
+  };
 
   // ── General tab ──
   if (app.settings_tab == 0) {
@@ -160,6 +174,7 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
     cairo_move_to(cr, left_x + 180, ly + 14);
     cairo_show_text(cr, zoom_str);
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsZoomField), static_cast<int>(left_x + 180), static_cast<int>(ly - 2), static_cast<int>(36), static_cast<int>(22));
 
     // Zoom - button
     double z_btn_x = left_x + 220;
@@ -171,9 +186,10 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_hit_zoom_down[1] = z_btn_y;
     app.settings_hit_zoom_down[2] = z_btn_s;
     app.settings_hit_zoom_down[3] = z_btn_s;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsZoomDown), static_cast<int>(app.settings_hit_zoom_down[0]), static_cast<int>(app.settings_hit_zoom_down[1]), static_cast<int>(app.settings_hit_zoom_down[2]), static_cast<int>(app.settings_hit_zoom_down[3]));
 
-    cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, z_dec_hov ? 0.7 : 0.5);
-    draw_rounded_rect(cr, z_btn_x, z_btn_y, z_btn_s, z_btn_s, 6);
+    hui::design::card_fill(cr, app, z_dec_hov ? 0.8 : 0.55);
+    draw_rounded_rect(cr, z_btn_x, z_btn_y, z_btn_s, z_btn_s, 8);
     cairo_fill(cr);
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.8);
     cairo_set_font_size(cr, 18);
@@ -188,9 +204,10 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_hit_zoom_up[1] = z_btn_y;
     app.settings_hit_zoom_up[2] = z_btn_s;
     app.settings_hit_zoom_up[3] = z_btn_s;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsZoomUp), static_cast<int>(app.settings_hit_zoom_up[0]), static_cast<int>(app.settings_hit_zoom_up[1]), static_cast<int>(app.settings_hit_zoom_up[2]), static_cast<int>(app.settings_hit_zoom_up[3]));
 
-    cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, z_inc_hov ? 0.7 : 0.5);
-    draw_rounded_rect(cr, z_btn_x, z_btn_y, z_btn_s, z_btn_s, 6);
+    hui::design::card_fill(cr, app, z_inc_hov ? 0.8 : 0.55);
+    draw_rounded_rect(cr, z_btn_x, z_btn_y, z_btn_s, z_btn_s, 8);
     cairo_fill(cr);
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.8);
     cairo_set_font_size(cr, 18);
@@ -213,28 +230,9 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_hit_folders_toggle[1] = toggle_y;
     app.settings_hit_folders_toggle[2] = toggle_w;
     app.settings_hit_folders_toggle[3] = toggle_h;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsFoldersToggle), static_cast<int>(app.settings_hit_folders_toggle[0]), static_cast<int>(app.settings_hit_folders_toggle[1]), static_cast<int>(app.settings_hit_folders_toggle[2]), static_cast<int>(app.settings_hit_folders_toggle[3]));
 
-    bool toggle_hov = (app.pointerX >= toggle_x && app.pointerX < toggle_x + toggle_w &&
-                       app.pointerY >= toggle_y && app.pointerY < toggle_y + toggle_h);
-    if (toggle_hov) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.1);
-      draw_rounded_rect(cr, toggle_x - 2, toggle_y - 2, toggle_w + 4, toggle_h + 4, toggle_h / 2 + 2);
-      cairo_fill(cr);
-    }
-
-    // Toggle track
-    cairo_set_source_rgba(cr, app.settings_folders_before_files ? app.accent_r : app.outline_r,
-                          app.settings_folders_before_files ? app.accent_g : app.outline_g,
-                          app.settings_folders_before_files ? app.accent_b : app.outline_b,
-                          0.6);
-    draw_rounded_rect(cr, toggle_x, toggle_y, toggle_w, toggle_h, toggle_h / 2);
-    cairo_fill(cr);
-
-    // Toggle knob
-    double knob_x = app.settings_folders_before_files ? toggle_x + toggle_w - toggle_h : toggle_x;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-    cairo_arc(cr, knob_x + toggle_h / 2, toggle_y + toggle_h / 2, toggle_h / 2 - 2, 0, 2 * M_PI);
-    cairo_fill(cr);
+    hui::design::draw_switch(cr, app, toggle_x, toggle_y, app.settings_folders_before_files);
 
     ly += 40;
 
@@ -252,17 +250,18 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_hit_term_dropdown[1] = drop_y;
     app.settings_hit_term_dropdown[2] = drop_w;
     app.settings_hit_term_dropdown[3] = drop_h;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsTermDrop), static_cast<int>(app.settings_hit_term_dropdown[0]), static_cast<int>(app.settings_hit_term_dropdown[1]), static_cast<int>(app.settings_hit_term_dropdown[2]), static_cast<int>(app.settings_hit_term_dropdown[3]));
 
     bool drop_hov = (app.pointerX >= drop_x && app.pointerX < drop_x + drop_w &&
                      app.pointerY >= drop_y && app.pointerY < drop_y + drop_h);
 
     // Dropdown box
-    cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, drop_hov ? 0.7 : 0.5);
-    draw_rounded_rect(cr, drop_x, drop_y, drop_w, drop_h, 6);
+    hui::design::card_fill(cr, app, drop_hov ? 0.8 : 0.55);
+    draw_rounded_rect(cr, drop_x, drop_y, drop_w, drop_h, 8);
     cairo_fill(cr);
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.35);
+    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, drop_hov ? 0.5 : 0.22);
     cairo_set_line_width(cr, 1);
-    draw_rounded_rect(cr, drop_x, drop_y, drop_w, drop_h, 6);
+    draw_rounded_rect(cr, drop_x, drop_y, drop_w, drop_h, 8);
     cairo_stroke(cr);
 
     // Selected item text
@@ -293,14 +292,7 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
       int dd_y = static_cast<int>(drop_y + drop_h + 2);
       int dd_x = static_cast<int>(drop_x);
 
-      // Dropdown list background
-      cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.95);
-      draw_rounded_rect(cr, dd_x, dd_y, drop_w, dd_list_h, 6);
-      cairo_fill(cr);
-      cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.3);
-      cairo_set_line_width(cr, 1);
-      draw_rounded_rect(cr, dd_x, dd_y, drop_w, dd_list_h, 6);
-      cairo_stroke(cr);
+      draw_dialog_card(app, cr, dd_x, dd_y, drop_w, dd_list_h, 8);
 
       cairo_save(cr);
       cairo_rectangle(cr, dd_x, dd_y, drop_w, dd_list_h);
@@ -309,14 +301,14 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
       int scroll_offset = app.settings_dropdown_scroll;
       for (int i = scroll_offset; i < dd_total && i < scroll_offset + dd_visible; ++i) {
         int item_y = dd_y + (i - scroll_offset) * dd_entry_h;
+        app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings,
+                                              hui::Hit::kSettingsDropItemBase + (i - scroll_offset)),
+                             dd_x, item_y, static_cast<int>(drop_w), dd_entry_h);
         bool item_hov = (i == app.settings_dropdown_hover);
         bool item_sel = (i == app.settings_default_term_idx);
 
         if (item_hov || item_sel) {
-          cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
-                                item_hov ? 0.2 : 0.1);
-          cairo_rectangle(cr, dd_x, item_y, drop_w, dd_entry_h);
-          cairo_fill(cr);
+          hui::design::row_hover(cr, app, dd_x + 4, item_y + 2, drop_w - 8, dd_entry_h - 4);
         }
 
         cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, item_sel ? 1.0 : 0.8);
@@ -347,28 +339,46 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
       app.settings_hit_indep_views_toggle[1] = iv_toggle_y;
       app.settings_hit_indep_views_toggle[2] = iv_toggle_w;
       app.settings_hit_indep_views_toggle[3] = iv_toggle_h;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsIndepToggle), static_cast<int>(app.settings_hit_indep_views_toggle[0]), static_cast<int>(app.settings_hit_indep_views_toggle[1]), static_cast<int>(app.settings_hit_indep_views_toggle[2]), static_cast<int>(app.settings_hit_indep_views_toggle[3]));
 
-      bool iv_hov = (app.pointerX >= iv_toggle_x && app.pointerX < iv_toggle_x + iv_toggle_w &&
-                     app.pointerY >= iv_toggle_y && app.pointerY < iv_toggle_y + iv_toggle_h);
-      if (iv_hov) {
-        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.1);
-        draw_rounded_rect(cr, iv_toggle_x - 2, iv_toggle_y - 2, iv_toggle_w + 4, iv_toggle_h + 4, iv_toggle_h / 2 + 2);
-        cairo_fill(cr);
+      hui::design::draw_switch(cr, app, iv_toggle_x, iv_toggle_y, app.settings_independent_dir_views);
+    }
+
+    ly += 40;
+
+    // Memory readout (refreshed twice a second; read-only diagnostics).
+    {
+      static auto last_sample = std::chrono::steady_clock::time_point{};
+      static char mem_str[256] = "Memory …";
+      const auto now_tp = std::chrono::steady_clock::now();
+      if (now_tp - last_sample > std::chrono::milliseconds(500)) {
+        last_sample = now_tp;
+        long rss_kb = 0, anon_kb = 0, file_kb = 0, shmem_kb = 0;
+        std::ifstream smaps("/proc/self/smaps_rollup");
+        std::string ln;
+        while (std::getline(smaps, ln)) {
+          if (ln.compare(0, 5, "Rss: ") == 0) rss_kb = std::stol(ln.substr(5));
+          else if (ln.compare(0, 9, "RssAnon: ") == 0) anon_kb = std::stol(ln.substr(9));
+          else if (ln.compare(0, 9, "RssFile: ") == 0) file_kb = std::stol(ln.substr(9));
+          else if (ln.compare(0, 10, "RssShmem: ") == 0) shmem_kb = std::stol(ln.substr(10));
+        }
+        auto mb = [](long kb) { return kb / 1024; };
+        std::snprintf(mem_str, sizeof(mem_str),
+                      "Memory  RSS %ld MB (anon %ld, file %ld, shm %ld) · thumbs %ld · icons %ld",
+                      mb(rss_kb), mb(anon_kb), mb(file_kb), mb(shmem_kb),
+                      mb(static_cast<long>(app.thumb_cache_bytes / 1024)),
+                      mb(static_cast<long>(app.icons.cache_bytes() / 1024)));
       }
-
-      // Toggle track
-      cairo_set_source_rgba(cr, app.settings_independent_dir_views ? app.accent_r : app.outline_r,
-                            app.settings_independent_dir_views ? app.accent_g : app.outline_g,
-                            app.settings_independent_dir_views ? app.accent_b : app.outline_b,
-                            0.6);
-      draw_rounded_rect(cr, iv_toggle_x, iv_toggle_y, iv_toggle_w, iv_toggle_h, iv_toggle_h / 2);
-      cairo_fill(cr);
-
-      // Toggle knob
-      double iv_knob_x = app.settings_independent_dir_views ? iv_toggle_x + iv_toggle_w - iv_toggle_h : iv_toggle_x;
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-      cairo_arc(cr, iv_knob_x + iv_toggle_h / 2, iv_toggle_y + iv_toggle_h / 2, iv_toggle_h / 2 - 2, 0, 2 * M_PI);
-      cairo_fill(cr);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+      cairo_set_font_size(cr, 13);
+      cairo_move_to(cr, left_x, ly + 14);
+      cairo_show_text(cr, "Memory");
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                            app.text_secondary_b, 1.0);
+      cairo_set_font_size(cr, 11);
+      cairo_move_to(cr, left_x, ly + 32);
+      cairo_show_text(cr, mem_str);
     }
     }
   }
@@ -401,25 +411,9 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_hit_opacity_slider[1] = slider_y - 10;
     app.settings_hit_opacity_slider[2] = slider_w;
     app.settings_hit_opacity_slider[3] = slider_h + 20;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsSurfSlider), static_cast<int>(app.settings_hit_opacity_slider[0]), static_cast<int>(app.settings_hit_opacity_slider[1]), static_cast<int>(app.settings_hit_opacity_slider[2]), static_cast<int>(app.settings_hit_opacity_slider[3]));
 
-    // Track background
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.4);
-    draw_rounded_rect(cr, slider_x, slider_y, slider_w, slider_h, 3);
-    cairo_fill(cr);
-
-    // Filled portion
-    double fill_w = slider_w * (app.settings_opacity_pct / 100.0);
-    if (fill_w > 0) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.7);
-      draw_rounded_rect(cr, slider_x, slider_y, fill_w, slider_h, 3);
-      cairo_fill(cr);
-    }
-
-    // Knob
-    double knob_x = slider_x + fill_w;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-    cairo_arc(cr, knob_x, slider_y + slider_h / 2, 8, 0, 2 * M_PI);
-    cairo_fill(cr);
+    ds_slider(slider_x, slider_y, slider_w, app.settings_opacity_pct / 100.0);
 
     // Sidebar opacity
     ly += 52;
@@ -439,22 +433,9 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_hit_sidebar_opacity_slider[1] = sb_slider_y - 10;
     app.settings_hit_sidebar_opacity_slider[2] = slider_w;
     app.settings_hit_sidebar_opacity_slider[3] = slider_h + 20;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsSideSlider), static_cast<int>(app.settings_hit_sidebar_opacity_slider[0]), static_cast<int>(app.settings_hit_sidebar_opacity_slider[1]), static_cast<int>(app.settings_hit_sidebar_opacity_slider[2]), static_cast<int>(app.settings_hit_sidebar_opacity_slider[3]));
 
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.4);
-    draw_rounded_rect(cr, slider_x, sb_slider_y, slider_w, slider_h, 3);
-    cairo_fill(cr);
-
-    double sb_fill_w = slider_w * (app.settings_sidebar_opacity_pct / 100.0);
-    if (sb_fill_w > 0) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.7);
-      draw_rounded_rect(cr, slider_x, sb_slider_y, sb_fill_w, slider_h, 3);
-      cairo_fill(cr);
-    }
-
-    double sb_knob_x = slider_x + sb_fill_w;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-    cairo_arc(cr, sb_knob_x, sb_slider_y + slider_h / 2, 8, 0, 2 * M_PI);
-    cairo_fill(cr);
+    ds_slider(slider_x, sb_slider_y, slider_w, app.settings_sidebar_opacity_pct / 100.0);
 
     // Top bar opacity
     ly += 52;
@@ -474,22 +455,9 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_hit_topbar_opacity_slider[1] = tb_slider_y - 10;
     app.settings_hit_topbar_opacity_slider[2] = slider_w;
     app.settings_hit_topbar_opacity_slider[3] = slider_h + 20;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsTopSlider), static_cast<int>(app.settings_hit_topbar_opacity_slider[0]), static_cast<int>(app.settings_hit_topbar_opacity_slider[1]), static_cast<int>(app.settings_hit_topbar_opacity_slider[2]), static_cast<int>(app.settings_hit_topbar_opacity_slider[3]));
 
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.4);
-    draw_rounded_rect(cr, slider_x, tb_slider_y, slider_w, slider_h, 3);
-    cairo_fill(cr);
-
-    double tb_fill_w = slider_w * (app.settings_topbar_opacity_pct / 100.0);
-    if (tb_fill_w > 0) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.7);
-      draw_rounded_rect(cr, slider_x, tb_slider_y, tb_fill_w, slider_h, 3);
-      cairo_fill(cr);
-    }
-
-    double tb_knob_x = slider_x + tb_fill_w;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-    cairo_arc(cr, tb_knob_x, tb_slider_y + slider_h / 2, 8, 0, 2 * M_PI);
-    cairo_fill(cr);
+    ds_slider(slider_x, tb_slider_y, slider_w, app.settings_topbar_opacity_pct / 100.0);
 
     // Status bar opacity
     ly += 52;
@@ -509,22 +477,9 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_hit_statusbar_opacity_slider[1] = st_slider_y - 10;
     app.settings_hit_statusbar_opacity_slider[2] = slider_w;
     app.settings_hit_statusbar_opacity_slider[3] = slider_h + 20;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsStatusSlider), static_cast<int>(app.settings_hit_statusbar_opacity_slider[0]), static_cast<int>(app.settings_hit_statusbar_opacity_slider[1]), static_cast<int>(app.settings_hit_statusbar_opacity_slider[2]), static_cast<int>(app.settings_hit_statusbar_opacity_slider[3]));
 
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.4);
-    draw_rounded_rect(cr, slider_x, st_slider_y, slider_w, slider_h, 3);
-    cairo_fill(cr);
-
-    double st_fill_w = slider_w * (app.settings_statusbar_opacity_pct / 100.0);
-    if (st_fill_w > 0) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.7);
-      draw_rounded_rect(cr, slider_x, st_slider_y, st_fill_w, slider_h, 3);
-      cairo_fill(cr);
-    }
-
-    double st_knob_x = slider_x + st_fill_w;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-    cairo_arc(cr, st_knob_x, st_slider_y + slider_h / 2, 8, 0, 2 * M_PI);
-    cairo_fill(cr);
+    ds_slider(slider_x, st_slider_y, slider_w, app.settings_statusbar_opacity_pct / 100.0);
 
     // Preview opacity
     ly += 52;
@@ -544,22 +499,9 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_hit_preview_opacity_slider[1] = pv_slider_y - 10;
     app.settings_hit_preview_opacity_slider[2] = slider_w;
     app.settings_hit_preview_opacity_slider[3] = slider_h + 20;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsPrevSlider), static_cast<int>(app.settings_hit_preview_opacity_slider[0]), static_cast<int>(app.settings_hit_preview_opacity_slider[1]), static_cast<int>(app.settings_hit_preview_opacity_slider[2]), static_cast<int>(app.settings_hit_preview_opacity_slider[3]));
 
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.4);
-    draw_rounded_rect(cr, slider_x, pv_slider_y, slider_w, slider_h, 3);
-    cairo_fill(cr);
-
-    double pv_fill_w = slider_w * (app.settings_preview_opacity_pct / 100.0);
-    if (pv_fill_w > 0) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.7);
-      draw_rounded_rect(cr, slider_x, pv_slider_y, pv_fill_w, slider_h, 3);
-      cairo_fill(cr);
-    }
-
-    double pv_knob_x = slider_x + pv_fill_w;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-    cairo_arc(cr, pv_knob_x, pv_slider_y + slider_h / 2, 8, 0, 2 * M_PI);
-    cairo_fill(cr);
+    ds_slider(slider_x, pv_slider_y, slider_w, app.settings_preview_opacity_pct / 100.0);
 
     // Settings dialog opacity
     ly += 52;
@@ -579,22 +521,9 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_hit_dialog_opacity_slider[1] = dlg_slider_y - 10;
     app.settings_hit_dialog_opacity_slider[2] = slider_w;
     app.settings_hit_dialog_opacity_slider[3] = slider_h + 20;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsDlgSlider), static_cast<int>(app.settings_hit_dialog_opacity_slider[0]), static_cast<int>(app.settings_hit_dialog_opacity_slider[1]), static_cast<int>(app.settings_hit_dialog_opacity_slider[2]), static_cast<int>(app.settings_hit_dialog_opacity_slider[3]));
 
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.4);
-    draw_rounded_rect(cr, slider_x, dlg_slider_y, slider_w, slider_h, 3);
-    cairo_fill(cr);
-
-    double dlg_fill_w = slider_w * (app.settings_dialog_opacity_pct / 100.0);
-    if (dlg_fill_w > 0) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.7);
-      draw_rounded_rect(cr, slider_x, dlg_slider_y, dlg_fill_w, slider_h, 3);
-      cairo_fill(cr);
-    }
-
-    double dlg_knob_x = slider_x + dlg_fill_w;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-    cairo_arc(cr, dlg_knob_x, dlg_slider_y + slider_h / 2, 8, 0, 2 * M_PI);
-    cairo_fill(cr);
+    ds_slider(slider_x, dlg_slider_y, slider_w, app.settings_dialog_opacity_pct / 100.0);
 
     // Properties dialog opacity
     ly += 52;
@@ -614,22 +543,9 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_hit_properties_opacity_slider[1] = prp_slider_y - 10;
     app.settings_hit_properties_opacity_slider[2] = slider_w;
     app.settings_hit_properties_opacity_slider[3] = slider_h + 20;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsPropsSlider), static_cast<int>(app.settings_hit_properties_opacity_slider[0]), static_cast<int>(app.settings_hit_properties_opacity_slider[1]), static_cast<int>(app.settings_hit_properties_opacity_slider[2]), static_cast<int>(app.settings_hit_properties_opacity_slider[3]));
 
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.4);
-    draw_rounded_rect(cr, slider_x, prp_slider_y, slider_w, slider_h, 3);
-    cairo_fill(cr);
-
-    double prp_fill_w = slider_w * (app.settings_properties_opacity_pct / 100.0);
-    if (prp_fill_w > 0) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.7);
-      draw_rounded_rect(cr, slider_x, prp_slider_y, prp_fill_w, slider_h, 3);
-      cairo_fill(cr);
-    }
-
-    double prp_knob_x = slider_x + prp_fill_w;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-    cairo_arc(cr, prp_knob_x, prp_slider_y + slider_h / 2, 8, 0, 2 * M_PI);
-    cairo_fill(cr);
+    ds_slider(slider_x, prp_slider_y, slider_w, app.settings_properties_opacity_pct / 100.0);
 
     // Matugen wallpaper theming toggle
     ly += 52;
@@ -646,26 +562,9 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_hit_matugen_toggle[1] = mt_toggle_y;
     app.settings_hit_matugen_toggle[2] = mt_toggle_w;
     app.settings_hit_matugen_toggle[3] = mt_toggle_h;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsMatugen), static_cast<int>(app.settings_hit_matugen_toggle[0]), static_cast<int>(app.settings_hit_matugen_toggle[1]), static_cast<int>(app.settings_hit_matugen_toggle[2]), static_cast<int>(app.settings_hit_matugen_toggle[3]));
 
-    bool mt_hov = (app.pointerX >= mt_toggle_x && app.pointerX < mt_toggle_x + mt_toggle_w &&
-                   app.pointerY >= mt_toggle_y && app.pointerY < mt_toggle_y + mt_toggle_h);
-    if (mt_hov) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.1);
-      draw_rounded_rect(cr, mt_toggle_x - 2, mt_toggle_y - 2, mt_toggle_w + 4, mt_toggle_h + 4, mt_toggle_h / 2 + 2);
-      cairo_fill(cr);
-    }
-
-    cairo_set_source_rgba(cr, app.settings_matugen_theming ? app.accent_r : app.outline_r,
-                          app.settings_matugen_theming ? app.accent_g : app.outline_g,
-                          app.settings_matugen_theming ? app.accent_b : app.outline_b,
-                          0.6);
-    draw_rounded_rect(cr, mt_toggle_x, mt_toggle_y, mt_toggle_w, mt_toggle_h, mt_toggle_h / 2);
-    cairo_fill(cr);
-
-    double mt_knob_x = app.settings_matugen_theming ? mt_toggle_x + mt_toggle_w - mt_toggle_h : mt_toggle_x;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-    cairo_arc(cr, mt_knob_x + mt_toggle_h / 2, mt_toggle_y + mt_toggle_h / 2, mt_toggle_h / 2 - 2, 0, 2 * M_PI);
-    cairo_fill(cr);
+    hui::design::draw_switch(cr, app, mt_toggle_x, mt_toggle_y, app.settings_matugen_theming);
 
     // Color engine sync toggle (Event Horizon wallpaper palette)
     ly += 52;
@@ -682,26 +581,9 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_hit_color_engine_toggle[1] = ce_toggle_y;
     app.settings_hit_color_engine_toggle[2] = ce_toggle_w;
     app.settings_hit_color_engine_toggle[3] = ce_toggle_h;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsColorEng), static_cast<int>(app.settings_hit_color_engine_toggle[0]), static_cast<int>(app.settings_hit_color_engine_toggle[1]), static_cast<int>(app.settings_hit_color_engine_toggle[2]), static_cast<int>(app.settings_hit_color_engine_toggle[3]));
 
-    bool ce_hov = (app.pointerX >= ce_toggle_x && app.pointerX < ce_toggle_x + ce_toggle_w &&
-                   app.pointerY >= ce_toggle_y && app.pointerY < ce_toggle_y + ce_toggle_h);
-    if (ce_hov) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.1);
-      draw_rounded_rect(cr, ce_toggle_x - 2, ce_toggle_y - 2, ce_toggle_w + 4, ce_toggle_h + 4, ce_toggle_h / 2 + 2);
-      cairo_fill(cr);
-    }
-
-    cairo_set_source_rgba(cr, app.settings_color_engine ? app.accent_r : app.outline_r,
-                          app.settings_color_engine ? app.accent_g : app.outline_g,
-                          app.settings_color_engine ? app.accent_b : app.outline_b,
-                          0.6);
-    draw_rounded_rect(cr, ce_toggle_x, ce_toggle_y, ce_toggle_w, ce_toggle_h, ce_toggle_h / 2);
-    cairo_fill(cr);
-
-    double ce_knob_x = app.settings_color_engine ? ce_toggle_x + ce_toggle_w - ce_toggle_h : ce_toggle_x;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-    cairo_arc(cr, ce_knob_x + ce_toggle_h / 2, ce_toggle_y + ce_toggle_h / 2, ce_toggle_h / 2 - 2, 0, 2 * M_PI);
-    cairo_fill(cr);
+    hui::design::draw_switch(cr, app, ce_toggle_x, ce_toggle_y, app.settings_color_engine);
   }
 
   // Bottom buttons
@@ -715,65 +597,33 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
   app.settings_hit_cancel[1] = btn_y;
   app.settings_hit_cancel[2] = btn_w;
   app.settings_hit_cancel[3] = btn_h;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsCancel), static_cast<int>(app.settings_hit_cancel[0]), static_cast<int>(app.settings_hit_cancel[1]), static_cast<int>(app.settings_hit_cancel[2]), static_cast<int>(app.settings_hit_cancel[3]));
 
   bool cancel_hov = (app.pointerX >= app.settings_hit_cancel[0] && app.pointerX < app.settings_hit_cancel[0] + btn_w &&
                      app.pointerY >= btn_y && app.pointerY < btn_y + btn_h);
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, cancel_hov ? 0.8 : 0.55);
-  draw_rounded_rect(cr, app.settings_hit_cancel[0], btn_y, btn_w, btn_h, btn_h / 2);
-  cairo_fill_preserve(cr);
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.45);
-  cairo_set_line_width(cr, 1);
-  cairo_stroke(cr);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 13);
-  cairo_text_extents_t te;
-  cairo_text_extents(cr, "Cancel", &te);
-  cairo_move_to(cr, app.settings_hit_cancel[0] + (btn_w - te.x_advance) / 2,
-                btn_y + btn_h / 2 + te.height * 0.35);
-  cairo_show_text(cr, "Cancel");
+  hui::design::button(cr, app, app.settings_hit_cancel[0], btn_y, btn_w, btn_h, "Cancel", false, cancel_hov);
 
   // Apply
   app.settings_hit_apply[0] = cx + card_w - pad - btn_w;
   app.settings_hit_apply[1] = btn_y;
   app.settings_hit_apply[2] = btn_w;
   app.settings_hit_apply[3] = btn_h;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsApply), static_cast<int>(app.settings_hit_apply[0]), static_cast<int>(app.settings_hit_apply[1]), static_cast<int>(app.settings_hit_apply[2]), static_cast<int>(app.settings_hit_apply[3]));
 
   bool apply_hov = (app.pointerX >= app.settings_hit_apply[0] && app.pointerX < app.settings_hit_apply[0] + btn_w &&
                     app.pointerY >= btn_y && app.pointerY < btn_y + btn_h);
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, apply_hov ? 0.8 : 0.55);
-  draw_rounded_rect(cr, app.settings_hit_apply[0], btn_y, btn_w, btn_h, btn_h / 2);
-  cairo_fill_preserve(cr);
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.45);
-  cairo_set_line_width(cr, 1);
-  cairo_stroke(cr);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_set_font_size(cr, 13);
-  cairo_text_extents(cr, "Apply", &te);
-  cairo_move_to(cr, app.settings_hit_apply[0] + (btn_w - te.x_advance) / 2,
-                btn_y + btn_h / 2 + te.height * 0.35);
-  cairo_show_text(cr, "Apply");
+  hui::design::button(cr, app, app.settings_hit_apply[0], btn_y, btn_w, btn_h, "Apply", false, apply_hov);
 
   // OK
   app.settings_hit_ok[0] = cx + card_w - pad - btn_w * 3 - btn_gap * 2;
   app.settings_hit_ok[1] = btn_y;
   app.settings_hit_ok[2] = btn_w;
   app.settings_hit_ok[3] = btn_h;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsOk), static_cast<int>(app.settings_hit_ok[0]), static_cast<int>(app.settings_hit_ok[1]), static_cast<int>(app.settings_hit_ok[2]), static_cast<int>(app.settings_hit_ok[3]));
 
   bool ok_hov = (app.pointerX >= app.settings_hit_ok[0] && app.pointerX < app.settings_hit_ok[0] + btn_w &&
                  app.pointerY >= btn_y && app.pointerY < btn_y + btn_h);
-  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, ok_hov ? 0.25 : 0.12);
-  draw_rounded_rect(cr, app.settings_hit_ok[0], btn_y, btn_w, btn_h, btn_h / 2);
-  cairo_fill_preserve(cr);
-  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.85);
-  cairo_set_line_width(cr, 1);
-  cairo_stroke(cr);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_set_font_size(cr, 13);
-  cairo_text_extents(cr, "OK", &te);
-  cairo_move_to(cr, app.settings_hit_ok[0] + (btn_w - te.x_advance) / 2,
-                btn_y + btn_h / 2 + te.height * 0.35);
-  cairo_show_text(cr, "OK");
+  hui::design::button(cr, app, app.settings_hit_ok[0], btn_y, btn_w, btn_h, "OK", true, ok_hov);
 
   // ── Preview tab: hover preview scale (1.0-10.0, real time) ──
   if (app.settings_tab == 2) {
@@ -799,21 +649,10 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     const int slider_w = card_w - 2 * pad - 16;
     const int slider_h = 6;
 
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.4);
-    draw_rounded_rect(cr, slider_x, slider_y, slider_w, slider_h, 3);
-    cairo_fill(cr);
-
-    const double t = std::clamp(
-        (app.settings_preview_scale - 1.0) / 9.0, 0.0, 1.0);
-    const double fill_w = slider_w * t;
-    if (fill_w > 0) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.7);
-      draw_rounded_rect(cr, slider_x, slider_y, fill_w, slider_h, 3);
-      cairo_fill(cr);
-    }
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-    cairo_arc(cr, slider_x + fill_w, slider_y + slider_h / 2, 8, 0, 2 * M_PI);
-    cairo_fill(cr);
+    ds_slider(slider_x, slider_y, slider_w,
+                (app.settings_preview_scale - 1.0) / 9.0);
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsScaleSlider),
+                         slider_x, slider_y - 10, slider_w, slider_h + 20);
 
     cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                           app.text_secondary_b, 0.8);

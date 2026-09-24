@@ -69,7 +69,8 @@ bool click_term_chooser(AppState& app, int x, int y, int button);
 bool click_columns_menu(AppState& app, int x, int y, int button);
 bool click_sort_menu(AppState& app, int x, int y, int button);
 bool click_filter_dropdown(AppState& app, int x, int y, int button);
-bool click_top_bar(AppState& app, int x, int y, int button);
+bool click_top_bar(AppState& app, int x, int y, int button,
+                   uint64_t now_ns);
 bool click_tab_bar(AppState& app, int x, int y, int button);
 bool click_ops_cancel(AppState& app, int x, int y, int button);
 bool click_flap_swallow(AppState& app, int x, int y, int button);

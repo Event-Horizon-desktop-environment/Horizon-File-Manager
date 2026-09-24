@@ -260,7 +260,7 @@ std::string detect_system_icon_theme() {
     return env_theme;
   }
 
-  // 1. Try gsettings (GNOME/Wayland compositors)
+  // 1. Try gsettings (Wayland compositors)
   FILE* gs = popen("gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null", "r");
   if (gs) {
     char buf[128] = {};
@@ -474,7 +474,7 @@ static std::vector<std::string> read_inherited_themes(const fs::path& theme_dir)
 
 // ── IconCache ────────────────────────────────────────────────────────
 
-static constexpr std::size_t kMaxCacheBytes = 64 * 1024 * 1024; // 64 MB
+static constexpr std::size_t kMaxCacheBytes = 16 * 1024 * 1024; // 16 MB
 
 cairo_surface_t* IconCache::load_settings_logo_surface() { return nullptr; }
 
@@ -566,8 +566,8 @@ void IconCache::clear() {
 // <size>x<size>/<category>, mimes/16, ...
 
 // Nominal size of a themed icon directory. Two layout conventions exist:
-//   GNOME:  <size>x<size>/<category>   e.g. hicolor/48x48/apps
-//   KDE:    <category>/<size>          e.g. MacTahoe/places/16
+//   <size>x<size>/<category>   e.g. hicolor/48x48/apps
+//   <category>/<size>          e.g. places/16
 // Any component shaped "NNNxNNN" or a bare number "NNN" (nearest to the
 // icon files wins) sets the size; anything else (scalable/, symbolic/,
 // plain categories) means resolution independent.
@@ -1096,6 +1096,11 @@ IconCacheStats IconCache::stats() const {
 bool IconCache::is_negative_cached(const std::string& key) const {
   std::lock_guard<std::mutex> lk(d_->mtx);
   return d_->negativeKeys.count(negative_key_of(key)) != 0;
+}
+
+std::size_t IconCache::cache_bytes() const {
+  std::lock_guard<std::mutex> lk(d_->mtx);
+  return d_->totalBytes;
 }
 
 std::size_t IconCache::pending_count() const {

@@ -26,6 +26,7 @@
 #include "wayland/core/seat.hpp"
 #include "wayland/input/clipboard.hpp"
 #include "platform/common/icon_cache/icon_cache.hpp"
+#include "ui/hit.hpp"
 #include "theme/controls/containers/button.hpp"
 #include "theme/controls/input/toggle.hpp"
 #include "theme/controls/navigation/top_app_bar.hpp"
@@ -269,6 +270,8 @@ struct AppState {
   xdg_toplevel* props_toplevel = nullptr;
   int props_width = 520;
   int props_height = 560;
+  int props_bound_w = 0; // last configure_bounds from the compositor (0 = unknown)
+  int props_bound_h = 0;
   bool props_pendingRedraw = false;
   std::array<eh::wayland::ShmBuffer, 2> props_buf{};
   int props_pointerX = 0;
@@ -292,6 +295,11 @@ struct AppState {
   int last_click_x = -1;
   int last_click_y = -1;
   int last_click_idx = -1;
+  // Nav-bar double-click (copy location) tracking, kept separate from the
+  // file-view tracker so the two gestures can never alias each other.
+  uint64_t nav_dblclick_ns = 0;
+  int nav_dblclick_x = -1;
+  int nav_dblclick_y = -1;
 
   wl_shm* shm = nullptr;
   eh::icons::IconCache icons{};
@@ -349,6 +357,12 @@ struct AppState {
     bool computer = false;
   };
   std::vector<ScrollbarRect> scrollbar_rects;  // rebuilt every frame by paint()
+  // Retained hit regions for the main surface, rebuilt every frame by
+  // paint(): input queries this instead of re-deriving geometry (see
+  // src/ui). Resizing can never desync paint and input.
+  hui::HitRegistry hit_main;
+  // Same for the standalone settings window (its own coordinate space).
+  hui::HitRegistry hit_settings;
   bool scrollbar_dragging = false;
   int scrollbar_grab_dy = 0;                   // grab offset inside thumb
   ScrollbarRect scrollbar_drag_rect{};         // snapshot taken at grab time
@@ -363,7 +377,7 @@ struct AppState {
   DirScanResult scan_result;                 // guarded by scan_mtx
   uint64_t scan_generation = 0;              // bumped per launch (UI thread only)
   std::atomic<bool> scan_ready_flag{false};
-  // Progressive partial results (Dolphin-style): skeletons built straight
+  // Progressive partial results: skeletons built straight
   // from readdir while statx is still running. Payload rides in
   // scan_result.entries; guarded by scan_mtx.
   std::atomic<bool> scan_progress_flag{false};
@@ -393,7 +407,7 @@ struct AppState {
   // and, when split view is on, the right pane). Events let us reload the
   // listing on create/delete/move AND re-stat individual children in place
   // on modify/attribute — so a rebuilt binary flips back to binary type while
-  // the folder stays open (GNOME/Dolphin-style, no full reload needed).
+  // the folder stays open (no full reload needed).
   int dir_watch_fd = -1;
   int dir_watch_tab_wd = -1;   // watch descriptor for the active tab's folder
   int dir_watch_pane_wd = -1;  // watch descriptor for the split right pane
@@ -432,11 +446,11 @@ struct AppState {
   int sidebar_drag_start_x = 0;
   int sidebar_drag_start_width = 0;
 
-  // ── Adaptive sidebar (Nautilus-style fold on narrow windows) ──
+  // ── Adaptive sidebar (fold on narrow windows) ──
   // Below this width the sidebar auto-hides and becomes a temporary
   // overlay (flap) revealed by the toolbar toggle button instead of
-  // consuming layout space. 682 = Nautilus 51's "max-width: 682sp"
-  // breakpoint (Adw.OverlaySplitView collapsed).
+  // consuming layout space. 682 = the narrow-window breakpoint at which
+  // the sidebar becomes an overlay.
   static constexpr int kSidebarFoldBreakpoint = 682;
   bool sidebar_folded = false;          // window too narrow for an inline sidebar
   bool sidebar_folded_revealed = false; // fold flap overlay currently shown
@@ -472,34 +486,27 @@ struct AppState {
     return o;
   }
 
-  // Minimum window width at which the top bar can lay out the nav arrows,
-  // path bar and right-side button cluster without overlapping. The moment
-  // the window goes below this, the sidebar folds to reclaim its width.
-  // Mirrors draw_top_bar()/events.cpp geometry (measured at app.width).
-  // The sidebar is assumed inline (sidebar_width directly, not sidebar_w()),
-  // so the result is independent of the current fold state and the fold
-  // condition in app.cpp keeps a single stable threshold (no oscillation).
+  // Minimum window width at which the collapsed top bar (back + path +
+  // view + traffic) lays out without overlapping. Wider states show more
+  // buttons via the responsive hide loop in draw_top_bar(); the moment the
+  // window goes below this collapsed minimum, the sidebar folds to reclaim
+  // its width. The sidebar is assumed inline (sidebar_width directly, not
+  // sidebar_w()), so the result is independent of the current fold state
+  // and the fold condition keeps a single stable threshold (no oscillation).
   int top_bar_min_width() const {
     double zf = zoom_pct / 100.0;
     int arrow_slot = static_cast<int>(36.0 * zf);
     int gap = static_cast<int>(6.0 * zf);
     int path_margin = static_cast<int>(24.0 * zf);
     int right_margin = static_cast<int>(16.0 * zf);
-    int gear_gap = static_cast<int>(8.0 * zf);
     int view_toggle_w = static_cast<int>(40.0 * zf);
-    int folder_search_btn_w = static_cast<int>(40.0 * zf);
-    int search_btn_w = static_cast<int>(40.0 * zf);
-    int sort_w = static_cast<int>(28.0 * zf); // flush with view toggle (split button)
-    int gear_w = static_cast<int>(36.0 * zf);
     int traffic_w = static_cast<int>(52.0 * zf);
-    int min_path_w = 60; // draw.cpp's path_w floor before forced overlap
+    int min_path_w = std::max(80, static_cast<int>(120.0 * zf));
 
     int nav_origin = (sidebar_expanded ? sidebar_width : 0) +
                      static_cast<int>(20.0 * zf);
-    int arrows_w = 3 * arrow_slot + 3 * gap; // back + forward + up (+ trailing gap)
-    int right_block_w = folder_search_btn_w + gap + search_btn_w + gap +
-                        view_toggle_w + sort_w + gap + gear_w +
-                        gear_gap + traffic_w + right_margin;
+    int arrows_w = arrow_slot + gap; // back only (+ trailing gap)
+    int right_block_w = view_toggle_w + gap + traffic_w + right_margin;
     return nav_origin + arrows_w + path_margin + gap + right_block_w +
            min_path_w;
   }
@@ -706,6 +713,10 @@ struct AppState {
     HideFile,
     UnhideFile,
     ApplyPropsToSubfolders,
+    ToolbarSearchFolder,
+    ToolbarSearchHome,
+    ToolbarCycleView,
+    ToolbarSortMenu,
     Separator,
   };
   struct ContextMenuItem {
@@ -792,7 +803,7 @@ struct AppState {
   uint64_t key_repeat_start_ms = 0; // steady_clock epoch ms of initial press
   uint64_t key_repeat_last_ms = 0;  // steady_clock epoch ms of last repeat fire
 
-  // ── Batch rename dialog (Nautilus-style) ──
+  // ── Batch rename dialog ──
   struct BatchRenameEntry {
     std::string old_path;
     std::string old_name;
@@ -873,7 +884,7 @@ struct AppState {
   std::unordered_map<std::string, cairo_surface_t*> thumb_cache;
   std::list<std::string> thumb_lru;
   std::size_t thumb_cache_bytes = 0;
-  static constexpr std::size_t kThumbCacheMaxBytes = 64 * 1024 * 1024; // 64 MB
+  static constexpr std::size_t kThumbCacheMaxBytes = 16 * 1024 * 1024; // 16 MB
 
   // ── Background directory stats (status bar "N items (size)") ──
   // UI-thread-owned cache; filled by dir_stats_drain() from the worker.
@@ -1019,7 +1030,7 @@ struct AppState {
   bool settings_independent_dir_views = false;
   int settings_slider_dragging = 0;
 
-  // ── Overwrite/merge conflict dialog (Dolphin-style) ──
+  // ── Overwrite/merge conflict dialog ──
   struct ConflictEntry {
     std::string src;
     std::string dest;
@@ -1102,6 +1113,8 @@ struct AppState {
     int combo_hover_item = -1;
     int scroll_px = 0;
     int content_h = 0;
+    int desired_h = 0; // full window height that fits content without scrolling
+    bool props_sized_once = false; // window keeps its open-time height across tab switches
     double x = 0, y = 0, w = 0, h = 0;
     double hit_close[4]{};
     double hit_close_btn[4]{};     // bottom "Close" button
@@ -1123,6 +1136,8 @@ struct AppState {
     uint64_t vol_free_bytes = 0;
     uint64_t contained_files = 0;
     uint64_t contained_dirs = 0;
+    bool dir_size_pending = false; // background tree-size walk in flight
+    uint64_t props_gen = 0;        // invalidates stale size workers on reopen/close
   };
   PropertiesState properties;
 
@@ -1224,7 +1239,7 @@ struct AppState {
   double marquee_x1 = 0, marquee_y1 = 0;
 
   // ── Layout tracking ──
-  int top_bar_height = 56;
+  int top_bar_height = 48;
   int status_bar_height = 44;
   int entry_height = 36;
   int grid_cell_size = 100;

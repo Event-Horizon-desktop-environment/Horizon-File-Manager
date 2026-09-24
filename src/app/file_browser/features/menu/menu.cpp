@@ -135,7 +135,7 @@ void insert_template_submenu(AppState& app, std::size_t pos) {
                                 std::move(item));
 }
 
-// ── Nemo-compatible scripts (~/.local/share/nemo/scripts) ────────
+// ── User scripts (~/.local/share/nemo/scripts) ────────
 
 static std::string scripts_dir() {
   const char* xdg = std::getenv("XDG_DATA_HOME");
@@ -199,7 +199,7 @@ void insert_scripts_submenu(AppState& app, std::size_t pos) {
 
 
 
-// ── Overwrite/merge conflict resolution (Dolphin-style) ──────────
+// ── Overwrite/merge conflict resolution ──────────
 
 static void conflict_cleanup(AppState& app) {
   app.conflict_open = false;
@@ -556,7 +556,7 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
       app.context_menu_items.push_back(
         AppState::menu_item(AppState::ContextMenuAction::AddToFavorites, "Add to Favorites"));
     }
-    // Disk images get a Dolphin-style top-level Mount/Unmount toggle so it is
+    // Disk images get a top-level Mount/Unmount toggle so it is
     // visible without opening the Archive submenu.
     if (!is_dir) {
       const std::string* iso_path = nullptr;
@@ -683,7 +683,7 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
           archive_item.sub_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Extract, "Extract"));
           archive_item.sub_items.push_back(AppState::menu_item(AppState::ContextMenuAction::ExtractTo, "Extract to..."));
         }
-        // Disk images get a Dolphin-style Mount/Unmount toggle (UDisks2 loop).
+        // Disk images get a Mount/Unmount toggle (UDisks2 loop).
         if (archive_path && is_iso_image(*archive_path)) {
           bool mounted = !drives::UDisks2DriveService::instance().find_loop_for_file(*archive_path).empty();
           archive_item.sub_items.push_back(AppState::menu_item(

@@ -8,6 +8,8 @@
 #include "../features/view_zoom/view_zoom.hpp"
 #include "app/file_browser/features/thumbnails/thumb_pool.hpp"
 #include "draw_helpers.hpp"
+#include "ui/design.hpp"
+#include "ui/layout.hpp"
 #include "draw_file_icons.hpp"
 
 #include <cairo/cairo.h>
@@ -64,24 +66,8 @@ void draw_create_dialog(AppState& app, cairo_t* cr) {
   cairo_rectangle(cr, 0, 0, w, h);
   cairo_fill(cr);
 
-  // Layered soft shadow (consistent with the redesigned menus)
-  for (int s = 4; s >= 1; --s) {
-    double a = 0.09 * (1.0 - s / 5.0);
-    cairo_set_source_rgba(cr, 0, 0, 0, a);
-    draw_rounded_rect(cr, dlg_x + s, dlg_y + s, dlg_w, dlg_h, 10);
-    cairo_fill(cr);
-  }
-
-  double tr, tg, tb;
-  wallpaper_tint_surface(app, kPopupWallpaperTint, tr, tg, tb);
-  cairo_set_source_rgba(cr, tr, tg, tb, 1.0);
-  draw_rounded_rect(cr, dlg_x, dlg_y, dlg_w, dlg_h, 10);
-  cairo_fill(cr);
-
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
-  cairo_set_line_width(cr, 1);
-  draw_rounded_rect(cr, dlg_x + 0.5, dlg_y + 0.5, dlg_w - 1, dlg_h - 1, 9.5);
-  cairo_stroke(cr);
+  // Card (shared dialog chrome)
+  draw_dialog_card(app, cr, dlg_x, dlg_y, dlg_w, dlg_h, 12);
 
   // Header: icon + title (adapts to folder / document / template)
   const char* title = "New Folder";
@@ -92,15 +78,64 @@ void draw_create_dialog(AppState& app, cairo_t* cr) {
     placeholder = "File name";
     hicon = app.icon_file_text_svg;
   }
+  // hui layout: every rect below derives from placed nodes — paint, hits
+  // and input share one geometry (see src/ui/). Pixel-identical to the
+  // previous hand-computed layout.
+  hui::Node col;
+  col.kind = hui::Node::Kind::Column;
+  hui::Node header;
+  header.w = 300;
+  header.h = 36;
+  hui::Node input;
+  input.w = 300;
+  input.h = 34;
+  hui::Node vspace;
+  vspace.flex = 1;
+  hui::Node btnrow;
+  btnrow.kind = hui::Node::Kind::Row;
+  btnrow.gap = 20;
+  btnrow.h = 32;
+  hui::Node bspace;
+  bspace.flex = 1;
+  hui::Node cancel;
+  cancel.w = 90;
+  cancel.h = 32;
+  hui::Node create;
+  create.w = 90;
+  create.h = 32;
+  btnrow.children.push_back(std::move(bspace));
+  btnrow.children.push_back(std::move(cancel));
+  btnrow.children.push_back(std::move(create));
+  col.children.push_back(std::move(header));
+  col.children.push_back(std::move(input));
+  col.children.push_back(std::move(vspace));
+  col.children.push_back(std::move(btnrow));
+  hui::measure(col, 300);
+  hui::place(col, dlg_x + 20, dlg_y + 14, 300, dlg_h - 32);
+
+  const hui::Node& header_r = col.children[0];
+  const hui::Node& input_r = col.children[1];
+  const hui::Node& cancel_r = col.children[3].children[1];
+  const hui::Node& create_r = col.children[3].children[2];
+
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgCreate, 0), dlg_x, dlg_y, dlg_w, dlg_h);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgCreate, hui::Hit::kCreateInput), input_r.x,
+                   input_r.y, input_r.w, input_r.h);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgCreate, hui::Hit::kCreateCancel), cancel_r.x,
+                   cancel_r.y, cancel_r.w, cancel_r.h);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgCreate, hui::Hit::kCreateOk), create_r.x,
+                   create_r.y, create_r.w, create_r.h);
+
+  // Header content (icon + title into the header node).
   cairo_save(cr);
   if (hicon) {
     double iw = static_cast<double>(cairo_image_surface_get_width(hicon));
     double ih = static_cast<double>(cairo_image_surface_get_height(hicon));
     double sc = 16.0 / std::max(iw, ih);
     cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
-    cairo_rectangle(cr, dlg_x + 20, dlg_y + 14, 16, 16);
+    cairo_rectangle(cr, header_r.x, header_r.y, 16, 16);
     cairo_clip(cr);
-    cairo_translate(cr, dlg_x + 20, dlg_y + 14);
+    cairo_translate(cr, header_r.x, header_r.y);
     cairo_scale(cr, sc, sc);
     cairo_mask_surface(cr, hicon, 0, 0);
   }
@@ -110,19 +145,19 @@ void draw_create_dialog(AppState& app, cairo_t* cr) {
                           CAIRO_FONT_WEIGHT_BOLD);
   cairo_set_font_size(cr, 15);
   cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, dlg_x + 44, dlg_y + 30);
+  cairo_move_to(cr, header_r.x + 24, header_r.y + 16);
   cairo_show_text(cr, title);
 
-  int input_x = dlg_x + 20;
-  int input_y = dlg_y + 50;
-  int input_w = dlg_w - 40;
-  int input_h = 34;
+  int input_x = input_r.x;
+  int input_y = input_r.y;
+  int input_w = input_r.w;
+  int input_h = input_r.h;
   cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.5);
-  draw_rounded_rect(cr, input_x, input_y, input_w, input_h, 6);
+  draw_rounded_rect(cr, input_x, input_y, input_w, input_h, 8);
   cairo_fill(cr);
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.3);
+  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.45);
   cairo_set_line_width(cr, 1);
-  draw_rounded_rect(cr, input_x + 0.5, input_y + 0.5, input_w - 1, input_h - 1, 5.5);
+  draw_rounded_rect(cr, input_x + 0.5, input_y + 0.5, input_w - 1, input_h - 1, 7.5);
   cairo_stroke(cr);
 
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
@@ -164,39 +199,10 @@ void draw_create_dialog(AppState& app, cairo_t* cr) {
     cairo_fill(cr);
   }
 
-  int btn_y = dlg_y + dlg_h - 50;
-  int btn_w = 90;
-  int btn_h = 32;
-  int cancel_x = dlg_x + dlg_w - 220;
-  int create_x = dlg_x + dlg_w - 110;
-
-  // Cancel (secondary)
-  double cancel_alpha = (app.create_hover_btn == 1) ? 0.75 : 0.55;
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, cancel_alpha);
-  draw_rounded_rect(cr, cancel_x, btn_y, btn_w, btn_h, 6);
-  cairo_fill(cr);
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
-  cairo_set_line_width(cr, 1);
-  draw_rounded_rect(cr, cancel_x + 0.5, btn_y + 0.5, btn_w - 1, btn_h - 1, 5.5);
-  cairo_stroke(cr);
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 13);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-  cairo_text_extents_t te;
-  cairo_text_extents(cr, "Cancel", &te);
-  cairo_move_to(cr, cancel_x + (btn_w - te.x_advance) / 2, btn_y + btn_h / 2 + te.height * 0.35);
-  cairo_show_text(cr, "Cancel");
-
-  // Create (primary)
-  double create_alpha = (app.create_hover_btn == 0) ? 1.0 : 0.9;
-  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, create_alpha);
-  draw_rounded_rect(cr, create_x, btn_y, btn_w, btn_h, 6);
-  cairo_fill(cr);
-  cairo_set_source_rgba(cr, 1, 1, 1, 1.0);
-  cairo_text_extents(cr, "Create", &te);
-  cairo_move_to(cr, create_x + (btn_w - te.x_advance) / 2, btn_y + btn_h / 2 + te.height * 0.35);
-  cairo_show_text(cr, "Create");
+  hui::design::button(cr, app, cancel_r.x, cancel_r.y, cancel_r.w, cancel_r.h, "Cancel", false,
+                 app.create_hover_btn == 1);
+  hui::design::button(cr, app, create_r.x, create_r.y, create_r.w, create_r.h, "Create", true,
+                 app.create_hover_btn == 0);
 }
 
 // ── confirm dialog ───────────────────────────────────────────────
@@ -307,61 +313,45 @@ void draw_confirm_dialog(AppState& app, cairo_t* cr) {
   cairo_text_extents_t te;
   int text_x = icon_x + icon_sz + 12;
   int text_max_w = dlg_x + dlg_w - 20 - text_x;
-  std::string msg = app.confirm_message;
-  if (cairo_text_extents(cr, msg.c_str(), &te),
-      te.width > static_cast<double>(text_max_w)) {
-    while (!msg.empty()) {
-      msg.pop_back();
-      cairo_text_extents(cr, (msg + "\u2026").c_str(), &te);
-      if (te.width <= static_cast<double>(text_max_w)) {
-        msg += "\u2026";
-        break;
-      }
-    }
-  }
+  std::string msg = hui::design::clip_end(cr, app.confirm_message, text_max_w);
   cairo_text_extents(cr, msg.c_str(), &te);
   int text_y = icon_y + icon_sz / 2 + static_cast<int>(te.height) / 2;
   cairo_move_to(cr, text_x, text_y);
   cairo_show_text(cr, msg.c_str());
 
+  // hui layout: buttons derive from placed nodes (single source for
+  // paint, hits and input — see src/ui/).
+  hui::Node btnrow;
+  btnrow.kind = hui::Node::Kind::Row;
+  btnrow.gap = 20;
+  hui::Node cancel;
+  cancel.w = 90;
+  cancel.h = 32;
+  hui::Node del;
+  del.w = 90;
+  del.h = 32;
+  btnrow.children.push_back(std::move(cancel));
+  btnrow.children.push_back(std::move(del));
+  hui::measure(btnrow, 200);
+  hui::place(btnrow, dlg_x + 160, dlg_y + dlg_h - 50, 200, 32);
+
+  const hui::Node& cancel_r = btnrow.children[0];
+  const hui::Node& delete_r = btnrow.children[1];
+
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgConfirm, 0), dlg_x, dlg_y, dlg_w, dlg_h);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgConfirm, hui::Hit::kConfirmCancel), cancel_r.x,
+                   cancel_r.y, cancel_r.w, cancel_r.h);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgConfirm, hui::Hit::kConfirmDelete), delete_r.x,
+                   delete_r.y, delete_r.w, delete_r.h);
+
   // Buttons
-  int btn_y = dlg_y + dlg_h - 50;
-  int btn_w = 90;
-  int btn_h = 32;
-  int cancel_x = dlg_x + dlg_w - 220;
-  int delete_x = dlg_x + dlg_w - 110;
-
-  bool cancel_hov = app.confirm_hover_btn == 0;
-  bool delete_hov = app.confirm_hover_btn == 1;
-
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b,
-                        cancel_hov ? 0.75 : 0.55);
-  draw_rounded_rect(cr, cancel_x, btn_y, btn_w, btn_h, 6);
-  cairo_fill(cr);
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.45);
-  cairo_set_line_width(cr, 1);
-  draw_rounded_rect(cr, cancel_x + 0.5, btn_y + 0.5, btn_w - 1, btn_h - 1, 5.5);
-  cairo_stroke(cr);
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 13);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, cancel_x + btn_w / 2 - 20, btn_y + btn_h / 2 + 4);
-  cairo_show_text(cr, "Cancel");
-
-  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
-                        delete_hov ? 1.0 : 0.90);
-  draw_rounded_rect(cr, delete_x, btn_y, btn_w, btn_h, 6);
-  cairo_fill(cr);
-  cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 13);
-  cairo_move_to(cr, delete_x + btn_w / 2 - 20, btn_y + btn_h / 2 + 4);
-  cairo_show_text(cr, "Delete");
+  hui::design::button(cr, app, cancel_r.x, cancel_r.y, cancel_r.w, cancel_r.h, "Cancel", false,
+                 app.confirm_hover_btn == 0);
+  hui::design::button(cr, app, delete_r.x, delete_r.y, delete_r.w, delete_r.h, "Delete", true,
+                 app.confirm_hover_btn == 1);
 }
 
-// ── Overwrite/merge conflict dialog (Dolphin-style) ─────────────
+// ── Overwrite/merge conflict dialog ─────────────
 
 void draw_conflict_dialog(AppState& app, cairo_t* cr) {
   if (app.conflict_queue.empty()) return;
@@ -381,6 +371,7 @@ void draw_conflict_dialog(AppState& app, cairo_t* cr) {
 
   // Card (fully opaque, layered soft shadow)
   draw_dialog_card(app, cr, dlg_x, dlg_y, dlg_w, dlg_h, 12);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgConflict, 0), dlg_x, dlg_y, dlg_w, dlg_h);
 
   std::string name = fs::path(c.src).filename().string();
   bool merge = c.src_is_dir && c.dest_is_dir;
@@ -413,22 +404,11 @@ void draw_conflict_dialog(AppState& app, cairo_t* cr) {
   // ── Source vs Destination columns ──
   auto fmt_time = [](int64_t sec) {
     if (sec == 0) return std::string("\u2014");
-    time_t t = static_cast<time_t>(sec);
-    struct tm* tm_local = localtime(&t);
-    char buf[64];
-    strftime(buf, sizeof(buf), "%Y-%m-%d %H:%M", tm_local);
-    return std::string(buf);
+    return hui::design::date_md(sec);
   };
   auto fmt_size = [](uint64_t sz, bool is_dir) {
     if (is_dir) return std::string("Folder");
-    char buf[64];
-    double v = static_cast<double>(sz);
-    const char* units[] = {"B", "KB", "MB", "GB", "TB"};
-    int ui = 0;
-    while (v >= 1024.0 && ui < 4) { v /= 1024.0; ++ui; }
-    if (ui == 0) snprintf(buf, sizeof(buf), "%llu B", (unsigned long long)sz);
-    else snprintf(buf, sizeof(buf), "%.1f %s", v, units[ui]);
-    return std::string(buf);
+    return hui::design::size_human(sz);
   };
   auto draw_column = [&](int x, int y, int col_w, const char* header,
                          const std::string& p, bool is_dir,
@@ -498,6 +478,8 @@ void draw_conflict_dialog(AppState& app, cairo_t* cr) {
     app.conflict_check_rect[1] = check_y;
     app.conflict_check_rect[2] = box_sz + 220;
     app.conflict_check_rect[3] = box_sz;
+    app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgConflict, hui::Hit::kConflictCheck), box_x, check_y,
+                     box_sz + 220, box_sz);
     bool hov = app.conflict_check_hover ||
                (app.pointerX >= box_x && app.pointerX < box_x + box_sz + 220 &&
                 app.pointerY >= check_y && app.pointerY < check_y + box_sz);
@@ -544,6 +526,10 @@ void draw_conflict_dialog(AppState& app, cairo_t* cr) {
   };
   for (int b = 0; b < 3; ++b)
     for (int k = 0; k < 4; ++k) app.conflict_btn_rects[b][k] = rects[b][k];
+  for (int b = 0; b < 3; ++b)
+    app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgConflict, hui::Hit::kConflictBtnBase + b),
+                     static_cast<int>(rects[b][0]), static_cast<int>(rects[b][1]),
+                     static_cast<int>(rects[b][2]), static_cast<int>(rects[b][3]));
 
   const char* labels[3] = {"Skip", "Cancel", merge ? "Merge" : "Overwrite"};
   int centers[3] = {b0_x, b1_x, b2_x};
@@ -551,21 +537,7 @@ void draw_conflict_dialog(AppState& app, cairo_t* cr) {
     bool primary = (b == 2);
     bool hov = (app.pointerX >= rects[b][0] && app.pointerX < rects[b][0] + rects[b][2] &&
                 app.pointerY >= rects[b][1] && app.pointerY < rects[b][1] + rects[b][3]);
-    if (primary) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
-                            hov ? 1.0 : 0.90);
-    } else {
-      cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, hov ? 0.85 : 0.6);
-    }
-    draw_rounded_rect(cr, centers[b], btn_y, btn_w, btn_h, 6);
-    cairo_fill(cr);
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 13);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, labels[b], &te);
-    cairo_move_to(cr, centers[b] + (btn_w - te.x_advance) / 2, btn_y + btn_h / 2 + 4);
-    cairo_show_text(cr, labels[b]);
+    hui::design::button(cr, app, centers[b], btn_y, btn_w, btn_h, labels[b], primary, hov);
   }
 }
 
@@ -586,24 +558,8 @@ void draw_password_dialog(AppState& app, cairo_t* cr) {
   cairo_rectangle(cr, 0, 0, w, h);
   cairo_fill(cr);
 
-  // Card (fully opaque, layered soft shadow)
-  for (int s = 4; s >= 1; --s) {
-    cairo_set_source_rgba(cr, 0, 0, 0, 0.09 * (1.0 - s / 5.0));
-    draw_rounded_rect(cr, cx + s, cy + s, card_w, card_h, card_r);
-    cairo_fill(cr);
-  }
-
-  // Card background
-  double tr, tg, tb;
-  wallpaper_tint_surface(app, kPopupWallpaperTint, tr, tg, tb);
-  cairo_set_source_rgba(cr, tr, tg, tb, 1.0);
-  draw_rounded_rect(cr, cx, cy, card_w, card_h, card_r);
-  cairo_fill_preserve(cr);
-
-  // Card border
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.25);
-  cairo_set_line_width(cr, 1);
-  cairo_stroke(cr);
+  // Card (shared dialog chrome)
+  draw_dialog_card(app, cr, cx, cy, card_w, card_h, card_r);
 
   // Lock icon
   blit_icon(cr, app.lock_svg, cx + pad, cy + pad - 2, 16,
@@ -620,24 +576,14 @@ void draw_password_dialog(AppState& app, cairo_t* cr) {
   // Subtitle with truncated archive name
   {
     std::string fname = fs::path(app.password_archive_path).filename().string();
-    if (fname.size() > 42) fname = fname.substr(0, 39) + "\xE2\x80\xA6";
-    std::string subtitle = "\"" + fname + "\" is password-protected";
-
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                             CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, 12);
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.5);
 
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, subtitle.c_str(), &te);
     double max_w = static_cast<double>(card_w - pad * 2);
-    if (te.width > max_w) {
-      while (subtitle.size() > 10) {
-        subtitle.pop_back();
-        cairo_text_extents(cr, (subtitle + "\xE2\x80\xA6").c_str(), &te);
-        if (te.width <= max_w) { subtitle += "\xE2\x80\xA6"; break; }
-      }
-    }
+    std::string subtitle =
+        "\"" + hui::design::clip_end(cr, fname, max_w - 60) + "\" is password-protected";
     cairo_move_to(cr, cx + pad, cy + pad + 36);
     cairo_show_text(cr, subtitle.c_str());
   }
@@ -649,11 +595,44 @@ void draw_password_dialog(AppState& app, cairo_t* cr) {
   cairo_line_to(cr, cx + card_w - pad, cy + pad + 50);
   cairo_stroke(cr);
 
+  // hui layout: input + buttons derive from placed nodes (single source
+  // for paint, hits and input — see src/ui/).
+  hui::Node pw_input;
+  pw_input.w = card_w - pad * 2;
+  pw_input.h = 36;
+  hui::measure(pw_input, card_w - pad * 2);
+  hui::place(pw_input, cx + pad, cy + pad + 62, card_w - pad * 2, 36);
+
+  hui::Node pw_btnrow;
+  pw_btnrow.kind = hui::Node::Kind::Row;
+  pw_btnrow.gap = 10;
+  hui::Node pw_cancel;
+  pw_cancel.w = 90;
+  pw_cancel.h = 32;
+  hui::Node pw_extract;
+  pw_extract.w = 90;
+  pw_extract.h = 32;
+  pw_btnrow.children.push_back(std::move(pw_cancel));
+  pw_btnrow.children.push_back(std::move(pw_extract));
+  hui::measure(pw_btnrow, card_w);
+  hui::place(pw_btnrow, cx + (card_w - 190) / 2, cy + card_h - pad - 32, 190, 32);
+
+  const hui::Node& pw_cancel_r = pw_btnrow.children[0];
+  const hui::Node& pw_extract_r = pw_btnrow.children[1];
+
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgPassword, 0), cx, cy, card_w, card_h);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgPassword, hui::Hit::kPasswordInput), pw_input.x,
+                   pw_input.y, pw_input.w, pw_input.h);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgPassword, hui::Hit::kPasswordCancel), pw_cancel_r.x,
+                   pw_cancel_r.y, pw_cancel_r.w, pw_cancel_r.h);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgPassword, hui::Hit::kPasswordExtract), pw_extract_r.x,
+                   pw_extract_r.y, pw_extract_r.w, pw_extract_r.h);
+
   // Input field
-  int input_x = cx + pad;
-  int input_y = cy + pad + 62;
-  int input_w = card_w - pad * 2;
-  int input_h = 36;
+  int input_x = pw_input.x;
+  int input_y = pw_input.y;
+  int input_w = pw_input.w;
+  int input_h = pw_input.h;
   int input_r = 8;
 
   // Input background
@@ -739,54 +718,9 @@ void draw_password_dialog(AppState& app, cairo_t* cr) {
     cairo_fill(cr);
   }
 
-  // Buttons (pill-shaped)
-  int btn_h = 32;
-  int btn_w = 90;
-  int btn_gap = 10;
-  int btns_total = btn_w * 2 + btn_gap;
-  int btns_x = cx + (card_w - btns_total) / 2;
-  int btn_y = cy + card_h - pad - btn_h;
-
-  // Cancel button
-  {
-    cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.42);
-    draw_rounded_rect(cr, btns_x, btn_y, btn_w, btn_h, btn_h / 2);
-    cairo_fill_preserve(cr);
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.40);
-    cairo_set_line_width(cr, 1);
-    cairo_stroke(cr);
-
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                            CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 13);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.9);
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, "Cancel", &te);
-    cairo_move_to(cr, btns_x + (btn_w - te.x_advance) / 2,
-                  btn_y + btn_h / 2 + te.height * 0.35);
-    cairo_show_text(cr, "Cancel");
-  }
-
-  // Extract button (accent)
-  {
-    int ex_x = btns_x + btn_w + btn_gap;
-    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.15);
-    draw_rounded_rect(cr, ex_x, btn_y, btn_w, btn_h, btn_h / 2);
-    cairo_fill_preserve(cr);
-    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.85);
-    cairo_set_line_width(cr, 1);
-    cairo_stroke(cr);
-
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                            CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 13);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, "Extract", &te);
-    cairo_move_to(cr, ex_x + (btn_w - te.x_advance) / 2,
-                  btn_y + btn_h / 2 + te.height * 0.35);
-    cairo_show_text(cr, "Extract");
-  }
+  // Buttons
+  hui::design::button(cr, app, pw_cancel_r.x, pw_cancel_r.y, pw_cancel_r.w, pw_cancel_r.h, "Cancel", false, false);
+  hui::design::button(cr, app, pw_extract_r.x, pw_extract_r.y, pw_extract_r.w, pw_extract_r.h, "Extract", true, false);
 }
 
 // ── compress dialog ──────────────────────────────────────────────
@@ -832,54 +766,169 @@ void draw_compress_dialog(AppState& app, cairo_t* cr) {
   cairo_show_text(cr, "Format");
 
   int fmy = content_y + 18;
-  for (int i = 0; i < 4; ++i) {
-    int fmx = content_x + i * (fmt_w + fmt_gap);
-    bool avail = app.compress_format_available[i];
-    double r = 6;
-    if (i == app.compress_format) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, avail ? 0.85 : 0.30);
-    } else if (i == app.compress_hover_format && avail) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.50);
-    } else {
-      cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.5);
+  // hui layout: every interactive rect derives from placed nodes (single
+  // source for paint, hits and input — see src/ui/). Matches the
+  // hand-computed geometry below pixel for pixel.
+  const std::vector<int> thread_opts = compress_thread_options();
+  int th_btn_w = compress_thread_btn_w(static_cast<int>(thread_opts.size()));
+  hui::Node cmp_col;
+  cmp_col.kind = hui::Node::Kind::Column;
+  auto mkrow = [](int count, int cw, int ch, int gap) {
+    hui::Node row;
+    row.kind = hui::Node::Kind::Row;
+    row.gap = gap;
+    for (int i = 0; i < count; ++i) {
+      hui::Node cell;
+      cell.w = cw;
+      cell.h = ch;
+      row.children.push_back(std::move(cell));
     }
-    draw_rounded_rect(cr, fmx, fmy, fmt_w, fmt_h, r);
+    return row;
+  };
+  hui::Node fmtlabel;
+  fmtlabel.w = 380;
+  fmtlabel.h = 18;
+  hui::Node fmtrow1 = mkrow(4, fmt_w, fmt_h, fmt_gap);
+  hui::Node fmtrow2 = mkrow(3, fmt_w, fmt_h, fmt_gap);
+  hui::Node namelabel;
+  namelabel.w = 380;
+  namelabel.h = 32;
+  hui::Node nameinput;
+  nameinput.w = 380;
+  nameinput.h = 32;
+  hui::Node lvllabel;
+  lvllabel.w = 380;
+  lvllabel.h = 32;
+  hui::Node lvlrow = mkrow(5, 68, 28, 8);
+  hui::Node thlabel;
+  thlabel.w = 380;
+  thlabel.h = 30;
+  hui::Node throw_ = mkrow(static_cast<int>(thread_opts.size()), th_btn_w, 28, 8);
+  hui::Node vspace;
+  vspace.flex = 1;
+  hui::Node btnrow;
+  btnrow.kind = hui::Node::Kind::Row;
+  btnrow.gap = 20;
+  hui::Node bspace;
+  bspace.flex = 1;
+  hui::Node cancel;
+  cancel.w = 90;
+  cancel.h = 32;
+  hui::Node ok;
+  ok.w = 90;
+  ok.h = 32;
+  btnrow.children.push_back(std::move(bspace));
+  btnrow.children.push_back(std::move(cancel));
+  btnrow.children.push_back(std::move(ok));
+  cmp_col.children.push_back(std::move(fmtlabel));
+  cmp_col.children.push_back(std::move(fmtrow1));
+  cmp_col.children.push_back(std::move(fmtrow2));
+  cmp_col.children.push_back(std::move(namelabel));
+  cmp_col.children.push_back(std::move(nameinput));
+  cmp_col.children.push_back(std::move(lvllabel));
+  cmp_col.children.push_back(std::move(lvlrow));
+  cmp_col.children.push_back(std::move(thlabel));
+  cmp_col.children.push_back(std::move(throw_));
+  cmp_col.children.push_back(std::move(vspace));
+  cmp_col.children.push_back(std::move(btnrow));
+  hui::measure(cmp_col, 380);
+  cmp_col.children[1].h = 36; // chip-row bottom pad
+  hui::place(cmp_col, content_x, content_y, 380, 304);
+
+  const hui::Node& fmtrow1_r = cmp_col.children[1];
+  const hui::Node& fmtrow2_r = cmp_col.children[2];
+  const hui::Node& namelabel_r = cmp_col.children[3];
+  const hui::Node& nameinput_r = cmp_col.children[4];
+  const hui::Node& lvllabel_r = cmp_col.children[5];
+  const hui::Node& lvlrow_r = cmp_col.children[6];
+  const hui::Node& thlabel_r = cmp_col.children[7];
+  const hui::Node& throw_r = cmp_col.children[8];
+  const hui::Node& btnrow_r = cmp_col.children[10];
+  const hui::Node& cancel_r = btnrow_r.children[1];
+  const hui::Node& ok_r = btnrow_r.children[2];
+
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgCompress, 0), dlg_x, dlg_y, dlg_w, dlg_h);
+  for (int i = 0; i < 4; ++i)
+    app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgCompress, hui::Hit::kCompressFormatBase + i),
+                     fmtrow1_r.children[static_cast<size_t>(i)].x,
+                     fmtrow1_r.children[static_cast<size_t>(i)].y, fmt_w, fmt_h);
+  for (int i = 4; i < 7; ++i)
+    app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgCompress, hui::Hit::kCompressFormatBase + i),
+                     fmtrow2_r.children[static_cast<size_t>(i - 4)].x,
+                     fmtrow2_r.children[static_cast<size_t>(i - 4)].y, fmt_w, fmt_h);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgCompress, hui::Hit::kCompressNameInput), nameinput_r.x,
+                   nameinput_r.y, nameinput_r.w, nameinput_r.h);
+  for (int i = 0; i < 5; ++i)
+    app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgCompress, hui::Hit::kCompressLevelBase + i),
+                     lvlrow_r.children[static_cast<size_t>(i)].x,
+                     lvlrow_r.children[static_cast<size_t>(i)].y, 68, 28);
+  for (size_t ti = 0; ti < thread_opts.size(); ++ti)
+    app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgCompress,
+                                      hui::Hit::kCompressThreadBase + static_cast<int>(ti)),
+                     throw_r.children[ti].x, throw_r.children[ti].y, th_btn_w, 28);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgCompress, hui::Hit::kCompressCancel), cancel_r.x,
+                   cancel_r.y, cancel_r.w, cancel_r.h);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgCompress, hui::Hit::kCompressOk), ok_r.x,
+                   ok_r.y, ok_r.w, ok_r.h);
+
+  for (int i = 0; i < 4; ++i) {
+    const hui::Node& cell = fmtrow1_r.children[static_cast<size_t>(i)];
+    int fmx = cell.x;
+    int fmy = cell.y;
+    bool avail = app.compress_format_available[i];
+    bool sel = (i == app.compress_format);
+    bool hov = (i == app.compress_hover_format && avail);
+    if (sel) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, avail ? 0.95 : 0.30);
+    } else if (hov) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
+    } else {
+      hui::design::card_fill(cr, app, 0.55);
+    }
+    draw_rounded_rect(cr, fmx, fmy, fmt_w, fmt_h, 8);
     cairo_fill(cr);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, avail ? 1.0 : 0.35);
+    cairo_set_source_rgba(cr, sel ? 1 : app.text_r, sel ? 1 : app.text_g,
+                          sel ? 1 : app.text_b, avail ? (sel ? 0.98 : 1.0) : 0.35);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                           sel ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
     cairo_move_to(cr, fmx + 6, fmy + fmt_h / 2 + 4);
     cairo_show_text(cr, fmt_labels[i]);
   }
-  int fmy2 = fmy + fmt_h + fmt_gap;
   for (int i = 4; i < 7; ++i) {
-    int fmx = content_x + (i - 4) * (fmt_w + fmt_gap);
+    const hui::Node& cell = fmtrow2_r.children[static_cast<size_t>(i - 4)];
+    int fmx = cell.x;
+    int fmy2 = cell.y;
     bool avail = app.compress_format_available[i];
-    double r = 6;
-    if (i == app.compress_format) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, avail ? 0.85 : 0.30);
-    } else if (i == app.compress_hover_format && avail) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.50);
+    bool sel = (i == app.compress_format);
+    bool hov = (i == app.compress_hover_format && avail);
+    if (sel) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, avail ? 0.95 : 0.30);
+    } else if (hov) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
     } else {
-      cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.5);
+      hui::design::card_fill(cr, app, 0.55);
     }
-    draw_rounded_rect(cr, fmx, fmy2, fmt_w, fmt_h, r);
+    draw_rounded_rect(cr, fmx, fmy2, fmt_w, fmt_h, 8);
     cairo_fill(cr);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, avail ? 1.0 : 0.35);
+    cairo_set_source_rgba(cr, sel ? 1 : app.text_r, sel ? 1 : app.text_g,
+                          sel ? 1 : app.text_b, avail ? (sel ? 0.98 : 1.0) : 0.35);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                           sel ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
     cairo_move_to(cr, fmx + 6, fmy2 + fmt_h / 2 + 4);
     cairo_show_text(cr, fmt_labels[i]);
   }
 
   // ── Name row ──
-  int name_y = fmy2 + fmt_h + 14;
   cairo_set_font_size(cr, 12);
   cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                         app.text_secondary_b, 1.0);
-  cairo_move_to(cr, content_x, name_y);
+  cairo_move_to(cr, namelabel_r.x, namelabel_r.y + 14);
   cairo_show_text(cr, "Name");
 
-  int input_x = content_x;
-  int input_y = name_y + 18;
-  int input_w = dlg_w - 40;
-  int input_h = 32;
+  int input_x = nameinput_r.x;
+  int input_y = nameinput_r.y;
+  int input_w = nameinput_r.w;
+  int input_h = nameinput_r.h;
   cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.5);
   draw_rounded_rect(cr, input_x, input_y, input_w, input_h, 6);
   cairo_fill(cr);
@@ -904,64 +953,69 @@ void draw_compress_dialog(AppState& app, cairo_t* cr) {
   }
 
   // ── Level row ──
-  int lvl_y = input_y + input_h + 14;
   cairo_set_font_size(cr, 12);
   cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                         app.text_secondary_b, 1.0);
-  cairo_move_to(cr, content_x, lvl_y);
+  cairo_move_to(cr, lvllabel_r.x, lvllabel_r.y + 14);
   cairo_show_text(cr, "Level");
 
   static const char* level_labels[] = {"Fastest", "Fast", "Normal", "Maximum", "Maximal"};
   static constexpr int kNumLevels = 5;
   static constexpr int kLevelValues[kNumLevels] = {0, 3, 6, 8, 9};
-  int lvl_btn_x = content_x;
-  int lvl_btn_y = lvl_y + 18;
-  int lvl_btn_w = 68;
-  int lvl_btn_h = 28;
-  int lvl_gap = 8;
   for (int i = 0; i < kNumLevels; ++i) {
-    int lx = lvl_btn_x + i * (lvl_btn_w + lvl_gap);
-    double r = 6;
-    if (kLevelValues[i] == app.compress_level) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.85);
-    } else if (i == app.compress_hover_level) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.50);
+    const hui::Node& cell = lvlrow_r.children[static_cast<size_t>(i)];
+    int lx = cell.x;
+    int lvl_btn_y = cell.y;
+    int lvl_btn_w = cell.w;
+    int lvl_btn_h = cell.h;
+    bool sel = (kLevelValues[i] == app.compress_level);
+    bool hov = (i == app.compress_hover_level);
+    if (sel) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.95);
+    } else if (hov) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
     } else {
-      cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.5);
+      hui::design::card_fill(cr, app, 0.55);
     }
-    draw_rounded_rect(cr, lx, lvl_btn_y, lvl_btn_w, lvl_btn_h, r);
+    draw_rounded_rect(cr, lx, lvl_btn_y, lvl_btn_w, lvl_btn_h, 8);
     cairo_fill(cr);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_set_source_rgba(cr, sel ? 1 : app.text_r, sel ? 1 : app.text_g,
+                          sel ? 1 : app.text_b, sel ? 0.98 : 1.0);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                           sel ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, 11);
     cairo_move_to(cr, lx + 4, lvl_btn_y + lvl_btn_h / 2 + 4);
     cairo_show_text(cr, level_labels[i]);
   }
 
   // ── Threads row ──
-  int th_y = lvl_btn_y + lvl_btn_h + 12;
   cairo_set_font_size(cr, 12);
   cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                         app.text_secondary_b, 1.0);
-  cairo_move_to(cr, content_x, th_y);
+  cairo_move_to(cr, thlabel_r.x, thlabel_r.y + 12);
   cairo_show_text(cr, "Threads");
 
-  const std::vector<int> thread_opts = compress_thread_options();
-  int th_btn_y = th_y + 18;
-  int th_btn_w = compress_thread_btn_w(static_cast<int>(thread_opts.size()));
-  int th_btn_h = 28;
-  int th_gap = 8;
   for (size_t ti = 0; ti < thread_opts.size(); ++ti) {
-    int tx = content_x + static_cast<int>(ti) * (th_btn_w + th_gap);
-    if (thread_opts[ti] == app.compress_threads) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.85);
-    } else if (static_cast<int>(ti) == app.compress_hover_threads) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.50);
+    const hui::Node& cell = throw_r.children[ti];
+    int tx = cell.x;
+    int th_btn_y = cell.y;
+    int th_btn_w = cell.w;
+    int th_btn_h = cell.h;
+    bool sel = (thread_opts[ti] == app.compress_threads);
+    bool hov = (static_cast<int>(ti) == app.compress_hover_threads);
+    if (sel) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.95);
+    } else if (hov) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
     } else {
-      cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.5);
+      hui::design::card_fill(cr, app, 0.55);
     }
-    draw_rounded_rect(cr, tx, th_btn_y, th_btn_w, th_btn_h, 6);
+    draw_rounded_rect(cr, tx, th_btn_y, th_btn_w, th_btn_h, 8);
     cairo_fill(cr);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_set_source_rgba(cr, sel ? 1 : app.text_r, sel ? 1 : app.text_g,
+                          sel ? 1 : app.text_b, sel ? 0.98 : 1.0);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                           sel ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, 11);
     char th_label[16];
     if (thread_opts[ti] == 0)
@@ -976,36 +1030,10 @@ void draw_compress_dialog(AppState& app, cairo_t* cr) {
   }
 
   // ── Buttons ──
-  int btn_y = dlg_y + dlg_h - 50;
-  int btn_w = 90;
-  int btn_h = 32;
-  int cancel_x = dlg_x + dlg_w - 220;
-  int compress_x = dlg_x + dlg_w - 110;
-
-  cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, 0.6);
-  draw_rounded_rect(cr, cancel_x, btn_y, btn_w, btn_h, 6);
-  cairo_fill(cr);
-  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                          CAIRO_FONT_WEIGHT_NORMAL);
-  cairo_set_font_size(cr, 13);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, cancel_x + btn_w / 2 - 20, btn_y + btn_h / 2 + 4);
-  cairo_show_text(cr, "Cancel");
-
-  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.85);
-  draw_rounded_rect(cr, compress_x, btn_y, btn_w, btn_h, 6);
-  cairo_fill(cr);
-  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-  cairo_move_to(cr, compress_x + btn_w / 2 - 24, btn_y + btn_h / 2 + 4);
-  cairo_show_text(cr, "Compress");
-
-  // Hover highlight
-  if (app.compress_hover_btn >= 0) {
-    int hx = app.compress_hover_btn == 0 ? cancel_x : compress_x;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.12);
-    draw_rounded_rect(cr, hx, btn_y, btn_w, btn_h, 6);
-    cairo_fill(cr);
-  }
+  hui::design::button(cr, app, cancel_r.x, cancel_r.y, cancel_r.w, cancel_r.h, "Cancel", false,
+                 app.compress_hover_btn == 0);
+  hui::design::button(cr, app, ok_r.x, ok_r.y, ok_r.w, ok_r.h, "Compress", true,
+                 app.compress_hover_btn == 1);
 }
 
 // ── terminal chooser dialog ──────────────────────────────────────
@@ -1041,16 +1069,21 @@ void draw_terminal_chooser(AppState& app, cairo_t* cr) {
   // Card (fully opaque, layered soft shadow)
   draw_dialog_card(app, cr, card_x, card_y, card_w, card_h, kCardRad);
 
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgTerm, 0), card_x, card_y, card_w, card_h);
+
   const int close_x = card_x + card_w - kPad - 28;
   const int close_y = card_y + kPad - 4;
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgTerm, hui::Hit::kTermClose),
+                   close_x, close_y, 28, 28);
   {
-    int cHov = (app.term_chooser_hover == -2) ? 1 : 0;
-    double a = cHov ? 0.55 : 0.40;
-    cairo_set_source_rgba(cr, app.surface_r, app.surface_g, app.surface_b, a);
-    draw_rounded_rect(cr, close_x, close_y, 28, 28, 6);
-    cairo_fill(cr);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    cairo_set_line_width(cr, 1.5);
+    bool hov = (app.term_chooser_hover == -2);
+    if (hov) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.14);
+      draw_rounded_rect(cr, close_x, close_y, 28, 28, 14);
+      cairo_fill(cr);
+    }
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, hov ? 0.85 : 0.45);
+    cairo_set_line_width(cr, 1.6);
     cairo_move_to(cr, close_x + 9, close_y + 9);
     cairo_line_to(cr, close_x + 19, close_y + 19);
     cairo_move_to(cr, close_x + 19, close_y + 9);
@@ -1084,12 +1117,12 @@ void draw_terminal_chooser(AppState& app, cairo_t* cr) {
   const int end = std::min(start + visible, total);
   for (int i = start; i < end; ++i) {
     const int ey = list_y + (i - start) * kEntryH;
+    app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgTerm, hui::Hit::kTermRowBase + i),
+                     list_x, ey, list_w, kEntryH);
     const bool hov = (i == app.term_chooser_hover);
 
     if (hov) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.12);
-      cairo_rectangle(cr, list_x, ey, list_w, kEntryH);
-      cairo_fill(cr);
+      hui::design::row_hover(cr, app, list_x + 4, ey + 2, list_w - 8, kEntryH - 4);
     }
 
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,

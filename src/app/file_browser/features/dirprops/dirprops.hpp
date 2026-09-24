@@ -6,7 +6,7 @@
 namespace eh::file_browser {
 
 // Per-folder view properties persisted as a `.directory` desktop-entry-style
-// INI file (freedesktop convention, compatible-ish with Dolphin's file name).
+// INI file (freedesktop convention, compatible-ish with the common file name).
 struct DirProps {
   // Which keys the file actually carries
   bool has_mode = false;

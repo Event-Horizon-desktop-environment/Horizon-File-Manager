@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "draw_helpers.hpp"
+#include "ui/design.hpp"
 #include "draw_file_icons.hpp"
 #include "draw_thumbnails.hpp"
 #include "layout.hpp"
@@ -160,16 +161,8 @@ void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
     double zone_l = pad + left_w + static_cast<int>(16.0 * zf);
     double zone_r = static_cast<double>(w) - pad - right_reserve;
     double op_budget = zone_r - zone_l;
-    std::string shown_op = app.operation_status;
+    std::string shown_op = hui::design::clip_end(cr, app.operation_status, op_budget > 60 ? op_budget : 1e9);
     cairo_text_extents(cr, shown_op.c_str(), &te);
-    if (te.x_advance > op_budget && op_budget > 60) {
-      while (!shown_op.empty()) {
-        cairo_text_extents(cr, (shown_op + "...").c_str(), &te);
-        if (te.x_advance <= op_budget) break;
-        shown_op.pop_back();
-      }
-      shown_op += "...";
-    }
     double sw = te.x_advance;
     cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 1.0);
     cairo_move_to(cr, zone_l + (op_budget - sw) / 2, y + status_h / 2 + 4);
@@ -222,15 +215,8 @@ void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
   // Elide the left status text so it can never run under the right cluster
   double status_budget = static_cast<double>(w) - 2 * pad - right_cluster -
                          static_cast<int>(16.0 * zf);
-  std::string shown_status = status_buf;
-  if (status_w > status_budget && status_budget > 40) {
-    while (!shown_status.empty()) {
-      cairo_text_extents(cr, (shown_status + "...").c_str(), &te);
-      if (te.x_advance <= status_budget) break;
-      shown_status.pop_back();
-    }
-    shown_status += "...";
-  }
+  std::string shown_status = hui::design::clip_end(
+      cr, std::string(status_buf), status_budget > 40 ? status_budget : 1e9);
   cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                         app.text_secondary_b, 1.0);
   cairo_move_to(cr, pad, y + status_h / 2 + 4);
@@ -317,24 +303,25 @@ void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
       cairo_line_to(cr, pcx, cy + 5 + 0.5);
       cairo_stroke(cr);
       // track
-      cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.45);
-      cairo_rectangle(cr, track_x, cy - 2, track_w, 3);
-      cairo_fill(cr);
-      // handle at current level
       double t = static_cast<double>(zoom_level_for_pct(app.settings_zoom_pct)) /
                  (kZoomLevelCount - 1);
-      double hx = track_x + t * (track_w - 10);
+      hui::design::bar(cr, app, track_x, cy - 3, track_w, t, 6);
+      // handle at current level
+      double hx = track_x + t * track_w;
       bool hov = app.status_zoom_dragging ||
                  (app.pointerY >= cy - 12 && app.pointerY < cy + 12 &&
                   app.pointerX >= track_x && app.pointerX < track_x + track_w);
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
-                            hov ? 1.0 : 0.9);
-      cairo_arc(cr, hx + 5, cy, 5, 0, 2 * M_PI);
+      cairo_set_source_rgba(cr, 1, 1, 1, 0.95);
+      cairo_arc(cr, hx, cy, 6, 0, 2 * M_PI);
       cairo_fill(cr);
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, hov ? 0.9 : 0.45);
+      cairo_set_line_width(cr, 1.4);
+      cairo_arc(cr, hx, cy, 6, 0, 2 * M_PI);
+      cairo_stroke(cr);
       if (hov) {
-        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.3);
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.25);
         cairo_set_line_width(cr, 1.4);
-        cairo_arc(cr, hx + 5, cy, 8, 0, 2 * M_PI);
+        cairo_arc(cr, hx, cy, 9, 0, 2 * M_PI);
         cairo_stroke(cr);
       }
     } else {
@@ -401,40 +388,8 @@ void draw_select_dir_bar(AppState& app, cairo_t* cr, int w, int h,
   app.cancel_btn_x = can_x;
   app.cancel_btn_w = btn_w;
 
-  // Select button
-  double r = 4.0 * zf;
-  if (app.select_btn_hover) {
-    cairo_set_source_rgba(cr, 0.3, 0.5, 1.0, 1.0);
-  } else {
-    cairo_set_source_rgba(cr, 0.2, 0.4, 0.9, 1.0);
-  }
-  draw_rounded_rect(cr, static_cast<double>(sel_x), static_cast<double>(btn_y),
-                    static_cast<double>(btn_w), static_cast<double>(btn_h), r);
-  cairo_fill(cr);
-
-  cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);
-  cairo_set_font_size(cr, 13.0 * zf);
-  cairo_text_extents_t te;
-  cairo_text_extents(cr, "Select", &te);
-  cairo_move_to(cr, sel_x + (btn_w - te.width) / 2,
-                btn_y + (btn_h - te.height) / 2 - te.y_bearing);
-  cairo_show_text(cr, "Select");
-
-  // Cancel button
-  if (app.cancel_btn_hover) {
-    cairo_set_source_rgba(cr, 0.4, 0.4, 0.4, 1.0);
-  } else {
-    cairo_set_source_rgba(cr, 0.3, 0.3, 0.3, 1.0);
-  }
-  draw_rounded_rect(cr, static_cast<double>(can_x), static_cast<double>(btn_y),
-                    static_cast<double>(btn_w), static_cast<double>(btn_h), r);
-  cairo_fill(cr);
-
-  cairo_set_source_rgba(cr, 0.85, 0.85, 0.85, 1.0);
-  cairo_text_extents(cr, "Cancel", &te);
-  cairo_move_to(cr, can_x + (btn_w - te.width) / 2,
-                btn_y + (btn_h - te.height) / 2 - te.y_bearing);
-  cairo_show_text(cr, "Cancel");
+  hui::design::button(cr, app, can_x, btn_y, btn_w, btn_h, "Cancel", false, app.cancel_btn_hover);
+  hui::design::button(cr, app, sel_x, btn_y, btn_w, btn_h, "Select", true, app.select_btn_hover);
 }
 
 } // namespace eh::file_browser

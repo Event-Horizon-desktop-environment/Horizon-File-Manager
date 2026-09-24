@@ -892,7 +892,7 @@ static void scan_entries(
     // the first published chunks while later batches are still being read.
     std::thread reader([&, dfd]() { read_dir_stream(dfd, stream, cancel); });
 
-    // Progressive feed (Dolphin-style): while statx workers are still
+    // Progressive feed: while statx workers are still
     // chewing, post name-only skeletons of everything readdir has already
     // published. The view fills with rows long before metadata lands;
     // the final READY result replaces them with fully-populated entries.
@@ -900,7 +900,7 @@ static void scan_entries(
     if (on_progress) {
       trace::set_thread_name("scan-ticker");
       ticker = std::thread([&stream, &sp, &on_progress, &cancel, &prefix]() {
-        // Dolphin policy (KFileItemModel): show one early partial view,
+        // Show one early partial view,
         // then leave the UI alone for 2 s while metadata lands — repeated
         // full-list rebuilds steal CPU from the statx workers.
         constexpr double kFirstPostMs = 50.0;
@@ -1122,7 +1122,7 @@ void apply_scan_result(AppState& app, bool is_progress) {
     tab.dir_mtime = static_cast<int64_t>(dir_st.st_mtime);
 
   // ── Dynamic view: media-heavy folders auto-switch to icon view once ──
-  // Mirrors Dolphin's applyDynamicView: images/videos must outweigh all other
+  // Images/videos must outweigh all other
   // entries 2:1, with each subdirectory only counting a third.
   {
     bool searching = app.search_active || app.recursive_search_active ||

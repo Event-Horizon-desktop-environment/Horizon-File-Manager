@@ -114,249 +114,42 @@ int properties_hit_test(AppState& app, int x, int y) {
 // ── settings hit test ────────────────────────────────────────────
 
 int settings_hit_test(AppState& app, int x, int y) {
-  const int card_w = settings_dialog_width();
-  const int card_h = settings_dialog_card_height(app);
-  const int cx = (app.width - card_w) / 2;
-  const int cy = (app.height - card_h) / 2;
-  const int pad = 20;
-
-  if (x < cx || x >= cx + card_w || y < cy || y >= cy + card_h)
-    return -1;
-
-  {
-    const int close_x = cx + card_w - pad - 24;
-    const int close_y = cy + 8;
-    if (x >= close_x && x < close_x + 24 && y >= close_y && y < close_y + 24)
-      return -2;
+  // Resolved through the retained hit registry (rects stored during paint
+  // in the settings window's coordinate space); no geometry is re-derived
+  // here. Return codes are unchanged so handle_settings_click is untouched.
+  const uint32_t hid = app.hit_settings.query(x, y);
+  if ((hid & hui::Hit::kGroupMask) != hui::Hit::kDialog) return -1;
+  if ((hid & 0xFFFFC00) != hui::Hit::dialog(hui::Hit::kDlgSettings, 0)) return -1;
+  const int ctrl = hui::Hit::dialog_ctrl(hid);
+  switch (ctrl) {
+    case hui::Hit::kSettingsClose: return -2;
+    case hui::Hit::kSettingsTabBase + 0: return -3;
+    case hui::Hit::kSettingsTabBase + 1: return -4;
+    case hui::Hit::kSettingsTabBase + 2: return -22;
+    case hui::Hit::kSettingsOk: return -5;
+    case hui::Hit::kSettingsApply: return -6;
+    case hui::Hit::kSettingsCancel: return -7;
+    case hui::Hit::kSettingsZoomDown: return -8;
+    case hui::Hit::kSettingsZoomUp: return -9;
+    case hui::Hit::kSettingsZoomField: return -16;
+    case hui::Hit::kSettingsFoldersToggle: return -10;
+    case hui::Hit::kSettingsSurfSlider: return -11;
+    case hui::Hit::kSettingsSideSlider: return -13;
+    case hui::Hit::kSettingsTopSlider: return -14;
+    case hui::Hit::kSettingsStatusSlider: return -15;
+    case hui::Hit::kSettingsPrevSlider: return -17;
+    case hui::Hit::kSettingsDlgSlider: return -19;
+    case hui::Hit::kSettingsPropsSlider: return -20;
+    case hui::Hit::kSettingsScaleSlider: return -23;
+    case hui::Hit::kSettingsMatugen: return -18;
+    case hui::Hit::kSettingsColorEng: return -24;
+    case hui::Hit::kSettingsTermDrop: return -12;
+    case hui::Hit::kSettingsIndepToggle: return -21;
+    default: break;
   }
-
-  const int top_bar_h = 44;
-  const int tab_y = cy + top_bar_h + 4;
-  const int tab_w = (card_w - 2 * pad) / 3;
-  const int tab_h = 36;
-
-  {
-    const int tx = cx + pad;
-    if (x >= tx && x < tx + tab_w && y >= tab_y && y < tab_y + tab_h)
-      return -3;
-  }
-  {
-    const int tx = cx + pad + tab_w;
-    if (x >= tx && x < tx + tab_w && y >= tab_y && y < tab_y + tab_h)
-      return -4;
-  }
-  {
-    const int tx = cx + pad + tab_w * 2;
-    if (x >= tx && x < tx + tab_w && y >= tab_y && y < tab_y + tab_h)
-      return -22;
-  }
-
-  const int content_y = tab_y + tab_h + 12;
-  const int btn_y = cy + card_h - 50;
-  const int btn_h = 30;
-  const int btn_w = 80;
-  const int btn_gap = 10;
-
-  {
-    const int ok_x = cx + card_w - pad - btn_w * 3 - btn_gap * 2;
-    if (x >= ok_x && x < ok_x + btn_w && y >= btn_y && y < btn_y + btn_h)
-      return -5;
-  }
-  {
-    const int apply_x = cx + card_w - pad - btn_w;
-    if (x >= apply_x && x < apply_x + btn_w && y >= btn_y && y < btn_y + btn_h)
-      return -6;
-  }
-  {
-    const int cancel_x = cx + card_w - pad - btn_w * 2 - btn_gap;
-    if (x >= cancel_x && x < cancel_x + btn_w && y >= btn_y && y < btn_y + btn_h)
-      return -7;
-  }
-
-  const int left_x = cx + 28;
-  const int ly = content_y;
-  const int z_btn_y = ly - 4;
-  const int z_btn_s = 28;
-
-  {
-    const int zoom_minus_x = left_x + 220;
-    if (x >= zoom_minus_x && x < zoom_minus_x + z_btn_s &&
-        y >= z_btn_y && y < z_btn_y + z_btn_s)
-      return -8;
-  }
-  {
-    const int zoom_plus_x = left_x + 220 + z_btn_s + 6;
-    if (x >= zoom_plus_x && x < zoom_plus_x + z_btn_s &&
-        y >= z_btn_y && y < z_btn_y + z_btn_s)
-      return -9;
-  }
-
-  // Click on zoom value text → inline edit
-  {
-    const int zoom_val_x = left_x + 180;
-    const int zoom_val_y = ly - 2;
-    const int zoom_val_w = 36;
-    const int zoom_val_h = 22;
-    if (x >= zoom_val_x && x < zoom_val_x + zoom_val_w &&
-        y >= zoom_val_y && y < zoom_val_y + zoom_val_h) {
-      if (!app.settings_zoom_editing) {
-        char buf[16];
-        snprintf(buf, sizeof(buf), "%.0f", app.settings_zoom_pct);
-        app.settings_zoom_buf = buf;
-        app.settings_zoom_editing = true;
-      }
-      return -16;
-    }
-  }
-
-  {
-    const int toggle_x = left_x + 220;
-    const int toggle_y = content_y + 40 - 2;
-    const int toggle_w = 40;
-    const int toggle_h = 22;
-    if (x >= toggle_x && x < toggle_x + toggle_w &&
-        y >= toggle_y && y < toggle_y + toggle_h)
-      return -10;
-  }
-
-  {
-    const int slider_x = cx + pad + 8;
-    const int slider_y = content_y + 24;
-    const int slider_w = card_w - 2 * pad - 16;
-    const int slider_h = 6;
-    if (x >= slider_x && x < slider_x + slider_w &&
-        y >= slider_y - 10 && y < slider_y + slider_h + 20)
-      return -11;
-  }
-
-  // Sidebar opacity slider (Appearance tab, below surface opacity slider)
-  if (app.settings_tab == 1) {
-    const int sb_slider_y = content_y + 76;
-    const int sb_slider_w = card_w - 2 * pad - 16;
-    const int sb_slider_h = 6;
-    if (x >= cx + pad + 8 && x < cx + pad + 8 + sb_slider_w &&
-        y >= sb_slider_y - 10 && y < sb_slider_y + sb_slider_h + 20)
-      return -13;
-  }
-
-  // Top bar opacity slider (Appearance tab)
-  if (app.settings_tab == 1) {
-    const int tb_slider_y = content_y + 128;
-    const int tb_slider_w = card_w - 2 * pad - 16;
-    const int tb_slider_h = 6;
-    if (x >= cx + pad + 8 && x < cx + pad + 8 + tb_slider_w &&
-        y >= tb_slider_y - 10 && y < tb_slider_y + tb_slider_h + 20)
-      return -14;
-  }
-
-  // Status bar opacity slider (Appearance tab)
-  if (app.settings_tab == 1) {
-    const int st_slider_y = content_y + 180;
-    const int st_slider_w = card_w - 2 * pad - 16;
-    const int st_slider_h = 6;
-    if (x >= cx + pad + 8 && x < cx + pad + 8 + st_slider_w &&
-        y >= st_slider_y - 10 && y < st_slider_y + st_slider_h + 20)
-      return -15;
-  }
-
-  // Preview opacity slider (Appearance tab)
-  if (app.settings_tab == 1) {
-    const int pv_slider_y = content_y + 232;
-    const int pv_slider_w = card_w - 2 * pad - 16;
-    const int pv_slider_h = 6;
-    if (x >= cx + pad + 8 && x < cx + pad + 8 + pv_slider_w &&
-        y >= pv_slider_y - 10 && y < pv_slider_y + pv_slider_h + 20)
-      return -17;
-  }
-
-  // Settings dialog opacity slider (Appearance tab)
-  if (app.settings_tab == 1) {
-    const int dlg_slider_y = content_y + 284;
-    const int dlg_slider_w = card_w - 2 * pad - 16;
-    const int dlg_slider_h = 6;
-    if (x >= cx + pad + 8 && x < cx + pad + 8 + dlg_slider_w &&
-        y >= dlg_slider_y - 10 && y < dlg_slider_y + dlg_slider_h + 20)
-      return -19;
-  }
-
-  // Properties dialog opacity slider (Appearance tab)
-  if (app.settings_tab == 1) {
-    const int prp_slider_y = content_y + 336;
-    const int prp_slider_w = card_w - 2 * pad - 16;
-    const int prp_slider_h = 6;
-    if (x >= cx + pad + 8 && x < cx + pad + 8 + prp_slider_w &&
-        y >= prp_slider_y - 10 && y < prp_slider_y + prp_slider_h + 20)
-      return -20;
-  }
-
-  // Preview scale slider (Preview tab)
-  if (app.settings_tab == 2) {
-    const int sc_slider_y = content_y + 24;
-    const int sc_slider_w = card_w - 2 * pad - 16;
-    const int sc_slider_h = 6;
-    if (x >= cx + pad + 8 && x < cx + pad + 8 + sc_slider_w &&
-        y >= sc_slider_y - 10 && y < sc_slider_y + sc_slider_h + 20)
-      return -23;
-  }
-
-  // Matugen theming toggle (Appearance tab)
-  if (app.settings_tab == 1) {
-    const int toggle_x = static_cast<int>(app.settings_hit_matugen_toggle[0]);
-    const int toggle_y = static_cast<int>(app.settings_hit_matugen_toggle[1]);
-    const int toggle_w = static_cast<int>(app.settings_hit_matugen_toggle[2]);
-    const int toggle_h = static_cast<int>(app.settings_hit_matugen_toggle[3]);
-    if (toggle_w > 0 && x >= toggle_x && x < toggle_x + toggle_w &&
-        y >= toggle_y && y < toggle_y + toggle_h)
-      return -18;
-  }
-
-  // Color engine sync toggle (Appearance tab)
-  if (app.settings_tab == 1) {
-    const int toggle_x = static_cast<int>(app.settings_hit_color_engine_toggle[0]);
-    const int toggle_y = static_cast<int>(app.settings_hit_color_engine_toggle[1]);
-    const int toggle_w = static_cast<int>(app.settings_hit_color_engine_toggle[2]);
-    const int toggle_h = static_cast<int>(app.settings_hit_color_engine_toggle[3]);
-    if (toggle_w > 0 && x >= toggle_x && x < toggle_x + toggle_w &&
-        y >= toggle_y && y < toggle_y + toggle_h)
-      return -24;
-  }
-
-  {
-    const int drop_x = left_x + 130;
-    const int drop_y = content_y + 76;
-    const int drop_w = 226;
-    const int drop_h = 30;
-
-    if (x >= drop_x && x < drop_x + drop_w &&
-        y >= drop_y && y < drop_y + drop_h)
-      return -12;
-
-    if (app.settings_dropdown_open) {
-      const int dd_y = drop_y + drop_h + 2;
-      const int dd_entry_h = 28;
-      const int total = static_cast<int>(app.settings_term_opts.size());
-      int remaining = total - app.settings_dropdown_scroll;
-      int visible = std::min(remaining, 6);
-
-      for (int i = 0; i < visible; ++i) {
-        int item_y = dd_y + i * dd_entry_h;
-        if (y >= item_y && y < item_y + dd_entry_h)
-          return i;
-      }
-    }
-  }
-
-  // Independent views per directory toggle (General tab)
-  if (!app.settings_dropdown_open) {
-    const int toggle_x = left_x + 220;
-    const int toggle_y = content_y + 120 - 2;
-    const int toggle_w = 40;
-    const int toggle_h = 22;
-    if (x >= toggle_x && x < toggle_x + toggle_w &&
-        y >= toggle_y && y < toggle_y + toggle_h)
-      return -21;
-  }
-
+  if (ctrl >= hui::Hit::kSettingsDropItemBase &&
+      ctrl < hui::Hit::kSettingsDropItemBase + 6)
+    return ctrl - hui::Hit::kSettingsDropItemBase;
   return -1;
 }
 
@@ -374,7 +167,7 @@ void handle_click(AppState& app, int x, int y, int button) {
   // ── Adaptive sidebar flap: clicks outside dismiss it ──
   // The flap is a transient overlay, so clicking anywhere outside the flap
   // closes it. The click is still processed normally (it acts on whatever
-  // was clicked), matching the Nautilus AdwFlap behavior.
+  // was clicked), matching the flap overlay behavior.
   dismiss_sidebar_flap(app, x, y);
 
   if (click_drop_chooser(app, x, y, button)) return;
@@ -418,7 +211,7 @@ void handle_click(AppState& app, int x, int y, int button) {
     if (click_columns_menu(app, x, y, button)) return;
     if (click_sort_menu(app, x, y, button)) return;
     if (click_filter_dropdown(app, x, y, button)) return;
-    if (click_top_bar(app, x, y, button)) return;
+    if (click_top_bar(app, x, y, button, now_ns)) return;
     if (click_tab_bar(app, x, y, button)) return;
     if (click_ops_cancel(app, x, y, button)) return;
     if (click_sidebar_hit(app, x, y, button)) return;

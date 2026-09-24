@@ -22,9 +22,10 @@ void wallpaper_tint_surface(const AppState& app, double strength,
                             double& out_r, double& out_g, double& out_b);
 
 // Layered soft shadow + solid card + hairline border shared by every popup.
-// Cards are always fully opaque (no transparency anywhere in dialogs).
+// `alpha` tints only the card fill (content stays crisp); popups on the
+// main surface keep the opaque default.
 void draw_dialog_card(AppState& app, cairo_t* cr, double x, double y,
-                      double w, double h, double r);
+                      double w, double h, double r, double alpha = 1.0);
 
 // Clamp a popup rect so it stays fully on-screen (with an 8px margin).
 // Shared by the context menu and the drop-action chooser.

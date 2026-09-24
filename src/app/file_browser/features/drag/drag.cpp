@@ -283,7 +283,7 @@ void start_drag(AppState& app) {
     return lines;
   };
 
-  // Create drag icon surface (GNOME 51 style: stacked cards, pill badge, drop shadow)
+  // Create drag icon surface (stacked cards, pill badge, drop shadow)
   const int icon_size = 48;
   const int label_font_size = 12;
   const int pad_x = 12;
@@ -362,7 +362,7 @@ void start_drag(AppState& app) {
             draw_card(s_ox, s_oy, s_alpha);
           }
 
-          // Draw stacked card layers (GNOME 51 style)
+          // Draw stacked card layers
           for (int i = shadow_layers - 1; i >= 1; --i) {
             double c_ox = 2.0 + i * shadow_offset;
             double c_oy = 2.0 + i * shadow_offset;
@@ -577,7 +577,7 @@ bool has_mime(const DropOfferData& od, const std::string_view target) {
 
 // While dragging, activate whichever split pane is under the cursor so all
 // drop-target hit testing (and the eventual drop) acts on that pane —
-// mirrors Dolphin activating a pane when files are dragged onto it.
+// activating the pane under the cursor.
 static void activate_pane_under_dnd(AppState& app, int sx) {
   if (!app.split_view) return;
   int s_w = app.sidebar_w();

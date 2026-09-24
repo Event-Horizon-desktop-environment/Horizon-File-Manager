@@ -323,42 +323,41 @@ bool click_rpath_edit(AppState& app, int x, int y, int button) {
 }
 
 bool click_rtab_bar(AppState& app, int x, int y, int button) {
-  if (y >= app.top_bar_height && y < app.top_bar_height + app.tab_bar_height) {
-    for (size_t i = 0; i < app.tab_hits.size(); ++i) {
-      auto& hit = app.tab_hits[i];
-      if (x >= hit.x && x < hit.x + hit.w && i < app.tabs.size()) {
-        app.context_menu_open = true;
-        app.context_menu_x = x;
-        app.context_menu_y = y;
-        app.context_menu_hover = -1; app.context_menu_hover_prev = -1; app.context_menu_sub_hover = -1;
-        app.context_menu_file_idx = -4;
-        app.context_menu_tab_idx = static_cast<int>(i);
-        app.context_menu_items = {};
-        if (!app.closed_tabs.empty())
-          app.context_menu_items.push_back(
-            AppState::menu_item(AppState::ContextMenuAction::ReopenClosedTab, "Reopen Closed Tab"));
-        app.context_menu_items.push_back(
-          AppState::menu_item(AppState::ContextMenuAction::CloseTab, "Close Tab"));
-        app.context_menu_items.push_back(
-          AppState::menu_item(AppState::ContextMenuAction::CloseOtherTabs, "Close Other Tabs"));
-        app.context_menu_items.push_back(
-          AppState::menu_item(AppState::ContextMenuAction::CloseAllTabs, "Close All Tabs"));
-        app.context_menu_items.push_back(
-          AppState::menu_item(AppState::ContextMenuAction::DuplicateTab, "Duplicate Tab"));
-        app.context_menu_items.push_back(
-          AppState::menu_item(AppState::ContextMenuAction::ToggleSplitView,
-                              app.split_view ? "Exit Split View" : "Split View"));
-        app.context_menu_items.push_back(
-          AppState::menu_item(AppState::ContextMenuAction::Separator, ""));
-        app.context_menu_items.push_back(
-          AppState::menu_item(AppState::ContextMenuAction::OpenInNewWindow, "Open in new window"));
-        draw(app);
-        return true;
-      }
-    }
+  uint32_t hid = app.hit_main.query(x, y);
+  if ((hid & hui::Hit::kGroupMask) != hui::Hit::kTab &&
+      (hid & hui::Hit::kGroupMask) != hui::Hit::kTabClose)
+    return false;
+  {
+    int i = static_cast<int>(hid & hui::Hit::kIndexMask);
+    if (i < 0 || i >= static_cast<int>(app.tabs.size())) return false;
+    app.context_menu_open = true;
+    app.context_menu_x = x;
+    app.context_menu_y = y;
+    app.context_menu_hover = -1; app.context_menu_hover_prev = -1; app.context_menu_sub_hover = -1;
+    app.context_menu_file_idx = -4;
+    app.context_menu_tab_idx = i;
+    app.context_menu_items = {};
+    if (!app.closed_tabs.empty())
+      app.context_menu_items.push_back(
+        AppState::menu_item(AppState::ContextMenuAction::ReopenClosedTab, "Reopen Closed Tab"));
+    app.context_menu_items.push_back(
+      AppState::menu_item(AppState::ContextMenuAction::CloseTab, "Close Tab"));
+    app.context_menu_items.push_back(
+      AppState::menu_item(AppState::ContextMenuAction::CloseOtherTabs, "Close Other Tabs"));
+    app.context_menu_items.push_back(
+      AppState::menu_item(AppState::ContextMenuAction::CloseAllTabs, "Close All Tabs"));
+    app.context_menu_items.push_back(
+      AppState::menu_item(AppState::ContextMenuAction::DuplicateTab, "Duplicate Tab"));
+    app.context_menu_items.push_back(
+      AppState::menu_item(AppState::ContextMenuAction::ToggleSplitView,
+                          app.split_view ? "Exit Split View" : "Split View"));
+    app.context_menu_items.push_back(
+      AppState::menu_item(AppState::ContextMenuAction::Separator, ""));
+    app.context_menu_items.push_back(
+      AppState::menu_item(AppState::ContextMenuAction::OpenInNewWindow, "Open in new window"));
+    draw(app);
     return true;
   }
-  return false;
 }
 
 bool click_rcomputer(AppState& app, int x, int y, int button) {

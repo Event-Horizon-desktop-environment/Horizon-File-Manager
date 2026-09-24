@@ -87,7 +87,7 @@ bool is_hidden_file(const std::string& name) {
 }
 
 // Names listed in a directory's `.hidden` file are treated as hidden too
-// (freedesktop convention, honored by Dolphin/Nemo).
+// (freedesktop convention, honored by other file managers).
 std::unordered_set<std::string> read_hidden_file(const std::string& dir) {
   std::unordered_set<std::string> names;
   // Never block while scanning: a FIFO named ".hidden" would hang a plain
@@ -482,6 +482,17 @@ static void recall_independent_view(AppState& app, const std::string& path) {
     app.last_browser_view_mode = t.view_mode;
 }
 
+// Tab switches change folders without navigating: snapshot the outgoing
+// folder's view (otherwise its latest zoom dies with the switch and the
+// next navigate pollutes the incoming folder with it), then restore the
+// incoming folder's remembered view — mirroring navigate_to().
+static void switch_tab_view_state(AppState& app, int new_idx) {
+  save_dir_props_before_leave(app);
+  remember_independent_view(app);
+  app.active_tab = new_idx;
+  recall_independent_view(app, app.cur_tab().current_path);
+}
+
 void navigate_to(AppState& app, const std::string& path) {
   const bool startup_nav = app.startup_loading;
   auto nav_mark = [&](const char* what) {
@@ -720,17 +731,22 @@ void close_tab(AppState& app) {
   if (app.tabs.size() <= 1) return;
   int idx = app.active_tab;
   remember_closed_tab(app, app.tabs[idx]);
+  // The closing folder's latest zoom/view would otherwise die with the tab:
+  // snapshot it before the tab (and its path) is gone.
+  save_dir_props_before_leave(app);
+  remember_independent_view(app);
   app.tabs.erase(app.tabs.begin() + idx);
   if (idx >= static_cast<int>(app.tabs.size()))
     app.active_tab = static_cast<int>(app.tabs.size()) - 1;
+  recall_independent_view(app, app.cur_tab().current_path);
   reload_dir(app);
 }
 
 // ── split pane ───────────────────────────────────────────────────
 
 // Copy path + persistent view settings from `src` into `dst`, resetting all
-// transient state (history, scroll, selection). Mirrors Dolphin's secondary
-// view: same folder as the source view, clean navigation state.
+// transient state (history, scroll, selection): same folder as the source
+// view, clean navigation state.
 static void adopt_tab_state(Tab& dst, const Tab& src) {
   dst.current_path = src.current_path;
   dst.view_mode = src.view_mode;
@@ -759,7 +775,7 @@ void enter_split_view(AppState& app, int src_tab_idx,
     src = app.active_tab;
   adopt_tab_state(app.right_pane, app.tabs[src]);
   if (!target_dir.empty()) app.right_pane.current_path = target_dir;
-  // Activate the newly created pane (Dolphin behavior)
+  // Activate the newly created pane
   app.active_pane = 1;
   reload_dir(app);
 }
@@ -789,7 +805,7 @@ void sync_split_panes(AppState& app) {
 void open_tab_in_active_pane(AppState& app, int tab_idx) {
   if (tab_idx < 0 || tab_idx >= static_cast<int>(app.tabs.size())) return;
   if (!app.split_view || app.active_pane == 0) {
-    app.active_tab = tab_idx;
+    switch_tab_view_state(app, tab_idx);
     reload_dir(app);
     return;
   }
@@ -799,14 +815,15 @@ void open_tab_in_active_pane(AppState& app, int tab_idx) {
 
 void next_tab(AppState& app) {
   if (app.tabs.size() <= 1) return;
-  app.active_tab = (app.active_tab + 1) % static_cast<int>(app.tabs.size());
+  switch_tab_view_state(app,
+                        (app.active_tab + 1) % static_cast<int>(app.tabs.size()));
   reload_dir(app);
 }
 
 void prev_tab(AppState& app) {
   if (app.tabs.size() <= 1) return;
-  app.active_tab = (app.active_tab - 1 + static_cast<int>(app.tabs.size())) %
-                   static_cast<int>(app.tabs.size());
+  switch_tab_view_state(app, (app.active_tab - 1 + static_cast<int>(app.tabs.size())) %
+                                static_cast<int>(app.tabs.size()));
   reload_dir(app);
 }
 

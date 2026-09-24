@@ -1,4 +1,5 @@
 #include "../app.hpp"
+#include "ui/design.hpp"
 
 #include <cairo/cairo.h>
 
@@ -410,6 +411,7 @@ void draw_computer_view(AppState& app, cairo_t* cr, int content_x,
     const auto& citem = app.computer_items[i];
 
     if (citem.shape == ComputerItem::ShapeType::Splitter) {
+      app.hit_main.add(hui::Hit::view_row(i), content_x, y, content_w, kSplitterH);
       if (y + kSplitterH < content_y) { y += kSplitterH; continue; }
       if (y > content_y + view_h) break;
       cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
@@ -428,12 +430,13 @@ void draw_computer_view(AppState& app, cairo_t* cr, int content_x,
       int cx = content_x + small_offset_x + col * (kSmallW + small_flex_gap);
       int cy = y + row * (kSmallH + kItemGap);
 
+      app.hit_main.add(hui::Hit::view_row(i), cx, cy, kSmallW, kSmallH);
       if (cy + kSmallH < content_y) { ++small_drawn; continue; }
       if (cy > content_y + view_h) break;
 
       bool hovered = (i == app.computer_hover_idx);
       if (hovered) {
-        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.06);
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
         draw_rounded_rect(cr, cx, cy, kSmallW, kSmallH, kCardRadius);
         cairo_fill(cr);
       }
@@ -475,17 +478,9 @@ void draw_computer_view(AppState& app, cairo_t* cr, int content_x,
       cairo_set_font_size(cr, 12.0 * zf);
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
       cairo_text_extents_t te;
-      cairo_text_extents(cr, citem.label.c_str(), &te);
       int max_label_w = kSmallW - static_cast<int>(12 * zf);
-      std::string display = citem.label;
-      if (te.width > max_label_w) {
-        while (!display.empty()) {
-          cairo_text_extents(cr, (display + "...").c_str(), &te);
-          if (te.width <= max_label_w) break;
-          display.pop_back();
-        }
-        display += "...";
-      }
+      std::string display = hui::design::clip_end(cr, citem.label, max_label_w);
+      cairo_text_extents(cr, display.c_str(), &te);
       cairo_move_to(cr, cx + (kSmallW - static_cast<int>(te.width)) / 2,
                      cy + kSmallH - static_cast<int>(18 * zf));
       cairo_show_text(cr, display.c_str());
@@ -505,6 +500,7 @@ void draw_computer_view(AppState& app, cairo_t* cr, int content_x,
       int cx = content_x + large_offset_x + col * (actual_large_w + flex_gap);
       int cy = y;
 
+      app.hit_main.add(hui::Hit::view_row(i), cx, cy, actual_large_w, kLargeH);
       if (cy + kLargeH < content_y) { ++large_drawn; continue; }
       if (cy > content_y + view_h) break;
 
@@ -518,8 +514,13 @@ void draw_computer_view(AppState& app, cairo_t* cr, int content_x,
       cairo_set_source_rgba(cr, card_r, card_g, card_b, hovered ? 0.55 : 0.32);
       draw_rounded_rect(cr, cx, cy, actual_large_w, kLargeH, kCardRadius);
       cairo_fill(cr);
-      cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.35);
-      cairo_set_line_width(cr, 1);
+      if (hovered) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.5);
+        cairo_set_line_width(cr, 1.2);
+      } else {
+        cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.35);
+        cairo_set_line_width(cr, 1);
+      }
       draw_rounded_rect(cr, cx + 0.5, cy + 0.5, actual_large_w - 1, kLargeH - 1,
                         kCardRadius - 0.5);
       cairo_stroke(cr);
@@ -566,16 +567,7 @@ void draw_computer_view(AppState& app, cairo_t* cr, int content_x,
       cairo_set_font_size(cr, name_font_sz);
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
       cairo_text_extents_t te;
-      std::string dev_label = citem.label;
-      cairo_text_extents(cr, dev_label.c_str(), &te);
-      if (te.width > text_w) {
-        while (!dev_label.empty()) {
-          cairo_text_extents(cr, (dev_label + "...").c_str(), &te);
-          if (te.width <= text_w) break;
-          dev_label.pop_back();
-        }
-        dev_label += "...";
-      }
+      std::string dev_label = hui::design::clip_end(cr, citem.label, text_w);
       cairo_move_to(cr, text_x, cy + static_cast<int>(24 * zf));
       cairo_show_text(cr, dev_label.c_str());
 
@@ -620,18 +612,8 @@ void draw_computer_view(AppState& app, cairo_t* cr, int content_x,
           double frac = std::min(1.0, static_cast<double>(citem.used_bytes) /
                                        static_cast<double>(citem.total_bytes));
 
-          // Track
-          cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.3);
-          draw_rounded_rect(cr, cx + static_cast<int>(14 * zf), pb_y, pb_w, kProgressBarH, static_cast<int>(3 * zf));
-          cairo_fill(cr);
-
-          // Fill
-          if (frac > 0.01) {
-            cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.85);
-            draw_rounded_rect(cr, cx + static_cast<int>(14 * zf), pb_y,
-                              static_cast<double>(pb_w) * frac, kProgressBarH, static_cast<int>(3 * zf));
-            cairo_fill(cr);
-          }
+          hui::design::bar(cr, app, cx + static_cast<int>(14 * zf), pb_y, pb_w, frac,
+                      static_cast<double>(kProgressBarH));
         } else {
           std::string usage = format_size_binary(citem.total_bytes);
           cairo_move_to(cr, cx + static_cast<int>(14 * zf), pb_y - static_cast<int>(5 * zf));
@@ -654,81 +636,15 @@ void draw_computer_view(AppState& app, cairo_t* cr, int content_x,
 // ── hit_test_computer ────────────────────────────────────────────
 
 int hit_test_computer(AppState& app, int x, int y) {
+  // Resolved through the retained hit registry (item rects stored during
+  // paint); the per-pane layout recomputation is gone, which also fixes
+  // split-view picking (the old code always used main-pane geometry).
   if (app.computer_items.empty()) return -1;
-
-  double zf = app.zoom_pct / 100.0;
-  int content_x = app.sidebar_w();
-  int content_y = app.top_bar_height + app.tab_bar_height;
-  int content_w = app.width - content_x;
-  const int kItemGap = static_cast<int>(16 * zf);
-  const int kSmallW = static_cast<int>(140 * zf);
-  const int kSmallH = static_cast<int>(140 * zf);
-  const int kLargeW = static_cast<int>(300 * zf);
-  const int kLargeH = static_cast<int>(96 * zf);
-  const int kSplitterH = static_cast<int>(44 * zf);
-  const int kDriveGap = static_cast<int>(8 * zf);
-
-  int total_small = 0, total_large = 0;
-  for (auto& ci : app.computer_items) {
-    if (ci.shape == ComputerItem::ShapeType::Small) ++total_small;
-    if (ci.shape == ComputerItem::ShapeType::Large) ++total_large;
-  }
-
-  int small_per_row = std::max(1, (content_w - kItemGap) / (kSmallW + kItemGap));
-  small_per_row = std::min(small_per_row, total_small);
-  int small_total_w = small_per_row * kSmallW;
-  int small_flex_gap = (content_w - small_total_w) / (small_per_row + 1);
-  small_flex_gap = std::max(small_flex_gap, kItemGap);
-  int small_offset_x = small_flex_gap;
-  int large_cols = std::max(1, (content_w - kItemGap) / (kLargeW + kItemGap));
-  large_cols = std::min(large_cols, total_large);
-  int actual_large_w_base = (content_w - (large_cols + 1) * kItemGap) / large_cols;
-  actual_large_w_base = std::min(actual_large_w_base, kLargeW);
-  actual_large_w_base = std::max(actual_large_w_base, static_cast<int>(240 * zf));
-  int total_drive_w = large_cols * actual_large_w_base;
-  int flex_gap = (content_w - total_drive_w) / (large_cols + 1);
-  flex_gap = std::max(flex_gap, kItemGap);
-  int large_offset_x = flex_gap;
-
-  int current_y = content_y - app.computer_scroll_px;
-  int small_drawn = 0;
-  int large_drawn = 0;
-
-  for (int i = 0; i < static_cast<int>(app.computer_items.size()); ++i) {
-    const auto& citem = app.computer_items[i];
-
-    if (citem.shape == ComputerItem::ShapeType::Splitter) {
-      if (x >= content_x && x < content_x + content_w &&
-          y >= current_y && y < current_y + kSplitterH)
-        return i;
-      current_y += kSplitterH;
-    } else if (citem.shape == ComputerItem::ShapeType::Small) {
-      int col = small_drawn % small_per_row;
-      int row = small_drawn / small_per_row;
-      int cx = content_x + small_offset_x + col * (kSmallW + small_flex_gap);
-      int cy = current_y + row * (kSmallH + kItemGap);
-      if (x >= cx && x < cx + kSmallW && y >= cy && y < cy + kSmallH)
-        return i;
-      ++small_drawn;
-      if (small_drawn >= total_small) {
-        int last_row = (total_small - 1) / small_per_row;
-        current_y = current_y + (last_row + 1) * (kSmallH + kItemGap);
-      }
-    } else if (citem.shape == ComputerItem::ShapeType::Large) {
-      int col = large_drawn % large_cols;
-      int actual_large_w = actual_large_w_base;
-      int cx = content_x + large_offset_x + col * (actual_large_w + flex_gap);
-      int cy = current_y;
-      if (x >= cx && x < cx + actual_large_w && y >= cy && y < cy + kLargeH)
-        return i;
-      ++large_drawn;
-      if (large_drawn % large_cols == 0 || large_drawn >= total_large) {
-        current_y = cy + kLargeH + kDriveGap;
-      }
-    }
-  }
-
-  return -1;
+  const uint32_t hid = app.hit_main.query(x, y);
+  if ((hid & hui::Hit::kGroupMask) != hui::Hit::kViewRow) return -1;
+  int idx = static_cast<int>(hid & hui::Hit::kIndexMask);
+  if (idx < 0 || idx >= static_cast<int>(app.computer_items.size())) return -1;
+  return idx;
 }
 
 } // namespace eh::file_browser

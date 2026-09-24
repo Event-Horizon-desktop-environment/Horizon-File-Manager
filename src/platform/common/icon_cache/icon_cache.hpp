@@ -209,6 +209,8 @@ public:
 
   // ── test/bench hooks ─────────────────────────────────────────────
   IconCacheStats stats() const;
+  // Current raster bytes held (for the memory readout).
+  std::size_t cache_bytes() const;
   bool is_negative_cached(const std::string& key) const;
   std::size_t pending_count() const;
   // Block until the background queue drains (tests/bench only).

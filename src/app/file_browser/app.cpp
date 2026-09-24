@@ -299,6 +299,10 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
   app.thumb_decodes_this_frame = 0;
   app.thumb_pending_queue.clear();
 
+  // Rebuilt below by every draw site: input reads these rects instead of
+  // re-deriving geometry (ui/hit_registry.hpp).
+  app.hit_main.clear();
+
   // Scrollbar hit rects are rebuilt by draw_scrollbar() during this frame
   app.scrollbar_rects.clear();
 
@@ -511,7 +515,7 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
     {
       cairo_save(cr);
       cairo_translate(cr, 0, content_y);
-      draw_top_bar(app, cr, left_w, pane_top_h, content_x, left_w);
+      draw_top_bar(app, cr, left_w, pane_top_h, content_y, content_x, left_w);
       cairo_restore(cr);
       int sb_lx = right_x - 10;
       if (app.cur_tab().view_mode == ViewMode::List) {
@@ -556,7 +560,7 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
     {
       cairo_save(cr);
       cairo_translate(cr, 0, content_y);
-      draw_top_bar(app, cr, right_w, pane_top_h, right_x, right_w);
+      draw_top_bar(app, cr, right_w, pane_top_h, content_y, right_x, right_w);
       cairo_restore(cr);
       int sb_rx = content_x + content_w - 10;
       if (app.cur_tab().view_mode == ViewMode::List) {
@@ -678,7 +682,7 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
 
   // Top bar
   if (top_h > 0)
-    { auto ph = phase("topbar"); draw_top_bar(app, cr, w, top_h); }
+    { auto ph = phase("topbar"); draw_top_bar(app, cr, w, top_h, 0); }
 
   // Search results banner (under top bar, above content)
   if (search_banner_on)
@@ -689,7 +693,7 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
   cairo_translate(cr, 0, top_h);
   cairo_rectangle(cr, 0, 0, w, tab_h);
   cairo_clip(cr);
-  { auto ph = phase("tabbar"); draw_tab_bar(app, cr, w, tab_h); }
+  { auto ph = phase("tabbar"); draw_tab_bar(app, cr, w, tab_h, top_h); }
   cairo_restore(cr);
 
   // Status bar
@@ -749,6 +753,24 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
 
   // Drop action chooser (Copy/Move prompt) — drawn last so it sits on top.
   if (app.drop_chooser_open) draw_drop_chooser(app, cr);
+
+  // Hit-registry debug overlay: outlines every retained region so hit
+  // recalculation can be verified visually at any window size.
+  {
+    static const bool on = [] {
+      const char* e = std::getenv("EH_HIT_DEBUG");
+      return e && *e && e[0] != '0';
+    }();
+    if (on) {
+      for (size_t i = 0; i < app.hit_main.size(); ++i) {
+        const auto& r = app.hit_main.at(i);
+        cairo_set_source_rgba(cr, 1.0, 0.2, 0.9, 0.85);
+        cairo_set_line_width(cr, 1.0);
+        cairo_rectangle(cr, r.x + 0.5, r.y + 0.5, r.w - 1, r.h - 1);
+        cairo_stroke(cr);
+      }
+    }
+  }
 
   {
     static std::atomic<bool> logged_first{false};

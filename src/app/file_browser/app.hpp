@@ -82,7 +82,7 @@ void enter_split_view(AppState& app, int src_tab_idx,
 
 /// Turn split view off. The active pane's folder survives: if the right
 /// pane was active its content is promoted into the single view
-/// (Dolphin "close active view" behavior).
+/// (the closed pane's content is promoted into the single view).
 void exit_split_view(AppState& app);
 
 /// Re-sync the right pane to the current tab after a structural tab change
@@ -268,8 +268,8 @@ void size_sidebar_to_content(AppState& app, cairo_t* cr);
 /// Byte-size formatter ("463.2 GB"); shared by the sidebar's drive rows (in
 /// features/sidebar.cpp) and draw.cpp's list/status views.
 std::string format_size(uint64_t bytes);
-void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x = 0, int pane_w = 0);
-void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int pane_x = 0, int pane_w = 0);
+void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane_x = 0, int pane_w = 0);
+void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int y0, int pane_x = 0, int pane_w = 0);
 void draw_list_view(AppState& app, cairo_t* cr, int content_x, int content_y,
                     int content_w, int view_h);
 void draw_grid_view(AppState& app, cairo_t* cr, int content_x, int content_y,
@@ -322,7 +322,7 @@ void execute_context_menu_action(AppState& app, int item_idx);
 // execute_context_menu_action calls the per-region handlers below (bool = handled,
 // exits the dispatcher), then resolves `entry` and calls execute_item_action. The
 // handlers and switcher live in separate TUs, so these are the cross-cluster decls.
-// selected_entry_paths is shared by run_nemo_script (regions) and the
+// selected_entry_paths is shared by the script runner (regions) and the
 // CopyTo*/MoveTo* switch cases (items).
 
 // Multi-selection paths (falls back to single selection); definition in
@@ -350,6 +350,7 @@ bool ctx_open(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_empty_trash(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_add_to_favorites(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_settings(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_toolbar_overflow(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_open_in_new_tab(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_tab_menu(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_open_in_new_window(AppState& app, int item_idx, AppState::ContextMenuAction action);
@@ -365,7 +366,7 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
 /// position of the current context menu; no-op when no templates exist.
 void insert_template_submenu(AppState& app, std::size_t pos);
 
-/// Inserts a "Scripts" submenu (from ~/.local/share/nemo/scripts) at the
+/// Inserts a "Scripts" submenu (user script dir, see menu.cpp) at the
 /// given position; no-op when no executable scripts exist.
 void insert_scripts_submenu(AppState& app, std::size_t pos);
 

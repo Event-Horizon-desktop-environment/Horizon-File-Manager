@@ -9,6 +9,7 @@
 #include "app/file_browser/features/tab_history/tab_history.hpp"
 #include "app/file_browser/features/tags/tags.hpp"
 #include "app/file_browser/features/view_zoom/view_zoom.hpp"
+#include "app/file_browser/features/recursive_search_worker/recursive_search_worker.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -66,7 +67,7 @@ static std::string menu_file_uri(const std::string& abs_path) {
 
 // (was `static` in context_actions.cpp)
 // Launches `script` detached (double-fork, no zombie) with the documented
-// NEMO_SCRIPT_* environment contract; selection is also passed as argv and
+// script environment contract; selection is also passed as argv and
 // the working directory is set to the current folder.
 static void run_nemo_script(AppState& app, const std::string& script_path) {
   const auto sel = selected_entry_paths(app);
@@ -518,6 +519,90 @@ bool ctx_add_to_favorites(AppState& app, int item_idx, AppState::ContextMenuActi
 bool ctx_settings(AppState& app, int item_idx, AppState::ContextMenuAction action) {
   if (action == AppState::ContextMenuAction::Settings) {
     open_settings(app);
+    draw(app);
+    return true;
+  }
+  return false;
+}
+
+// ── Overflow actions for top-bar buttons hidden by the responsive hide
+// loop in draw_top_bar() (narrow windows). The ⋮ menu
+// appends these entries only while their button is hidden, so nothing is
+// ever unreachable.
+bool ctx_toolbar_overflow(AppState& app, int item_idx, AppState::ContextMenuAction action) {
+  auto& o_search_active = app.active_pane ? app.r_search_active : app.search_active;
+  auto& o_recursive = app.active_pane ? app.r_recursive_search_active : app.recursive_search_active;
+  auto& o_query = app.active_pane ? app.r_search_query : app.search_query;
+  auto& o_rquery = app.active_pane ? app.r_recursive_search_query : app.recursive_search_query;
+  auto& o_cursor = app.active_pane ? app.r_search_cursor : app.search_cursor;
+  auto& o_sel_start = app.active_pane ? app.r_search_sel_start : app.search_sel_start;
+  auto& o_sel_end = app.active_pane ? app.r_search_sel_end : app.search_sel_end;
+
+  if (action == AppState::ContextMenuAction::ToolbarSearchFolder) {
+    if (o_search_active) {
+      reset_search_filters(app);
+      o_search_active = false;
+      o_recursive = false;
+      o_query.clear();
+      o_rquery.clear();
+      recursive_search_worker().cancel();
+      reload_dir(app);
+    } else {
+      o_recursive = false;
+      o_search_active = true;
+      o_query.clear();
+      o_rquery.clear();
+      recursive_search_worker().cancel();
+      o_cursor = 0;
+      o_sel_start = -1;
+      o_sel_end = -1;
+    }
+    (app.active_pane ? app.r_path_editing : app.path_editing) = false;
+    draw(app);
+    return true;
+  }
+  if (action == AppState::ContextMenuAction::ToolbarSearchHome) {
+    if (o_recursive) {
+      reset_search_filters(app);
+      o_recursive = false;
+      o_search_active = false;
+      o_query.clear();
+      o_rquery.clear();
+      recursive_search_worker().cancel();
+      reload_dir(app);
+    } else {
+      o_search_active = false;
+      o_recursive = true;
+      o_query.clear();
+      o_rquery.clear();
+      recursive_search_worker().cancel();
+      o_cursor = 0;
+      o_sel_start = -1;
+      o_sel_end = -1;
+    }
+    (app.active_pane ? app.r_path_editing : app.path_editing) = false;
+    draw(app);
+    return true;
+  }
+  if (action == AppState::ContextMenuAction::ToolbarCycleView) {
+    auto cur = app.cur_tab().view_mode;
+    if (cur == ViewMode::List) app.cur_tab().view_mode = ViewMode::Grid;
+    else if (cur == ViewMode::Grid) app.cur_tab().view_mode = ViewMode::Compact;
+    else if (cur == ViewMode::Compact) app.cur_tab().view_mode = ViewMode::Tree;
+    else app.cur_tab().view_mode = ViewMode::List;
+    app.last_browser_view_mode = app.cur_tab().view_mode;
+    save_file_browser_settings(app);
+    draw(app);
+    return true;
+  }
+  if (action == AppState::ContextMenuAction::ToolbarSortMenu) {
+    bool was_open = app.active_pane ? app.r_sort_menu_open : app.sort_menu_open;
+    app.r_sort_menu_open = false;
+    app.sort_menu_open = false;
+    if (!was_open)
+      (app.active_pane ? app.r_sort_menu_open : app.sort_menu_open) = true;
+    (app.active_pane ? app.r_sort_menu_hover : app.sort_menu_hover) = -1;
+    (app.active_pane ? app.r_sort_menu_scroll : app.sort_menu_scroll) = 0;
     draw(app);
     return true;
   }

@@ -107,7 +107,7 @@ cairo_surface_t* thumb_decode_sync(const std::string& path, int size,
   return s;
 }
 
-// Paint-path rule (Dolphin/Nemo): NEVER decode here. Cache hit returns the
+// Paint-path rule: NEVER decode here. Cache hit returns the
 // surface; a miss queues background decoding and draws the generic icon
 // this frame. The frame loop installs finished surfaces between paints.
 cairo_surface_t* get_thumbnail_lazy(AppState& app, int vi,

@@ -7,6 +7,8 @@
 #include "app/file_browser/app.hpp"
 #include "app/file_browser/features/sidebar/sidebar.hpp"
 #include "app/file_browser/trace.hpp"
+#include "ui/hit.hpp"
+#include "ui/design.hpp"
 
 #include "services/udisks2/drive_filter.hpp"
 #include "services/udisks2/udisks2_drive_service.hpp"
@@ -186,6 +188,10 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
 
     int sb_margin = static_cast<int>(8.0 * zf); // px-4 in HTML
 
+    // Retained hit region (single source of truth for input; the rect is
+    // the row's full width so edge-to-edge clicks work — see hit_registry).
+    app.hit_main.add(hui::Hit::sidebar_row(idx), 0, y, sidebar_w, item_h);
+
     if (drop_target) {
       double pulse = 0.16 + 0.06 * std::sin(
           std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -196,7 +202,7 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
       cairo_fill(cr);
       app.pendingRedraw = true;
     } else if (hovered) {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.14);
       draw_rounded_rect(cr, sb_margin, y, sidebar_w - sb_margin * 2, item_h,
                         static_cast<int>(12.0 * zf)); // rounded-2xl
       cairo_fill(cr);
@@ -308,19 +314,7 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
     // Drives leave room for the mount indicator; other rows a small margin.
     int max_label_w = sidebar_w - label_x -
                       static_cast<int>((is_drive_kind ? 40.0 : 14.0) * zf);
-    std::string shown = loc.label;
-    {
-      cairo_text_extents_t te;
-      cairo_text_extents(cr, shown.c_str(), &te);
-      if (te.x_advance > max_label_w) {
-        while (!shown.empty()) {
-          cairo_text_extents(cr, (shown + "...").c_str(), &te);
-          if (te.x_advance <= max_label_w) break;
-          shown.pop_back();
-        }
-        shown += "...";
-      }
-    }
+    std::string shown = hui::design::clip_end(cr, loc.label, max_label_w);
     cairo_move_to(cr, label_x,
                   y + main_row_h / 2 + static_cast<int>(4.0 * zf));
     cairo_show_text(cr, shown.c_str());
@@ -364,20 +358,9 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
 
       // Usage text (elided to the bar width)
       uint64_t used = loc.total_bytes - loc.free_bytes;
-      std::string usage_text = format_size(used) + " / " + format_size(loc.total_bytes);
-      {
-        cairo_text_extents_t ute;
-        cairo_text_extents(cr, usage_text.c_str(), &ute);
-        if (ute.x_advance > bar_w) {
-          while (!usage_text.empty()) {
-            cairo_text_extents(cr, (usage_text + "...").c_str(), &ute);
-            if (ute.x_advance <= bar_w) break;
-            usage_text.pop_back();
-          }
-          usage_text += "...";
-        }
-      }
       cairo_set_font_size(cr, 10.0 * zf);
+      std::string usage_text = hui::design::clip_end(
+          cr, format_size(used) + " / " + format_size(loc.total_bytes), bar_w);
       cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                              app.text_secondary_b, 0.8);
       cairo_move_to(cr, bar_x, bar_y - static_cast<int>(4.0 * zf));
@@ -386,18 +369,7 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
       double frac = std::min(1.0, static_cast<double>(used) /
                                    static_cast<double>(loc.total_bytes));
 
-      // Track
-      cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.3);
-      draw_rounded_rect(cr, bar_x, bar_y, bar_w, bar_h, static_cast<int>(2.0 * zf));
-      cairo_fill(cr);
-
-      // Fill
-      if (frac > 0.01) {
-        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.85);
-        draw_rounded_rect(cr, bar_x, bar_y, static_cast<double>(bar_w) * frac,
-                          bar_h, static_cast<int>(2.0 * zf));
-        cairo_fill(cr);
-      }
+      hui::design::bar(cr, app, bar_x, bar_y, bar_w, frac, static_cast<double>(bar_h));
     }
 
     y += item_h;
@@ -523,6 +495,7 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
     draw_divider();
     draw_header("FAVORITES");
     int item_h = static_cast<int>(36.0 * zf);
+    app.hit_main.add(hui::Hit::kSidebarFavAdd, 0, y, sidebar_w, item_h);
     cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.20);
     int sb_margin = static_cast<int>(6.0 * zf);
     draw_rounded_rect(cr, sb_margin, y, sidebar_w - sb_margin * 2, item_h, sb_margin);
@@ -548,7 +521,12 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
       draw_item(i);
   }
 }
+
 int hit_test_sidebar(AppState& app, int x, int y) {
+  // Resolved through the retained hit registry (rects stored during paint),
+  // never re-derived here: sidebar geometry cannot drift (see
+  // ui/hit_registry.hpp). Only the chrome bounds below are checked
+  // directly; rows come from the registry.
   int side_w = app.effective_sidebar_width();
   if (side_w <= 0) return -1;
   if (x < 0 || x >= side_w) return -1;
@@ -560,74 +538,12 @@ int hit_test_sidebar(AppState& app, int x, int y) {
       y0 >= app.height - app.status_bar_height - top)
     return -1;
 
-  double zf = 1.2;
-  int total = static_cast<int>(app.sidebar_locations.size());
-
-  // Section boundaries (must match draw_sidebar)
-  int places_end = 0;
-  while (places_end < total &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Favorite &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Root &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Drive)
-    ++places_end;
-
-  int fav_start = places_end;
-  while (fav_start < total &&
-         app.sidebar_locations[fav_start].kind == SidebarLocation::Kind::Favorite)
-    ++fav_start;
-
-  int drives_start = fav_start;
-  int fav_count = fav_start - places_end;
-  int drive_count = total - drives_start;
-
-  int padding = static_cast<int>(24.0 * zf);
-  int header_h = static_cast<int>(24.0 * zf);
-  int item_h = static_cast<int>(36.0 * zf);
-  int div_pad = static_cast<int>(16.0 * zf);
-  int div_total = div_pad + 1 + div_pad;
-
-  int rel_y = y0 + app.sidebar_scroll_px;
-
-  // ── PLACES header ──
-  if (rel_y < padding + header_h) return -1;
-  int pos = rel_y - padding - header_h;
-
-  // ── Places items ──
-  if (pos < places_end * item_h)
-    return pos / item_h;
-
-  if (places_end >= total) return -1;
-
-  // ── Favorites section ──
-  if (fav_count > 0) {
-    pos -= places_end * item_h + div_total + header_h;
-
-    // Favorites items
-    if (pos >= 0 && pos < fav_count * item_h)
-      return places_end + pos / item_h;
-
-    // Skip divider + DRIVES header
-    pos -= fav_count * item_h + div_total + header_h;
-  } else {
-    // No favorites — skip divider + DRIVES header
-    pos -= places_end * item_h + div_total + header_h;
-  }
-
-  // ── Drives items (variable height: drives with usage data are taller) ──
-  if (pos >= 0) {
-    for (int i = drives_start; i < total; ++i) {
-      const auto& loc = app.sidebar_locations[i];
-      int dih = item_h;
-      if ((loc.kind == SidebarLocation::Kind::Drive ||
-           loc.kind == SidebarLocation::Kind::Root) &&
-          loc.total_bytes > 0 && loc.is_mounted)
-        dih += static_cast<int>(16.0 * zf);
-      if (pos < dih) return i;
-      pos -= dih;
-    }
-  }
-
-  return -1;
+  uint32_t hid = app.hit_main.query(x, y);
+  if ((hid & hui::Hit::kGroupMask) != hui::Hit::kSidebarRow) return -1;
+  int idx = static_cast<int>(hid & hui::Hit::kIndexMask);
+  if (idx < 0 || idx >= static_cast<int>(app.sidebar_locations.size()))
+    return -1;
+  return idx;
 }
 bool hit_test_fav_section(AppState& app, int x, int y) {
   int side_w = app.effective_sidebar_width();
@@ -949,7 +865,7 @@ void refresh_sidebar(AppState& app) {
       }
     }
     if (label.empty()) {
-      // ISO loop without a volume label: show the image filename (Dolphin-style).
+      // ISO loop without a volume label: show the image filename.
       std::string backing = drives::iso_loop_backing_file(d.device);
       if (!backing.empty()) {
         auto slash = backing.find_last_of('/');
@@ -1091,10 +1007,12 @@ void paint_sidebar_flap(AppState& app, cairo_t* cr, int w, int h, int view_h,
 // ── input ────────────────────────────────────────────────────────
 
 bool sidebar_toggle_hit(AppState& app, int x, int y) {
-  return app.sidebar_folded && app.sidebar_toggle_w > 0 &&
-         x >= app.sidebar_toggle_x &&
-         x < app.sidebar_toggle_x + app.sidebar_toggle_w &&
-         y < app.top_bar_height;
+  // Resolved through the retained hit registry (rect stored during paint);
+  // no geometry is re-derived here.
+  if (!app.sidebar_folded) return false;
+  const uint32_t hid = app.hit_main.query(x, y);
+  return hid == hui::Hit::topbar(0, hui::Hit::kTopFoldToggle) ||
+         hid == hui::Hit::topbar(1, hui::Hit::kTopFoldToggle);
 }
 
 void toggle_sidebar_flap(AppState& app) {
@@ -1105,7 +1023,7 @@ void toggle_sidebar_flap(AppState& app) {
 void dismiss_sidebar_flap(AppState& app, int x, int y) {
   // The flap is a transient overlay: clicking anywhere outside the flap
   // closes it. The click is still processed normally (it acts on whatever
-  // was clicked), matching the Nautilus AdwFlap behavior.
+  // was clicked), matching the flap overlay behavior.
   if (!(app.sidebar_folded && app.sidebar_folded_revealed)) return;
   int o_w = app.effective_sidebar_width();
   bool on_toggle = sidebar_toggle_hit(app, x, y);

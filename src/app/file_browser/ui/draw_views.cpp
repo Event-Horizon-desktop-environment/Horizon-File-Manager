@@ -31,6 +31,7 @@
 #include <unistd.h>
 
 #include "draw_helpers.hpp"
+#include "ui/design.hpp"
 #include "draw_file_icons.hpp"
 #include "draw_thumbnails.hpp"
 #include "layout.hpp"
@@ -105,7 +106,7 @@ static void draw_column_header(AppState& app, cairo_t* cr, int x, int y, int w, 
 
 // ── draw_tab_bar ─────────────────────────────────────────────────
 
-void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int pane_x, int pane_w) {
+void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int y0, int pane_x, int pane_w) {
   double zf = app.zoom_pct / 100.0;
 
   int tab_count = static_cast<int>(app.tabs.size());
@@ -174,23 +175,12 @@ void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int pane_x, int 
     // Elide the label into its allotted share of the bar
     {
       int budget = tab_w - pad * 3 - close_w;
-      cairo_text_extents_t te;
-      cairo_text_extents(cr, tab_labels[i].c_str(), &te);
-      if (static_cast<int>(te.x_advance) > budget && budget > 20) {
-        std::string s = tab_labels[i];
-        while (!s.empty()) {
-          cairo_text_extents(cr, (s + "...").c_str(), &te);
-          if (static_cast<int>(te.x_advance) <= budget) break;
-          s.pop_back();
-        }
-        s += "...";
-        tab_labels[i] = s;
-      }
+      if (budget > 20) tab_labels[i] = hui::design::clip_end(cr, tab_labels[i], budget);
     }
 
     bool active = (i == app.active_tab);
 
-    // Active tab glass effect
+    // Active tab: elevated fill + accent underline (segmented-control language)
     if (active) {
       int r = static_cast<int>(12.0 * zf);
       int m = static_cast<int>(1.0 * zf);
@@ -198,17 +188,12 @@ void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int pane_x, int 
       int t = m;
       int rw = tab_w - m * 2;
       int rh = tab_h - 1 - m * 2;
-      cairo_new_path(cr);
-      cairo_arc(cr, l + r, t + r, r, M_PI, 1.5 * M_PI);
-      cairo_arc(cr, l + rw - r, t + r, r, 1.5 * M_PI, 2.0 * M_PI);
-      cairo_arc(cr, l + rw - r, t + rh - r, r, 0.0, 0.5 * M_PI);
-      cairo_arc(cr, l + r, t + rh - r, r, 0.5 * M_PI, M_PI);
-      cairo_close_path(cr);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.15);
-      cairo_fill_preserve(cr);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.4);
-      cairo_set_line_width(cr, 1.5);
-      cairo_stroke(cr);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.10);
+      draw_rounded_rect(cr, l, t, rw, rh, r);
+      cairo_fill(cr);
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.9);
+      draw_rounded_rect(cr, l + 14, t + rh - 3, rw - 28, 2, 1);
+      cairo_fill(cr);
     }
 
     // Drop target glow on tab header (during file drag)
@@ -265,10 +250,14 @@ void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int pane_x, int 
       cairo_paint_with_alpha(cr, 0.35);
     }
 
-    // Store hit rect
+    // Store hit rect + register the retained region (single source of
+    // truth for input; see ui/hit_registry.hpp).
     app.tab_hits[i].x = x;
     app.tab_hits[i].w = tab_w;
     app.tab_hits[i].close_x = close_x;
+    app.hit_main.add(hui::Hit::tab(i), x, y0, tab_w, tab_h);
+    if (close_x < x + tab_w)
+      app.hit_main.add(hui::Hit::tab_close(i), close_x, y0, x + tab_w - close_x, tab_h);
 
     x += tab_w;
   }
@@ -351,6 +340,14 @@ void draw_list_view(AppState& app, cairo_t* cr, int content_x,
                       app.col_resizing == 1 || app.col_hover_divider);
   draw_column_header(app, cr, date_x, content_y, date_w, entry_h, "Date",
                       app.col_resizing == 2 || app.col_hover_divider);
+  app.hit_main.add(hui::Hit::kHeaderSeg + 0, name_x, content_y, name_w, entry_h);
+  app.hit_main.add(hui::Hit::kHeaderSeg + 1, size_x, content_y, size_w, entry_h);
+  app.hit_main.add(hui::Hit::kHeaderSeg + 2, date_x, content_y, own_x - date_x, entry_h);
+  app.hit_main.add(hui::Hit::kHeaderSeg + 3, date_x + date_w, content_y,
+                   content_x + content_w - (date_x + date_w), entry_h);
+  app.hit_main.add(hui::Hit::kHeaderDiv + 0, size_x - 4, content_y, 8, entry_h);
+  app.hit_main.add(hui::Hit::kHeaderDiv + 1, date_x - 4, content_y, 8, entry_h);
+  app.hit_main.add(hui::Hit::kHeaderDiv + 2, date_x + date_w - 4, content_y, 8, entry_h);
   if (app.col_show_type) {
     draw_column_header(app, cr, type_x, content_y, type_w, entry_h, "Type",
                         app.col_resizing == 3 || app.col_hover_divider);
@@ -399,6 +396,8 @@ void draw_list_view(AppState& app, cairo_t* cr, int content_x,
       }
     }
 
+    app.hit_main.add(hui::Hit::view_row(vi), content_x, y, content_w, entry_h);
+
     if (y + entry_h < content_y) { y += entry_h; continue; }
     if (y > content_y + view_h) break;
 
@@ -411,26 +410,30 @@ void draw_list_view(AppState& app, cairo_t* cr, int content_x,
                        vi == app.drop_target_idx && entry.is_dir;
     bool is_cut = !app.cut_paths.empty() && app.cut_paths.count(entry.path);
 
+    // M3 active indicator: accent pill, inset with rounded ends.
     if (selected) {
       cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
-                             0.25);
-      cairo_rectangle(cr, content_x, y, content_w, entry_h);
+                             0.16);
+      draw_rounded_rect(cr, content_x + 4, y + 2, content_w - 8, entry_h - 4,
+                        static_cast<int>(8.0 * zf));
       cairo_fill(cr);
     } else if (drop_target) {
       double pulse = 0.18 + 0.07 * std::sin(
           std::chrono::duration_cast<std::chrono::milliseconds>(
               std::chrono::steady_clock::now().time_since_epoch()).count() * 0.006);
       cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, pulse);
-      cairo_rectangle(cr, content_x, y, content_w, entry_h);
+      draw_rounded_rect(cr, content_x + 4, y + 2, content_w - 8, entry_h - 4,
+                        static_cast<int>(8.0 * zf));
       cairo_fill(cr);
       app.pendingRedraw = true;
     } else if (hovered) {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.06);
-      cairo_rectangle(cr, content_x, y, content_w, entry_h);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
+      draw_rounded_rect(cr, content_x + 4, y + 2, content_w - 8, entry_h - 4,
+                        static_cast<int>(8.0 * zf));
       cairo_fill(cr);
     }
 
-    // Cut indicator: dashed border on cut files (GNOME 49 style)
+    // Cut indicator: dashed border on cut files
     if (is_cut) {
       cairo_save(cr);
       double dash_len = 5.0;
@@ -464,31 +467,7 @@ void draw_list_view(AppState& app, cairo_t* cr, int content_x,
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
     cairo_move_to(cr, text_x, y + entry_h / 2 + 4);
 
-    std::string display_name = entry.name;
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, display_name.c_str(), &te);
-    if (te.width > name_w - 20) {
-      std::string ext;
-      auto dot = display_name.rfind('.');
-      if (dot != std::string::npos && dot > 0) {
-        ext = display_name.substr(dot);
-        display_name = display_name.substr(0, dot);
-      }
-      if (ext.empty()) {
-        while (!display_name.empty() && te.width > name_w - 24) {
-          display_name.pop_back();
-          cairo_text_extents(cr, (display_name + "...").c_str(), &te);
-        }
-        display_name += "...";
-      } else {
-        while (!display_name.empty()) {
-          cairo_text_extents(cr, (display_name + "..." + ext).c_str(), &te);
-          if (te.width <= name_w - 24) break;
-          display_name.pop_back();
-        }
-        display_name += "..." + ext;
-      }
-    }
+    std::string display_name = hui::design::clip_keep_ext(cr, entry.name, name_w - 20);
     cairo_show_text(cr, display_name.c_str());
 
     if (!entry.is_dir) {
@@ -819,6 +798,8 @@ void draw_grid_view(AppState& app, cairo_t* cr, int content_x,
     int cx = content_x + grid_offset_x + col * (cell_w + col_gap);
     int cy = y + row * row_h + group_extra;
 
+    app.hit_main.add(hui::Hit::view_row(vi), cx, cy, cell_w, item_h);
+
     if (cy + item_h < content_y) continue;
     if (cy > content_y + view_h) break;
     // Strip mode (scroll-delta reuse): draw only band-intersecting cells.
@@ -854,12 +835,12 @@ void draw_grid_view(AppState& app, cairo_t* cr, int content_x,
       // bottom inset actually reach the text.
       const int overlay_h = item_h - 4; // 2px inset on both sides
       if (selected) {
-        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.15);
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
         draw_rounded_rect(cr, cx + 4, cy + 2, cell_w - 8, overlay_h,
                           static_cast<int>(8.0 * zf));
         cairo_fill(cr);
-        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.45);
-        cairo_set_line_width(cr, 2.0);
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.6);
+        cairo_set_line_width(cr, 1.5);
         draw_rounded_rect(cr, cx + 4, cy + 2, cell_w - 8, overlay_h,
                           static_cast<int>(8.0 * zf));
         cairo_stroke(cr);
@@ -875,13 +856,13 @@ void draw_grid_view(AppState& app, cairo_t* cr, int content_x,
         app.pendingRedraw = true;
       } else if (hovered) {
         // Cover the whole cell (icon + label), not just the icon.
-        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.06);
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
         draw_rounded_rect(cr, cx + 4, cy + 2, cell_w - 8, overlay_h,
                           static_cast<int>(8.0 * zf));
         cairo_fill(cr);
       }
 
-      // Cut indicator: dashed border on cut files (GNOME 49 style)
+      // Cut indicator: dashed border on cut files
       if (is_cut) {
         cairo_save(cr);
         double dash_len = 5.0;
@@ -1063,6 +1044,10 @@ void draw_tree_view(AppState& app, cairo_t* cr, int content_x,
     auto& te = app.cur_tab().tree_entries[vi];
     int indent = te.depth * indent_step;
 
+    app.hit_main.add(hui::Hit::view_row(vi), content_x, y, content_w, entry_h);
+    app.hit_main.add(hui::Hit::view_arrow(vi), content_x + indent + 4, y + (entry_h - arrow_w) / 2,
+                     arrow_w, arrow_w);
+
     if (y + entry_h < content_y) { y += entry_h; continue; }
     if (y > content_y + view_h) break;
 
@@ -1073,17 +1058,17 @@ void draw_tree_view(AppState& app, cairo_t* cr, int content_x,
                     te.path == app.cur_tab().tree_selected_path;
     bool hovered = vi == app.cur_tab().hover_idx;
 
+    // M3 active indicator: accent pill, inset with rounded ends.
     if (selected) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.25);
-      cairo_rectangle(cr, content_x, y, content_w, entry_h);
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
+      draw_rounded_rect(cr, content_x + 4, y + 2, content_w - 8, entry_h - 4, 8);
       cairo_fill(cr);
     } else if (hovered) {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.06);
-      cairo_rectangle(cr, content_x, y, content_w, entry_h);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
+      draw_rounded_rect(cr, content_x + 4, y + 2, content_w - 8, entry_h - 4, 8);
       cairo_fill(cr);
     }
-
-    // Branch guide lines (Dolphin-style tree decoration): a faint spine in
+    // Branch guide lines: a faint spine in
     // each ancestor's expander column, elbowing into this row. kGuideFull
     // passes through (├), kGuideLast terminates at the midline (└).
     if (!te.guides.empty()) {
@@ -1123,7 +1108,7 @@ void draw_tree_view(AppState& app, cairo_t* cr, int content_x,
     }
 
     // Expand/collapse chevron for directories.
-    // Matches the Nautilus/Dolphin/Nemo design language: a thin stroked
+    // A thin stroked
     // chevron (pan-end/pan-down symbolic style) that rotates 90° between
     // states, dimmed at rest and brightening to full when the row is hot.
     // Pure cairo geometry, so it can't blank out on missing font glyphs the
@@ -1163,17 +1148,7 @@ void draw_tree_view(AppState& app, cairo_t* cr, int content_x,
     cairo_set_font_size(cr, 13.0 * zf);
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
     cairo_move_to(cr, text_x, y + entry_h / 2 + 4);
-    std::string display = te.name;
-    cairo_text_extents_t te2;
-    cairo_text_extents(cr, display.c_str(), &te2);
-    if (te2.width > content_w - (text_x - content_x) - 10) {
-      while (!display.empty()) {
-        cairo_text_extents(cr, (display + "...").c_str(), &te2);
-        if (te2.width <= content_w - (text_x - content_x) - 10) break;
-        display.pop_back();
-      }
-      display += "...";
-    }
+    std::string display = hui::design::clip_end(cr, te.name, content_w - (text_x - content_x) - 10);
     cairo_show_text(cr, display.c_str());
 
     y += entry_h;
@@ -1224,6 +1199,8 @@ void draw_compact_view(AppState& app, cairo_t* cr, int content_x,
       }
     }
 
+    app.hit_main.add(hui::Hit::view_row(vi), content_x, y, content_w, entry_h);
+
     if (y + entry_h < content_y) { y += entry_h; continue; }
     if (y > content_y + view_h) break;
 
@@ -1233,13 +1210,16 @@ void draw_compact_view(AppState& app, cairo_t* cr, int content_x,
                         != app.cur_tab().multi_selected.end();
     bool hovered = vi == app.cur_tab().hover_idx;
 
+    // M3 active indicator: accent pill, inset with rounded ends.
     if (selected) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.25);
-      cairo_rectangle(cr, content_x, y, content_w, entry_h);
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
+      draw_rounded_rect(cr, content_x + 4, y + 2, content_w - 8, entry_h - 4,
+                        static_cast<int>(8.0 * zf));
       cairo_fill(cr);
     } else if (hovered) {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.06);
-      cairo_rectangle(cr, content_x, y, content_w, entry_h);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
+      draw_rounded_rect(cr, content_x + 4, y + 2, content_w - 8, entry_h - 4,
+                        static_cast<int>(8.0 * zf));
       cairo_fill(cr);
     }
 
@@ -1257,17 +1237,8 @@ void draw_compact_view(AppState& app, cairo_t* cr, int content_x,
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
     cairo_move_to(cr, text_x, y + entry_h / 2 + 4);
 
-    std::string display = entry.name;
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, display.c_str(), &te);
-    if (te.width > content_w - (text_x - content_x) - 6) {
-      while (!display.empty()) {
-        cairo_text_extents(cr, (display + "...").c_str(), &te);
-        if (te.width <= content_w - (text_x - content_x) - 6) break;
-        display.pop_back();
-      }
-      display += "...";
-    }
+    std::string display = hui::design::clip_end(cr, entry.name, content_w - (text_x - content_x) - 6);
+    cairo_move_to(cr, text_x, y + entry_h / 2 + 4);
     cairo_show_text(cr, display.c_str());
 
     y += entry_h;

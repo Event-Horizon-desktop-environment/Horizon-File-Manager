@@ -1,7 +1,7 @@
 #pragma once
 
 // Shared drive/partition filtering logic for sidebar and computer view.
-// Follows KDE Dolphin / udisks2 conventions for hiding system partitions.
+// Follows udisks2 conventions for hiding system partitions.
 
 #include <cstdint>
 #include <cstdio>
@@ -47,7 +47,7 @@ inline bool is_hidden_device(const std::string& device) {
 }
 
 // ── ISO loop exemption ─────────────────────────────────────────────
-// Mounted ISOs must show as drives in the sidebar (Dolphin-style), so loop
+// Mounted ISOs must show as drives in the sidebar, so loop
 // devices backed by .iso/.img/.udf files are exempt from the loop hide rule.
 // Snap squashfs loops (backing *.snap) stay hidden.
 inline std::string iso_loop_backing_file(const std::string& device) {
@@ -248,7 +248,7 @@ inline std::string disk_device_from_partition(const std::string& device) {
 }
 
 /// Check if a device should be hidden from the file manager sidebar/computer view.
-/// Follows KDE Dolphin / udisks2 filtering conventions.
+/// Follows udisks2 filtering conventions.
 inline bool should_hide_drive(const std::string& device,
                               const std::string& mount_point = {},
                               const std::string& fs_type = {},

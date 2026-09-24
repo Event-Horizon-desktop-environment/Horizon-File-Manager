@@ -50,10 +50,9 @@ void scan_terminal_apps(AppState& app) {
 
 // ── terminal workdir flags ───────────────────────────────────────
 //
-// Many terminals (Konsole, GNOME Terminal, Xfce4 Terminal) ignore the
-// inherited working directory and always start in $HOME.  We need to
-// pass an explicit flag.  This table mirrors what KDE's
-// KTerminalLauncherJob uses internally.
+// Many terminals ignore the inherited working directory and always
+// start in $HOME, so an explicit flag is passed. This table records the
+// per-terminal flag.
 
 struct TerminalInfo {
   const char* stem;

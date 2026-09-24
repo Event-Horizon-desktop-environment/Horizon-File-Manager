@@ -362,6 +362,33 @@ pixblit_test = executable(
 
 test('pixblit', pixblit_test)
 
+hit_registry_test = executable(
+  'test_hit_registry',
+  'tests/test_hit_registry.cpp',
+  include_directories: inc,
+  cpp_args: test_cpp_args,
+)
+
+test('hit_registry', hit_registry_test)
+
+layout_test = executable(
+  'test_layout',
+  'tests/test_layout.cpp',
+  include_directories: inc,
+  cpp_args: test_cpp_args,
+)
+
+test('layout', layout_test)
+
+actions_test = executable(
+  'test_actions',
+  'tests/test_actions.cpp',
+  include_directories: inc,
+  cpp_args: test_cpp_args,
+)
+
+test('actions', actions_test)
+
 # Extraction toolchain stress: byte-identity across unzip/7z/bsdtar on a
 # many-file fixture (or $REFII_ZIP when set). Headless, skips (77) if tools
 # are missing.

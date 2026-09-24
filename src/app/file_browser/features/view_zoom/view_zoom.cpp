@@ -40,7 +40,7 @@ void apply_zoom_pct(AppState& app, double pct) {
   // Chrome must scale with its (zoom-scaled) contents so nothing overflows
   // and every hit zone stays aligned with what was drawn.
   app.top_bar_height =
-      std::max(40, static_cast<int>(std::lround(56.0 * app.zoom_pct / 100.0)));
+      std::max(40, static_cast<int>(std::lround(48.0 * app.zoom_pct / 100.0)));
   app.status_bar_height =
       std::max(30, static_cast<int>(std::lround(44.0 * app.zoom_pct / 100.0)));
   app.select_bar_h =

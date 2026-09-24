@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "draw_helpers.hpp"
+#include "ui/design.hpp"
 #include "draw_file_icons.hpp"
 #include "draw_thumbnails.hpp"
 #include "layout.hpp"
@@ -78,25 +79,7 @@ void draw_drop_chooser(AppState& app, cairo_t* cr) {
   int cy = g.y;
   int w = g.w;
 
-  // Drop shadow (3 layers, lighter than the context menu)
-  for (int s = 3; s >= 0; --s) {
-    double a = 0.12 * (1.0 - s / 4.0);
-    cairo_set_source_rgba(cr, 0, 0, 0, a);
-    draw_rounded_rect(cr, cx + s * 2.5, cy + s * 3, w, kChooserH, 10);
-    cairo_fill(cr);
-  }
-
-  // Card background
-  double tr, tg, tb;
-  wallpaper_tint_surface(app, kPopupWallpaperTint, tr, tg, tb);
-  cairo_set_source_rgba(cr, tr, tg, tb, 1.0);
-  draw_rounded_rect(cr, cx, cy, w, kChooserH, 10);
-  cairo_fill_preserve(cr);
-
-  // Border
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.30);
-  cairo_set_line_width(cr, 1);
-  cairo_stroke(cr);
+  draw_dialog_card(app, cr, cx, cy, w, kChooserH, 12);
 
   int ry = cy;
 
@@ -117,22 +100,17 @@ void draw_drop_chooser(AppState& app, cairo_t* cr) {
 
   // Separator
   ry += 4;
-  cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.18);
-  cairo_set_line_width(cr, 1);
-  cairo_move_to(cr, cx + 14, ry + 0.5);
-  cairo_line_to(cr, cx + w - 14, ry + 0.5);
-  cairo_stroke(cr);
+  hui::design::hairline(cr, app, cx, ry, w);
   ry += 5;
 
   // Action rows: 0 = copy, 1 = move
   static const char* kDropActions[2] = {"Copy here", "Move here"};
   for (int i = 0; i < 2; ++i) {
     bool hovered = (i == app.drop_chooser_hover);
+    app.hit_main.add(hui::Hit::menu(hui::Hit::kMenuDrop, i), cx, ry, w, kChooserRowH);
 
     if (hovered) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.14);
-      draw_rounded_rect(cr, cx + 5, ry + 2, w - 10, kChooserRowH - 4, 6);
-      cairo_fill(cr);
+      hui::design::row_hover(cr, app, cx + 6, ry + 2, w - 12, kChooserRowH - 4);
     }
 
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
@@ -150,13 +128,14 @@ void draw_drop_chooser(AppState& app, cairo_t* cr) {
 }
 
 int hit_test_drop_chooser(const AppState& app, int x, int y) {
+  // Resolved through the retained hit registry (row rects stored during
+  // paint); the chooser geometry math is gone.
   if (!app.drop_chooser_open) return -1;
-  const DropChooserGeometry g = drop_chooser_geometry(app);
-  if (x < g.x || x >= g.x + g.w || y < g.y || y >= g.y + g.h)
+  const uint32_t hid = app.hit_main.query(x, y);
+  if ((hid & hui::Hit::kGroupMask) != hui::Hit::kMenu ||
+      hui::Hit::menu_id(hid) != hui::Hit::kMenuDrop)
     return -1;
-  int rel_y = y - g.y;
-  if (rel_y < kChooserHeaderH + kChooserSepH) return -1;
-  int row = (rel_y - kChooserHeaderH - kChooserSepH) / kChooserRowH;
+  int row = hui::Hit::menu_row(hid);
   if (row < 0 || row > 1) return -1;
   return row;
 }

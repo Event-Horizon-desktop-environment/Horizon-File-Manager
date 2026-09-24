@@ -346,7 +346,7 @@ std::string UDisks2DriveService::mount_iso(const std::string& iso_path) {
     if (!existing.empty()) return proc_mountpoint_for(existing);
   }
 
-  // Native UDisks2 LoopSetup with fd passing (read-only, like Dolphin -r).
+  // Native UDisks2 LoopSetup with fd passing (read-only).
   // Note: sdbus::UnixFd(int) duplicates the fd, so the original stays ours
   // to close; unique_fd below also closes it on the throw path.
   try {

@@ -19,6 +19,9 @@
 
 #include "platform/common/icon_cache/icon_cache.hpp"
 
+#include "ui/design.hpp"
+#include "ui/hit.hpp"
+
 namespace fs = std::filesystem;
 
 namespace eh::file_browser {
@@ -51,10 +54,11 @@ static void draw_house_icon(cairo_t* cr, int x, int y, int size) {
 // it's preredered to a cache surface (per pane slot) and blitted each frame.
 static void draw_pill_into(cairo_t* cr, const AppState& app,
                            int px, int py, int pw, int ph) {
-  double zf = app.zoom_pct / 100.0;
-  int bar_radius = static_cast<int>(12.0 * zf);
+  // Full-stadium glass pill (M3 SearchBar shape) with the original
+  // translucent Tahoe-style glass rendering.
+  int bar_radius = ph / 2;
 
-  // Base fill: dark translucent (Tahoe headerbar-ish), high see-through so the inner glass shows
+  // Base fill: dark translucent, high see-through so the inner glass shows
   cairo_pattern_t* grad = cairo_pattern_create_linear(0, py, 0, py + ph);
   cairo_pattern_add_color_stop_rgba(grad, 0.0, app.surface_r, app.surface_g, app.surface_b, 0.30);
   cairo_pattern_add_color_stop_rgba(grad, 1.0, app.bg_r, app.bg_g, app.bg_b, 0.30);
@@ -132,7 +136,6 @@ static void draw_pill_into(cairo_t* cr, const AppState& app,
 static void draw_top_bar_pill(AppState& app, cairo_t* cr,
                               int px, int py, int pw, int ph, int slot) {
   if (pw <= 0 || ph <= 0) return;
-  double zf = app.zoom_pct / 100.0;
 
   std::uint64_t seed = 0x9e3779b97f4a7c15ULL;
   auto mix = [&seed](double v) {
@@ -147,7 +150,8 @@ static void draw_top_bar_pill(AppState& app, cairo_t* cr,
   seed ^= (std::uint64_t)(std::uint32_t)py + 0x9e3779b97f4a7c15ULL;
   seed ^= (std::uint64_t)(std::uint32_t)pw;
   seed ^= (std::uint64_t)(std::uint32_t)ph;
-  seed ^= (std::uint64_t)(std::uint32_t)static_cast<int>(12.0 * zf);
+  seed ^= (std::uint64_t)(std::uint32_t)(ph / 2);
+  seed ^= 0x4D334D5458544152ULL; // M3 stadium-pill style version
 
   auto blit = [&](const AppState::PillCache& pc) {
     cairo_save(cr);
@@ -189,7 +193,7 @@ static void draw_top_bar_pill(AppState& app, cairo_t* cr,
   blit(pc);
 }
 
-void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int pane_w) {
+void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane_x, int pane_w) {
   double zf = app.zoom_pct / 100.0;
 
   int sidebar_w;
@@ -211,6 +215,88 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
   // In split view, the global bar only draws window controls (per-pane bars draw everything else)
   if (!app.split_view || pane_w > 0) {
 
+  // ── Responsive visibility ──
+  // Lowest-priority controls hide first so the path bar never collapses
+  // into overlap. Back + path + traffic always stay; everything hidden
+  // remains reachable via keyboard shortcuts.
+  int avail_w = content_right - sidebar_w;
+  int arrow_slot = static_cast<int>(36.0 * zf);
+  int gap = static_cast<int>(6.0 * zf); // 6px header-bar spacing
+  int left_pad = static_cast<int>(20.0 * zf); // px-5
+  int path_margin = static_cast<int>(24.0 * zf); // mx-6
+  int right_margin = static_cast<int>(16.0 * zf);
+  int gear_gap = static_cast<int>(8.0 * zf);
+  int view_toggle_w = static_cast<int>(40.0 * zf);
+  int sort_w = static_cast<int>(28.0 * zf);
+  int gear_w = static_cast<int>(36.0 * zf);
+  int traffic_w = static_cast<int>(52.0 * zf);
+  int folder_search_btn_w = static_cast<int>(40.0 * zf);
+  int search_btn_w = static_cast<int>(40.0 * zf);
+  int min_path_w = std::max(80, static_cast<int>(120.0 * zf));
+  int fold_extra = (app.sidebar_folded && pane_w == 0) ? arrow_slot + gap : 0;
+
+  bool show_forward = true, show_up = true;
+  bool show_folder = true, show_search = true;
+  bool show_sort = true, show_view = true, show_gear = true;
+
+  auto path_spare_for = [&](bool fwd, bool up, bool folder, bool search, bool sort, bool view,
+                            bool gear) -> int {
+    int left_used = left_pad + fold_extra + (arrow_slot + gap) + (fwd ? arrow_slot + gap : 0) +
+                    (up ? arrow_slot + gap : 0);
+    int n = 0, sum = 0;
+    if (folder) { sum += folder_search_btn_w; ++n; }
+    if (search) { sum += search_btn_w; ++n; }
+    if (view) { sum += view_toggle_w; ++n; }
+    if (sort) { sum += sort_w; ++n; }
+    if (gear) { sum += gear_w; ++n; }
+    int gaps = (n > 0) ? (n - 1) * gap : 0;
+    if (view && sort) gaps -= gap; // flush compound control
+    if (pane_w == 0) {
+      sum += traffic_w;
+      gaps += (gear || n > 0) ? ((gear) ? gear_gap : gap) : 0;
+    }
+    int required = left_used + path_margin + min_path_w + gap + sum + gaps + right_margin;
+    return avail_w - required; // >= 0 fits
+  };
+
+  // Narrow-window breakpoints: below ~700px of header width the toolbar
+  // groups leave the header while the path bar stays put; further groups
+  // collapse as it narrows further. Measured on the header's own width
+  // (avail_w, per pane in split view): the header shares the window with
+  // the sidebar, so window width would under-collapse and squeeze the
+  // pill. The fit loop below stays as a safety net so the bar can never
+  // overlap.
+  int bp_w = (pane_w > 0) ? pane_w : avail_w;
+  int bp1 = static_cast<int>(700.0 * zf);
+  int bp2 = static_cast<int>(500.0 * zf);
+  int bp3 = static_cast<int>(400.0 * zf);
+  if (bp_w < bp1) {
+    show_forward = false;
+    show_up = false;
+    show_folder = false;
+    show_sort = false;
+    show_gear = false;
+  }
+  if (bp_w < bp2) show_search = false;
+  if (bp_w < bp3) show_view = false;
+
+  // Safety net: never overlap. Hide order is least-essential first
+  // (forward, up, folder dup, sort, gear, search, view last).
+  for (int step = 0; step < 7; ++step) {
+    if (path_spare_for(show_forward, show_up, show_folder, show_search, show_sort, show_view,
+                       show_gear) >= 0)
+      break;
+    switch (step) {
+      case 0: show_forward = false; break;
+      case 1: show_up = false; break;
+      case 2: show_folder = false; break;
+      case 3: show_sort = false; break;
+      case 4: show_gear = false; break;
+      case 5: show_search = false; break;
+      default: show_view = false; break;
+    }
+  }
+
   // ── Navigation arrows (back, forward) ──
   int x = sidebar_w + static_cast<int>(20.0 * zf); // px-5
 
@@ -222,12 +308,17 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
     bool t_active = app.sidebar_folded_revealed;
     app.sidebar_toggle_x = x;
     app.sidebar_toggle_w = slot_w;
+    app.hit_main.add(hui::Hit::topbar(app.active_pane, hui::Hit::kTopFoldToggle), x, y0 + (top_h - slot_w) / 2,
+                     slot_w, slot_w);
     if (t_hover || t_active) {
       cairo_save(cr);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
-                            t_active ? 0.14 : 0.08);
+      if (t_active) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
+      } else {
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
+      }
       draw_rounded_rect(cr, x, (top_h - slot_w) / 2, slot_w, slot_w,
-                        static_cast<int>(6.0 * zf));
+                        static_cast<int>(8.0 * zf));
       cairo_fill(cr);
       cairo_restore(cr);
     }
@@ -241,7 +332,11 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
       int oy = (top_h - sz) / 2;
       double display_scale = sz / std::max(svg_w, svg_h);
       cairo_save(cr);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+      if (t_active) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 1.0);
+      } else {
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+      }
       cairo_rectangle(cr, ox, oy, sz, sz);
       cairo_clip(cr);
       cairo_translate(cr, ox, oy);
@@ -271,12 +366,12 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
   auto draw_arrow = [&](int idx, cairo_surface_t* svg, const char* fallback,
                         bool hovered, bool enabled) {
     int slot_w = static_cast<int>(36.0 * zf);
-    double alpha = enabled ? 1.0 : 0.32;
+    double alpha = enabled ? 1.0 : 0.38;
     if (hovered && enabled) {
       cairo_save(cr);
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
       draw_rounded_rect(cr, x, (top_h - slot_w) / 2, slot_w, slot_w,
-                        static_cast<int>(6.0 * zf));
+                        static_cast<int>(8.0 * zf));
       cairo_fill(cr);
       cairo_restore(cr);
     }
@@ -305,109 +400,149 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
       cairo_move_to(cr, x + (slot_w - te.width) / 2, top_h / 2 + te.height / 2);
       cairo_show_text(cr, fallback);
     }
-    // Store position for hit testing
+    // Store position for hit testing + register the retained region.
     if (idx == 0) (app.active_pane ? app.r_arrow_back_x : app.arrow_back_x) = x;
     else if (idx == 1) (app.active_pane ? app.r_arrow_forward_x : app.arrow_forward_x) = x;
     else (app.active_pane ? app.r_arrow_up_x : app.arrow_up_x) = x;
-    x += slot_w + static_cast<int>(6.0 * zf); // 6px spacing (Nautilus 51 header bar)
+    const int nav_ctrl = (idx == 0) ? hui::Hit::kTopNavBack : (idx == 1) ? hui::Hit::kTopNavForward : hui::Hit::kTopNavUp;
+    app.hit_main.add(hui::Hit::topbar(app.active_pane, nav_ctrl), x, y0 + (top_h - slot_w) / 2, slot_w,
+                     slot_w);
+    x += slot_w + static_cast<int>(6.0 * zf); // 6px header-bar spacing
   };
 
   draw_arrow(0, app.arrow_left_svg, "<",
              app.active_pane ? app.r_arrow_back_hover : app.arrow_back_hover, true);
-  draw_arrow(1, app.arrow_right_svg, ">",
-             app.active_pane ? app.r_arrow_forward_hover : app.arrow_forward_hover, true);
-  draw_arrow(2, app.arrow_up_svg, "^",
-             app.active_pane ? app.r_arrow_up_hover : app.arrow_up_hover,
-             can_navigate_up(app));
+  if (show_forward) {
+    draw_arrow(1, app.arrow_right_svg, ">",
+               app.active_pane ? app.r_arrow_forward_hover : app.arrow_forward_hover, true);
+  } else {
+    (app.active_pane ? app.r_arrow_forward_x : app.arrow_forward_x) = -1;
+  }
+  if (show_up) {
+    draw_arrow(2, app.arrow_up_svg, "^",
+               app.active_pane ? app.r_arrow_up_hover : app.arrow_up_hover,
+               can_navigate_up(app));
+  } else {
+    (app.active_pane ? app.r_arrow_up_x : app.arrow_up_x) = -1;
+  }
 
   int path_left = x;
-  int path_margin = static_cast<int>(24.0 * zf); // mx-6
 
   // ── Right-side controls ──
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                           CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 13.0 * zf);
 
-  // Sort chevron: narrow dropdown segment of the compound "View Options"
-  // control (flush with the view toggle, like Nautilus 51's Adw.SplitButton).
-  int sort_w = static_cast<int>(28.0 * zf);
+  // Layout from right edge, skipping hidden controls (see hide loop above).
+  int cursor = content_right - right_margin;
+  int traffic_rx = -1;
+  if (pane_w == 0) {
+    traffic_rx = cursor - traffic_w;
+    cursor = traffic_rx - gear_gap;
+  }
+  int gear_x = -1;
+  if (show_gear) {
+    gear_x = cursor - gear_w;
+    cursor = gear_x - gap;
+  } else if (pane_w == 0) {
+    cursor += gear_gap - gap;
+  }
+  int sort_x = -1, view_toggle_x = -1;
+  if (show_sort && show_view) {
+    sort_x = cursor - sort_w;
+    view_toggle_x = sort_x - view_toggle_w;
+    cursor = view_toggle_x - gap;
+  } else if (show_view) {
+    view_toggle_x = cursor - view_toggle_w;
+    cursor = view_toggle_x - gap;
+  } else if (show_sort) {
+    sort_x = cursor - sort_w;
+    cursor = sort_x - gap;
+  }
+  int search_btn_x = -1;
+  if (show_search) {
+    search_btn_x = cursor - search_btn_w;
+    cursor = search_btn_x - gap;
+  }
+  int folder_search_btn_x = -1;
+  if (show_folder) {
+    folder_search_btn_x = cursor - folder_search_btn_w;
+    cursor = folder_search_btn_x - gap;
+  }
 
-  // Button sizes (at 100% zoom)
-  int gap = static_cast<int>(6.0 * zf); // 6px spacing (Nautilus 51 header bar)
-  int right_margin = static_cast<int>(16.0 * zf); // reduced from px-5 for tighter right side
+  (app.active_pane ? app.r_search_btn_x : app.search_btn_x) = show_search ? search_btn_x : 0;
+  (app.active_pane ? app.r_search_btn_w : app.search_btn_w) = show_search ? search_btn_w : 0;
+  (app.active_pane ? app.r_folder_search_btn_x : app.folder_search_btn_x) =
+      show_folder ? folder_search_btn_x : 0;
+  (app.active_pane ? app.r_folder_search_btn_w : app.folder_search_btn_w) =
+      show_folder ? folder_search_btn_w : 0;
+  (app.active_pane ? app.r_view_btn_x : app.view_btn_x) = show_view ? view_toggle_x : 0;
+  (app.active_pane ? app.r_view_btn_w : app.view_btn_w) = show_view ? view_toggle_w : 0;
+  (app.active_pane ? app.r_sort_btn_x : app.sort_btn_x) = show_sort ? sort_x : 0;
+  (app.active_pane ? app.r_sort_btn_w : app.sort_btn_w) = show_sort ? sort_w : 0;
 
-  // View toggle: single button ~40px
-  int view_toggle_w = static_cast<int>(40.0 * zf);
-
-  // Gear: px-3(12) + icon(12) + px-3(12)
-  int gear_w = static_cast<int>(36.0 * zf);
-
-  // Traffic lights: 3 * 12px + gap-2(8) * 2
-  int traffic_w = static_cast<int>(52.0 * zf);
-
-  // Folder-search button (folder + magnifying glass): same size as search
-  int folder_search_btn_w = static_cast<int>(40.0 * zf);
-
-  // Search button: same size as view toggle
-  int search_btn_w = static_cast<int>(40.0 * zf);
-
-  // Layout from right edge
-  int right = content_right - right_margin;
-  int traffic_x = right - traffic_w;
-  int gear_x = traffic_x - static_cast<int>(8.0 * zf) - gear_w;
-
-  int sort_x = gear_x - gap - sort_w;
-  // View toggle + sort chevron are one flush compound control (0 gap),
-  // separated internally by a 1px divider (Adw.SplitButton style).
-  int view_toggle_x = sort_x - view_toggle_w;
-  int search_btn_x = view_toggle_x - gap - search_btn_w;
-  int folder_search_btn_x = search_btn_x - gap - folder_search_btn_w;
-
-  (app.active_pane ? app.r_search_btn_x : app.search_btn_x) = search_btn_x;
-  (app.active_pane ? app.r_search_btn_w : app.search_btn_w) = search_btn_w;
-  (app.active_pane ? app.r_folder_search_btn_x : app.folder_search_btn_x) = folder_search_btn_x;
-  (app.active_pane ? app.r_folder_search_btn_w : app.folder_search_btn_w) = folder_search_btn_w;
-  (app.active_pane ? app.r_view_btn_x : app.view_btn_x) = view_toggle_x;
-  (app.active_pane ? app.r_view_btn_w : app.view_btn_w) = view_toggle_w;
-  (app.active_pane ? app.r_sort_btn_x : app.sort_btn_x) = sort_x;
-  (app.active_pane ? app.r_sort_btn_w : app.sort_btn_w) = sort_w;
-
-  // Path bar fills remaining space
+  // Path bar fills remaining space down to the last-resort floor.
+  int leftmost_right;
+  if (show_folder) leftmost_right = folder_search_btn_x;
+  else if (show_search) leftmost_right = search_btn_x;
+  else if (show_view) leftmost_right = view_toggle_x;
+  else if (show_sort) leftmost_right = sort_x;
+  else if (show_gear) leftmost_right = gear_x;
+  else leftmost_right = (pane_w == 0) ? traffic_rx : content_right - right_margin;
   int path_x = path_left + path_margin;
-  int path_w = folder_search_btn_x - gap - path_x;
+  int path_w = leftmost_right - gap - path_x;
   if (path_w < 60) path_w = 60;
 
   int path_h = top_h - static_cast<int>(16.0 * zf);
   int path_y = (top_h - path_h) / 2;
 
-  // ── Compound "View Options" control (Nautilus 51 Adw.SplitButton style) ──
+  // ── Compound "View Options" control (split-button style) ──
   // View toggle + sort chevron share one linked pill (rounded outer corners,
   // square inner edge) with a 1px divider between the two halves.
-  {
-    bool vhv = app.active_pane ? app.r_view_mode_btn_hover : app.view_mode_btn_hover;
-    bool sort_hv = app.active_pane ? app.r_sort_btn_hover : app.sort_btn_hover;
-    bool sort_active = app.active_pane ? app.r_sort_menu_open : app.sort_menu_open;
+  // Hidden halves collapse: a lone survivor renders as a standalone button.
+  if (show_view || show_sort) {
+    int combo_x = show_view ? view_toggle_x : sort_x;
+    int combo_w = (show_view && show_sort)
+                      ? sort_x + sort_w - view_toggle_x
+                      : (show_view ? view_toggle_w : sort_w);
+    bool vhv = show_view &&
+               (app.active_pane ? app.r_view_mode_btn_hover : app.view_mode_btn_hover);
+    bool sort_hv = show_sort &&
+                   (app.active_pane ? app.r_sort_btn_hover : app.sort_btn_hover);
+    bool sort_active = show_sort &&
+                       (app.active_pane ? app.r_sort_menu_open : app.sort_menu_open);
     if (vhv || sort_hv || sort_active) {
       cairo_save(cr);
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
                             sort_active ? 0.14 : 0.08);
-      draw_rounded_rect(cr, view_toggle_x, path_y,
-                        sort_x + sort_w - view_toggle_x, path_h,
+      draw_rounded_rect(cr, combo_x, path_y, combo_w, path_h,
                         static_cast<int>(8.0 * zf));
       cairo_fill(cr);
       cairo_restore(cr);
     }
-    double div_x = sort_x + 0.5;
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.14);
-    cairo_set_line_width(cr, 1.0);
-    cairo_move_to(cr, div_x, path_y + static_cast<int>(5.0 * zf));
-    cairo_line_to(cr, div_x, path_y + path_h - static_cast<int>(5.0 * zf));
-    cairo_stroke(cr);
+    if (show_view && show_sort) {
+      double div_x = sort_x + 0.5;
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.14);
+      cairo_set_line_width(cr, 1.0);
+      cairo_move_to(cr, div_x, path_y + static_cast<int>(5.0 * zf));
+      cairo_line_to(cr, div_x, path_y + path_h - static_cast<int>(5.0 * zf));
+      cairo_stroke(cr);
+    }
   }
 
   // ── Gradient bar background + semi-glassy design (inner glassy rim, not outer)
   draw_top_bar_pill(app, cr, path_x, path_y, path_w, path_h,
                     (pane_w > 0) ? (app.active_pane ? 2 : 1) : 0);
+
+  // M3 focus ring: 2px accent outline while searching or editing the path.
+  if ((app.active_pane ? app.r_search_active : app.search_active) ||
+      (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active) ||
+      (app.active_pane ? app.r_path_editing : app.path_editing)) {
+    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.9);
+    cairo_set_line_width(cr, 1.5);
+    draw_rounded_rect(cr, path_x, path_y, path_w, path_h, path_h / 2.0);
+    cairo_stroke(cr);
+  }
 
   // ── Three-dot menu on the far right ──
   int dots_btn_w = static_cast<int>(24.0 * zf);
@@ -420,6 +555,14 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
   // Three dots (⋮) — bold SVG, circle fallback
   {
     bool dhover = (app.active_pane ? app.r_dots_btn_hover : app.dots_btn_hover);
+    if (dhover) {
+      cairo_save(cr);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
+      draw_rounded_rect(cr, dots_x - 2, path_y + 2, dots_btn_w + 4, path_h - 4,
+                        static_cast<int>(8.0 * zf));
+      cairo_fill(cr);
+      cairo_restore(cr);
+    }
     if (app.three_dots_svg) {
       int dsz = static_cast<int>(14.0 * zf);
       int dox = dots_x + (dots_btn_w - dsz) / 2;
@@ -489,6 +632,10 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
 
   int path_text_x = text_x + icon_sz + static_cast<int>(12.0 * zf); // gap-3
   int path_text_w = path_w - (path_text_x - path_x) - dots_btn_w - static_cast<int>(16.0 * zf);
+  app.hit_main.add(hui::Hit::topbar(app.active_pane, hui::Hit::kTopPathBar), path_x, y0, path_w,
+                   top_h);
+  app.hit_main.add(hui::Hit::topbar(app.active_pane, hui::Hit::kTopPathText), path_text_x,
+                   y0 + path_y, path_text_w, path_h);
 
   if ((app.active_pane ? app.r_search_active : app.search_active) || (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active)) {
     // ── Search bar ──
@@ -589,35 +736,21 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
       (app.active_pane ? app.r_filter_btn_x : app.filter_btn_x) = right_cursor;
       (app.active_pane ? app.r_filter_btn_w : app.filter_btn_w) = bw;
       bool hv = app.active_pane ? app.r_filter_btn_hover : app.filter_btn_hover;
-      int btn_r = static_cast<int>(6.0 * zf);
+      int btn_r = static_cast<int>(8.0 * zf);
 
-      // Glassy gradient background
-      cairo_pattern_t* grad = cairo_pattern_create_linear(0, by, 0, by + bh);
-      cairo_pattern_add_color_stop_rgba(grad, 0.0, app.surface_r, app.surface_g, app.surface_b, any_active ? 0.45 : 0.25);
-      cairo_pattern_add_color_stop_rgba(grad, 1.0, app.bg_r, app.bg_g, app.bg_b, any_active ? 0.45 : 0.25);
-      cairo_set_source(cr, grad);
+      // Active filter chip: M3 secondary-container treatment
+      if (any_active) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
+      } else {
+        hui::design::card_fill(cr, app, hv ? 0.75 : 0.55);
+      }
       draw_rounded_rect(cr, right_cursor, by, bw, bh, btn_r);
       cairo_fill(cr);
-      cairo_pattern_destroy(grad);
-
-      // Outer dark border
-      cairo_set_source_rgba(cr, 0, 0, 0, hv ? 0.20 : 0.12);
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
+                            any_active ? 0.55 : hv ? 0.35 : 0.22);
       cairo_set_line_width(cr, 1.0);
       draw_rounded_rect(cr, right_cursor + 0.5, by + 0.5, bw - 1.0, bh - 1.0, btn_r);
       cairo_stroke(cr);
-
-      // Inner glassy bright rim
-      cairo_pattern_t* rim = cairo_pattern_create_linear(0, by, 0, by + bh);
-      cairo_pattern_add_color_stop_rgba(rim, 0.00, app.text_r, app.text_g, app.text_b, hv ? 0.30 : any_active ? 0.25 : 0.18);
-      cairo_pattern_add_color_stop_rgba(rim, 0.30, app.text_r, app.text_g, app.text_b, hv ? 0.18 : any_active ? 0.14 : 0.08);
-      cairo_pattern_add_color_stop_rgba(rim, 1.00, app.text_r, app.text_g, app.text_b, hv ? 0.14 : any_active ? 0.10 : 0.05);
-      cairo_set_source(cr, rim);
-      cairo_set_line_width(cr, 1.0);
-      double inset = 2.0;
-      draw_rounded_rect(cr, right_cursor + inset, by + inset, bw - inset * 2, bh - inset * 2,
-                        static_cast<double>(btn_r) - inset + 0.5);
-      cairo_stroke(cr);
-      cairo_pattern_destroy(rim);
 
       // Text
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, any_active ? 1.0 : hv ? 0.9 : 0.7);
@@ -688,18 +821,22 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
           bool sel = dw_mode == si;
           int sx = right_cursor + si * seg_w;
           if (sel) {
-            cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.28);
+            // M3 active indicator: accent pill, accent-tinted label
+            cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
             draw_rounded_rect(cr, sx + 1, by2, seg_w - 2, bh2, 5);
             cairo_fill(cr);
           } else if (hv2 && si == hov_btn) {
-            cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.10);
+            cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
             draw_rounded_rect(cr, sx + 1, by2, seg_w - 2, bh2, 5);
             cairo_fill(cr);
           }
           cairo_text_extents_t te2;
           cairo_text_extents(cr, kSegLabels[si], &te2);
-          cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
-                                sel ? 1.0 : 0.45);
+          if (sel) {
+            cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 1.0);
+          } else {
+            cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.66);
+          }
           cairo_move_to(cr, sx + (seg_w - te2.width) / 2, text_y);
           cairo_show_text(cr, kSegLabels[si]);
         }
@@ -816,26 +953,18 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
     cairo_set_font_size(cr, 13.0 * zf);
 
     // Measure + elide if needed
+    std::string display_label = hui::design::clip_end(cr, label, path_text_w - 4);
     cairo_text_extents_t label_te;
-    std::string display_label = label;
     cairo_text_extents(cr, display_label.c_str(), &label_te);
-    if (label_te.x_advance > path_text_w - 4) {
-      while (!display_label.empty() && label_te.x_advance > path_text_w - 16) {
-        display_label.pop_back();
-        cairo_text_extents(cr, (display_label + "…").c_str(), &label_te);
-      }
-      display_label += "…";
-      cairo_text_extents(cr, display_label.c_str(), &label_te);
-    }
     int label_w = static_cast<int>(label_te.x_advance + 4.0 * zf);
     if (label_w > path_text_w) label_w = path_text_w;
 
     bool label_hovered = ((app.active_pane ? app.r_breadcrumb_hover : app.breadcrumb_hover) == 0);
     if (label_hovered) {
       cairo_save(cr);
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.12);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
       draw_rounded_rect(cr, path_text_x - 2, path_y + 2, label_w + 4, path_h - 4,
-                        static_cast<int>(5.0 * zf));
+                        static_cast<int>(8.0 * zf));
       cairo_fill(cr);
       cairo_restore(cr);
     }
@@ -854,7 +983,7 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
   }
 
   // ── View-mode toggle (cycles List→Grid→Compact→Tree→List) ──
-  {
+  if (show_view) {
     // Icon previews the mode the next click switches TO.
     cairo_surface_t* svg = nullptr;
     const char* fallback = "\u25A6";
@@ -889,18 +1018,26 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
   }
 
   // ── Folder-search button (folder + magnifying glass) ──
-  {
+  if (show_folder) {
     bool hv = app.active_pane ? app.r_folder_search_btn_hover : app.folder_search_btn_hover;
     bool active = (app.active_pane ? app.r_search_active : app.search_active);
     if (hv || active) {
       cairo_save(cr);
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, active ? 0.25 : 0.08);
+      if (active) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
+      } else {
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
+      }
       draw_rounded_rect(cr, folder_search_btn_x, path_y, folder_search_btn_w, path_h,
                         static_cast<int>(8.0 * zf));
       cairo_fill(cr);
       cairo_restore(cr);
     }
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    if (active) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 1.0);
+    } else {
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    }
     int sz = static_cast<int>(16.0 * zf);
     int ox = folder_search_btn_x + (folder_search_btn_w - sz) / 2;
     int oy = (top_h - sz) / 2;
@@ -926,18 +1063,26 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
   }
 
   // ── Search button (magnifying glass) ──
-  {
+  if (show_search) {
     bool hv = app.active_pane ? app.r_search_btn_hover : app.search_btn_hover;
     bool active = (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active);
     if (hv || active) {
       cairo_save(cr);
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, active ? 0.25 : 0.08);
+      if (active) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.16);
+      } else {
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
+      }
       draw_rounded_rect(cr, search_btn_x, path_y, search_btn_w, path_h,
                         static_cast<int>(8.0 * zf));
       cairo_fill(cr);
       cairo_restore(cr);
     }
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    if (active) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 1.0);
+    } else {
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    }
     if (app.search_svg) {
       double svg_w = static_cast<double>(cairo_image_surface_get_width(app.search_svg));
       double svg_h = static_cast<double>(cairo_image_surface_get_height(app.search_svg));
@@ -962,7 +1107,7 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
   }
 
   // ── Sort chevron (dropdown segment of the compound View Options control) ──
-  {
+  if (show_sort) {
     int csz = static_cast<int>(18.0 * zf); // same as the other toolbar icons
     int cx = sort_x + (sort_w - csz) / 2;
     int cy = (top_h - csz) / 2;
@@ -988,8 +1133,10 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int pane_x, int 
   }
 
   // ── Settings gear button ──
-  {
+  if (show_gear) {
     bool hv = app.active_pane ? app.r_settings_btn_hover : app.settings_btn_hover;
+    app.hit_main.add(hui::Hit::topbar(app.active_pane, hui::Hit::kTopGear), gear_x, y0 + path_y, gear_w,
+                     path_h);
     if (hv) {
       cairo_save(cr);
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);

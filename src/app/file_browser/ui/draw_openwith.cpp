@@ -29,6 +29,7 @@
 #include <unistd.h>
 
 #include "draw_helpers.hpp"
+#include "ui/design.hpp"
 #include "draw_file_icons.hpp"
 #include "draw_thumbnails.hpp"
 #include "layout.hpp"
@@ -104,15 +105,19 @@ void draw_open_with(AppState& app, cairo_t* cr) {
   app.open_with_hit_close[3] = close_sz;
   {
     bool hov = (app.open_with_hover == -2);
-    cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, hov ? 0.55 : 0.40);
-    draw_rounded_rect(cr, app.open_with_hit_close[0], app.open_with_hit_close[1],
-                       close_sz, close_sz, 8);
-    cairo_fill(cr);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 18);
-    cairo_move_to(cr, app.open_with_hit_close[0] + 7, app.open_with_hit_close[1] + 21);
-    cairo_show_text(cr, "\u00D7");
+    if (hov) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.14);
+      draw_rounded_rect(cr, app.open_with_hit_close[0], app.open_with_hit_close[1],
+                        close_sz, close_sz, 14);
+      cairo_fill(cr);
+    }
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, hov ? 0.85 : 0.45);
+    cairo_set_line_width(cr, 1.6);
+    cairo_move_to(cr, app.open_with_hit_close[0] + 9, app.open_with_hit_close[1] + 9);
+    cairo_line_to(cr, app.open_with_hit_close[0] + 19, app.open_with_hit_close[1] + 19);
+    cairo_move_to(cr, app.open_with_hit_close[0] + 19, app.open_with_hit_close[1] + 9);
+    cairo_line_to(cr, app.open_with_hit_close[0] + 9, app.open_with_hit_close[1] + 19);
+    cairo_stroke(cr);
   }
 
   // Title
@@ -189,6 +194,8 @@ void draw_open_with(AppState& app, cairo_t* cr) {
     // Item row
     if (cy_off + entry_h > scroll_px && cy_off < scroll_px + list_h) {
       int ey = list_y + cy_off - scroll_px;
+      app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgOpenWith, hui::Hit::kOpenRowBase + i),
+                       list_x, ey, list_w, entry_h);
 
       // Divider between entries
       if (cy_off > 0 || (i > 0)) {
@@ -199,9 +206,7 @@ void draw_open_with(AppState& app, cairo_t* cr) {
 
       bool hov = (i == app.open_with_hover);
       if (hov) {
-        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.10);
-        cairo_rectangle(cr, list_x, ey, list_w, entry_h);
-        cairo_fill(cr);
+        hui::design::row_hover(cr, app, list_x + 4, ey + 2, list_w - 8, entry_h - 4);
       }
 
       // App icon
@@ -242,8 +247,9 @@ void draw_open_with(AppState& app, cairo_t* cr) {
       cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
       cairo_set_font_size(cr, 13);
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+      std::string aname = hui::design::clip_end(cr, app.open_with_apps[i].name, list_w - 70);
       cairo_move_to(cr, icon_x + icon_size + 8, ey + entry_h / 2 + 5);
-      cairo_show_text(cr, app.open_with_apps[i].name.c_str());
+      cairo_show_text(cr, aname.c_str());
     }
 
     cy_off += entry_h;
@@ -292,23 +298,8 @@ void draw_open_with(AppState& app, cairo_t* cr) {
   app.open_with_hit_open[3] = btn_h;
 
   // Cancel button
-  {
-    bool hov = (app.open_with_hover == -3);
-    cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, hov ? 0.52 : 0.42);
-    draw_rounded_rect(cr, app.open_with_hit_cancel[0], btn_y, btn_w, btn_h, btn_h / 2);
-    cairo_fill_preserve(cr);
-    cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.45);
-    cairo_set_line_width(cr, 1);
-    cairo_stroke(cr);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 13);
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, "Cancel", &te);
-    cairo_move_to(cr, app.open_with_hit_cancel[0] + (btn_w - te.x_advance) / 2,
-                  btn_y + btn_h / 2 + te.height * 0.35);
-    cairo_show_text(cr, "Cancel");
-  }
+  hui::design::button(cr, app, app.open_with_hit_cancel[0], btn_y, btn_w, btn_h, "Cancel", false,
+                 app.open_with_hover == -3);
 
   // "Set as Default" toggle (left side of bottom bar)
   {
@@ -323,54 +314,19 @@ void draw_open_with(AppState& app, cairo_t* cr) {
     app.open_with_hit_default[2] = 160;
     app.open_with_hit_default[3] = toggle_h;
 
-    // Toggle track
-    int track_w = 40;
-    int track_h = 20;
-    int track_x = toggle_x;
-    int track_y = toggle_y + (toggle_h - track_h) / 2;
-    double radius = track_h / 2.0;
-    if (on) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 1.0);
-    } else {
-      cairo_set_source_rgba(cr, 0.45, 0.45, 0.45, hov ? 0.9 : 0.7);
-    }
-    draw_rounded_rect(cr, track_x, track_y, track_w, track_h, radius);
-    cairo_fill(cr);
-
-    // Toggle knob
-    int knob_sz = 16;
-    double knob_cx = on ? track_x + track_w - track_h / 2.0 : track_x + track_h / 2.0;
-    double knob_cy = track_y + track_h / 2.0;
-    cairo_arc(cr, knob_cx, knob_cy, knob_sz / 2.0, 0, 2 * M_PI);
-    cairo_set_source_rgba(cr, 1.0, 1.0, 1.0, 1.0);
-    cairo_fill(cr);
+    hui::design::draw_switch(cr, app, toggle_x, toggle_y + (toggle_h - 22) / 2, on);
 
     // Label
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, hov ? 1.0 : 0.9);
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, 13);
-    cairo_move_to(cr, track_x + track_w + 10, toggle_y + toggle_h / 2 + 5);
+    cairo_move_to(cr, toggle_x + 40 + 10, toggle_y + toggle_h / 2 + 5);
     cairo_show_text(cr, "Set as default");
   }
 
   // Open button
-  {
-    bool hov = (app.open_with_hover == -4);
-    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, hov ? 0.22 : 0.12);
-    draw_rounded_rect(cr, app.open_with_hit_open[0], btn_y, btn_w, btn_h, btn_h / 2);
-    cairo_fill_preserve(cr);
-    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.85);
-    cairo_set_line_width(cr, 1);
-    cairo_stroke(cr);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 13);
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, "Open", &te);
-    cairo_move_to(cr, app.open_with_hit_open[0] + (btn_w - te.x_advance) / 2,
-                  btn_y + btn_h / 2 + te.height * 0.35);
-    cairo_show_text(cr, "Open");
-  }
+  hui::design::button(cr, app, app.open_with_hit_open[0], btn_y, btn_w, btn_h, "Open", true,
+                 app.open_with_hover == -4);
 }
 
 } // namespace eh::file_browser

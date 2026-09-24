@@ -229,7 +229,12 @@ static constexpr xdg_surface_listener kPropsXdgSurfaceListener{
 static constexpr xdg_toplevel_listener kPropsToplevelListener{
   .configure = props_toplevel_configure,
   .close = props_toplevel_close,
-  .configure_bounds = [](void*, xdg_toplevel*, int32_t, int32_t) {},
+  .configure_bounds =
+      [](void* data, xdg_toplevel*, int32_t w, int32_t h) {
+        auto& app = *static_cast<AppState*>(data);
+        if (w > 0) app.props_bound_w = w;
+        if (h > 0) app.props_bound_h = h;
+      },
   .wm_capabilities = [](void*, xdg_toplevel*, wl_array*) {},
 };
 
@@ -243,6 +248,7 @@ static void destroy_props_window_impl(AppState& app) {
   wl_surface_destroy(app.props_surface);
   app.props_surface = nullptr;
   app.properties.open = false;
+  ++app.properties.props_gen; // invalidate any in-flight size worker
   app.props_pendingRedraw = false;
 }
 
@@ -286,6 +292,26 @@ static void draw_props_window_impl(AppState& app) {
   app.height = saved_h;
   app.pointerX = saved_px;
   app.pointerY = saved_py;
+
+  // ── Auto-fit: size once at open so the first tab shows fully (with
+  // breathing room, keeping 24px of screen space top and bottom). After
+  // that the height stays put across tab switches — resizing per tab is
+  // visually jarring. Taller tabs scroll; scroll is also the fallback
+  // when content exceeds the screen.
+  if (!app.properties.props_sized_once) {
+    int want = app.properties.desired_h;
+    int max_h = app.props_bound_h > 0 ? app.props_bound_h - 48 : 860;
+    if (max_h < 430) max_h = 430;
+    int target = std::clamp(want, 430, max_h);
+    if (std::abs(target - app.props_height) > 8 && app.props_toplevel) {
+      app.props_height = target;
+      xdg_toplevel_set_min_size(app.props_toplevel, app.props_width, target);
+      xdg_toplevel_set_max_size(app.props_toplevel, app.props_width, target);
+      // The compositor answers with a configure, which re-ensures the
+      // buffers and redraws at the new size.
+    }
+    app.properties.props_sized_once = true;
+  }
 
   cairo_restore(cr);
 
@@ -578,6 +604,7 @@ static void draw_settings_window_impl(AppState& app) {
   app.height = ph;
   app.pointerX = static_cast<double>(app.settings_pointerX);
   app.pointerY = static_cast<double>(app.settings_pointerY);
+  app.hit_settings.clear();
 
   draw_settings_dialog(app, cr);
 
@@ -716,8 +743,8 @@ static int settings_content_height(const AppState& app) {
   switch (app.settings_tab) {
     case 0: {
       // zoom @0..26, folders toggle @40..62, terminal box @76..106,
-      // independent-views toggle @118..140
-      int h = 140;
+      // independent-views toggle @118..140, memory readout @158..190
+      int h = 180;
       if (app.settings_dropdown_open) {
         const int visible = std::min<int>(app.settings_term_opts.size(), 6);
         h = std::max(h, 108 + visible * 28);
@@ -764,6 +791,16 @@ void handle_settings_click(AppState& app, int x, int y, int button) {
   if (hit != -16) app.settings_zoom_editing = false;
 
   if (hit == -1) return;
+  if (hit == -16) {
+    if (!app.settings_zoom_editing) {
+      char buf[16];
+      snprintf(buf, sizeof(buf), "%.0f", app.settings_zoom_pct);
+      app.settings_zoom_buf = buf;
+      app.settings_zoom_editing = true;
+    }
+    app.settings_pendingRedraw = true;
+    return;
+  }
   if (hit == -2 || hit == -7) {
     destroy_settings_window_impl(app);
     return;

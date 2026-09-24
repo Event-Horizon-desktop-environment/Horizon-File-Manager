@@ -142,20 +142,16 @@ void handle_pointer_move(AppState& app, int x, int y) {
       ++fav_start;
     int fav_count = fav_start - places_end;
 
-    // Compute which fav slot the cursor is over
-    double zf = 1.2;
-    int item_h = static_cast<int>(36.0 * zf);
-    int header_h = static_cast<int>(24.0 * zf);
-    int div_pad = static_cast<int>(8.0 * zf);
-    int div_total = div_pad + 1 + div_pad;
-
-    // Y position of the Favorites section first item
-    int fav_top = app.top_bar_height + app.tab_bar_height - app.sidebar_scroll_px +
-                  header_h + places_end * item_h + div_total + header_h;
-
-    int rel_y = y - fav_top;
-    int slot = rel_y / item_h;
-    if (slot < 0) slot = 0;
+    // Insertion slot from painted row tops (retained registry) — the old
+    // hand-derived offset disagreed with paint by ~72px.
+    int slot = 0;
+    for (int k = 0; k < fav_count; ++k) {
+      const hui::HitRegion* r =
+          app.hit_main.find_id(hui::Hit::sidebar_row(places_end + k));
+      if (r == nullptr) continue;
+      if (y < r->y) break;
+      slot = k + 1;
+    }
     if (slot > fav_count) slot = fav_count;
 
     int visual_to = slot;
@@ -212,19 +208,11 @@ void handle_pointer_move(AppState& app, int x, int y) {
 
   // ── Confirm dialog hover ──
   if (app.confirm_open) {
-    int dlg_w = 380;
-    int dlg_h = 170;
-    int dlg_x = (app.width - dlg_w) / 2;
-    int dlg_y = (app.height - dlg_h) / 2;
-    int btn_y = dlg_y + dlg_h - 50;
-    int btn_h = 32;
-    int btn_w = 90;
-    int cancel_x = dlg_x + dlg_w - 220;
-    int delete_x = dlg_x + dlg_w - 110;
+    const uint32_t hid = app.hit_main.query(x, y);
     int new_hover = -1;
-    if (x >= delete_x && x < delete_x + btn_w && y >= btn_y && y < btn_y + btn_h)
+    if (hid == hui::Hit::dialog(hui::Hit::kDlgConfirm, hui::Hit::kConfirmDelete))
       new_hover = 1;
-    else if (x >= cancel_x && x < cancel_x + btn_w && y >= btn_y && y < btn_y + btn_h)
+    else if (hid == hui::Hit::dialog(hui::Hit::kDlgConfirm, hui::Hit::kConfirmCancel))
       new_hover = 0;
     if (new_hover != app.confirm_hover_btn) {
       app.confirm_hover_btn = new_hover;
@@ -235,79 +223,29 @@ void handle_pointer_move(AppState& app, int x, int y) {
 
   // ── Compress dialog hover ──
   if (app.compress_dialog_open) {
-    int dlg_w = 420;
-    int dlg_h = 372;
-    int dlg_x = (app.width - dlg_w) / 2;
-    int dlg_y = (app.height - dlg_h) / 2;
-    int content_x = dlg_x + 20;
-    int content_y = dlg_y + 50;
-    int fmt_w = 80;
-    int fmt_h = 28;
-    int fmt_gap = 8;
-    int fmy = content_y + 18;
-
+    const uint32_t hid = app.hit_main.query(x, y);
     int new_hover_fmt = -1;
-    for (int i = 0; i < 4; ++i) {
-      if (!app.compress_format_available[i]) continue;
-      int fmx = content_x + i * (fmt_w + fmt_gap);
-      if (x >= fmx && x < fmx + fmt_w && y >= fmy && y < fmy + fmt_h) {
-        new_hover_fmt = i;
-        break;
-      }
-    }
-    if (new_hover_fmt < 0) {
-      int fmy2 = fmy + fmt_h + fmt_gap;
-      for (int i = 4; i < 7; ++i) {
-        if (!app.compress_format_available[i]) continue;
-        int fmx = content_x + (i - 4) * (fmt_w + fmt_gap);
-        if (x >= fmx && x < fmx + fmt_w && y >= fmy2 && y < fmy2 + fmt_h) {
-          new_hover_fmt = i;
-          break;
+    int new_hover_lvl = -1;
+    int new_hover_thr = -1;
+    int new_hover_btn = -1;
+    if ((hid & hui::Hit::kGroupMask) == hui::Hit::kDialog) {
+      int ctrl = hui::Hit::dialog_ctrl(hid);
+      if ((hid & 0xFFFFC00) == hui::Hit::dialog(hui::Hit::kDlgCompress, 0)) {
+        if (ctrl >= hui::Hit::kCompressFormatBase && ctrl < hui::Hit::kCompressFormatBase + 7) {
+          int i = ctrl - hui::Hit::kCompressFormatBase;
+          if (i >= 0 && i < 7 && app.compress_format_available[i]) new_hover_fmt = i;
+        } else if (ctrl >= hui::Hit::kCompressLevelBase && ctrl < hui::Hit::kCompressLevelBase + 5) {
+          new_hover_lvl = ctrl - hui::Hit::kCompressLevelBase;
+        } else if (ctrl >= hui::Hit::kCompressThreadBase) {
+          new_hover_thr = ctrl - hui::Hit::kCompressThreadBase;
         }
       }
-    }
-
-    int name_y = fmy + fmt_h + fmt_gap + fmt_h + 14;
-    int input_y = name_y + 18;
-    int input_h = 32;
-    int lvl_y = input_y + input_h + 14;
-    int lvl_btn_y = lvl_y + 18;
-    int lvl_btn_w = 68;
-    int lvl_btn_h = 28;
-    int lvl_gap = 8;
-    int new_hover_lvl = -1;
-    for (int i = 0; i < 5; ++i) {
-      int lx = content_x + i * (lvl_btn_w + lvl_gap);
-      if (x >= lx && x < lx + lvl_btn_w && y >= lvl_btn_y && y < lvl_btn_y + lvl_btn_h) {
-        new_hover_lvl = i;
-        break;
+      if (hid == hui::Hit::dialog(hui::Hit::kDlgCompress, hui::Hit::kCompressCancel)) {
+        new_hover_btn = 0;
+      } else if (hid == hui::Hit::dialog(hui::Hit::kDlgCompress, hui::Hit::kCompressOk)) {
+        new_hover_btn = 1;
       }
     }
-
-    const std::vector<int> thread_opts = compress_thread_options();
-    int th_btn_y = lvl_btn_y + lvl_btn_h + 12 + 18;
-    int th_btn_w = compress_thread_btn_w(static_cast<int>(thread_opts.size()));
-    int th_btn_h = 28;
-    int th_gap = 8;
-    int new_hover_thr = -1;
-    for (size_t ti = 0; ti < thread_opts.size(); ++ti) {
-      int tx = content_x + static_cast<int>(ti) * (th_btn_w + th_gap);
-      if (x >= tx && x < tx + th_btn_w && y >= th_btn_y && y < th_btn_y + th_btn_h) {
-        new_hover_thr = static_cast<int>(ti);
-        break;
-      }
-    }
-
-    int btn_y = dlg_y + dlg_h - 50;
-    int btn_w = 90;
-    int btn_h = 32;
-    int cancel_x = dlg_x + dlg_w - 220;
-    int compress_x = dlg_x + dlg_w - 110;
-    int new_hover_btn = -1;
-    if (x >= cancel_x && x < cancel_x + btn_w && y >= btn_y && y < btn_y + btn_h)
-      new_hover_btn = 0;
-    else if (x >= compress_x && x < compress_x + btn_w && y >= btn_y && y < btn_y + btn_h)
-      new_hover_btn = 1;
 
     bool changed = (new_hover_fmt != app.compress_hover_format) ||
                    (new_hover_lvl != app.compress_hover_level) ||
@@ -325,19 +263,11 @@ void handle_pointer_move(AppState& app, int x, int y) {
 
   // ── Create dialog button hover ──
   if (app.create_dialog_open) {
-    int dlg_w = 340;
-    int dlg_h = 160;
-    int dlg_x = (app.width - dlg_w) / 2;
-    int dlg_y = (app.height - dlg_h) / 2;
-    int btn_y = dlg_y + dlg_h - 50;
-    int btn_h = 32;
-    int btn_w = 90;
-    int cancel_x = dlg_x + dlg_w - 220;
-    int create_x = dlg_x + dlg_w - 110;
+    const uint32_t hid = app.hit_main.query(x, y);
     int new_hover_btn = -1;
-    if (x >= create_x && x < create_x + btn_w && y >= btn_y && y < btn_y + btn_h)
+    if (hid == hui::Hit::dialog(hui::Hit::kDlgCreate, hui::Hit::kCreateOk))
       new_hover_btn = 0;
-    else if (x >= cancel_x && x < cancel_x + btn_w && y >= btn_y && y < btn_y + btn_h)
+    else if (hid == hui::Hit::dialog(hui::Hit::kDlgCreate, hui::Hit::kCreateCancel))
       new_hover_btn = 1;
     if (new_hover_btn != app.create_hover_btn) {
       app.create_hover_btn = new_hover_btn;
@@ -348,19 +278,11 @@ void handle_pointer_move(AppState& app, int x, int y) {
 
   // ── Rename dialog button hover ──
   if (app.rename_ui_open) {
-    int dlg_w = 400;
-    int dlg_h = 190;
-    int dlg_x = (app.width - dlg_w) / 2;
-    int dlg_y = (app.height - dlg_h) / 2;
-    int btn_y = dlg_y + dlg_h - 52;
-    int btn_h = 34;
-    int btn_w = 90;
-    int cancel_x = dlg_x + dlg_w - 230;
-    int rename_x = dlg_x + dlg_w - 120;
+    const uint32_t hid = app.hit_main.query(x, y);
     int new_hover_btn = -1;
-    if (x >= rename_x && x < rename_x + btn_w && y >= btn_y && y < btn_y + btn_h)
+    if (hid == hui::Hit::dialog(hui::Hit::kDlgRename, hui::Hit::kRenameOk))
       new_hover_btn = 0;
-    else if (x >= cancel_x && x < cancel_x + btn_w && y >= btn_y && y < btn_y + btn_h)
+    else if (hid == hui::Hit::dialog(hui::Hit::kDlgRename, hui::Hit::kRenameCancel))
       new_hover_btn = 1;
     if (new_hover_btn != app.rename_ui_hover_btn) {
       app.rename_ui_hover_btn = new_hover_btn;
@@ -371,67 +293,40 @@ void handle_pointer_move(AppState& app, int x, int y) {
 
   // ── Batch rename dialog hover ──
   if (app.batch_rename_open) {
-    bool is_template = (app.batch_rename_mode == 0);
-    int n = static_cast<int>(app.batch_rename_entries.size());
-    int dlg_w = 540;
-    int list_h = std::min(n * 28 + 4, 280) + 4;
-    int input_area_h = is_template ? 70 : 80;
-    int dlg_h = 24 + 28 + input_area_h + list_h + 56;
-    int dlg_x = (app.width - dlg_w) / 2;
-    int dlg_y = (app.height - dlg_h) / 2;
-    int cx = dlg_x + 20;
-
-    int tab_y = dlg_y + 42;
-    int tab_h = 26;
-    int tab_w = 210;
-    int input_y = tab_y + tab_h + 10;
-    int field_h = 30;
-    int btn_y = dlg_y + dlg_h - 44;
-    int btn_w = 90;
-    int btn_h = 32;
-    int cancel_x = dlg_x + dlg_w - 230;
-    int rename_x = dlg_x + dlg_w - 120;
-
+    const uint32_t hid = app.hit_main.query(x, y);
+    using hui::Hit::dialog;
+    using hui::Hit::kBatchAdd;
+    using hui::Hit::kBatchAddItemBase;
+    using hui::Hit::kBatchCancel;
+    using hui::Hit::kBatchOk;
+    using hui::Hit::kBatchTab0;
+    using hui::Hit::kBatchTab1;
+    using hui::Hit::kDlgBatch;
     int new_hover_mode = -1;
-    if (y >= tab_y && y < tab_y + tab_h) {
-      if (x >= cx && x < cx + tab_w)
-        new_hover_mode = 0;
-      else if (x >= cx + tab_w + 8 && x < cx + tab_w + 8 + tab_w)
-        new_hover_mode = 1;
-    }
+    if (hid == dialog(kDlgBatch, kBatchTab0))
+      new_hover_mode = 0;
+    else if (hid == dialog(kDlgBatch, kBatchTab1))
+      new_hover_mode = 1;
 
     int new_hover_btn = -1;
-    if (x >= rename_x && x < rename_x + btn_w && y >= btn_y && y < btn_y + btn_h)
+    if (hid == dialog(kDlgBatch, kBatchOk))
       new_hover_btn = 0;
-    else if (x >= cancel_x && x < cancel_x + btn_w && y >= btn_y && y < btn_y + btn_h)
+    else if (hid == dialog(kDlgBatch, kBatchCancel))
       new_hover_btn = 1;
-    else if (is_template) {
-      // +Add button hover
-      int tf_x = cx;
-      int tf_y = input_y;
-      int tf_w = 360;
-      int add_x = tf_x + tf_w + 8;
-      int add_w = 70;
-      if (x >= add_x && x < add_x + add_w && y >= tf_y && y < tf_y + field_h)
-        new_hover_btn = 3;
+    else if (hid == dialog(kDlgBatch, kBatchAdd))
+      new_hover_btn = 3;
 
-      // +Add dropdown item hover
-      if (app.batch_rename_show_add) {
-        int dd_x = add_x;
-        int dd_y = tf_y + field_h + 2;
-        int dd_w = add_w;
-        int dd_item_h = 26;
-        int dd_h2 = 3 * dd_item_h + 4;
-        int new_add_hover = -1;
-        if (x >= dd_x && x < dd_x + dd_w && y >= dd_y && y < dd_y + dd_h2) {
-          int opt = (y - dd_y - 2) / dd_item_h;
-          if (opt >= 0 && opt <= 2) new_add_hover = opt;
-        }
-        if (new_add_hover != app.batch_rename_add_hover) {
-          app.batch_rename_add_hover = new_add_hover;
-          draw(app);
-        }
-      }
+    int new_add_hover = -1;
+    if (app.batch_rename_show_add) {
+      int ctrl = hui::Hit::dialog_ctrl(hid);
+      int opt = ctrl - kBatchAddItemBase;
+      if (opt >= 0 && opt <= 2 &&
+          (hid & 0xFFFFC00) == dialog(kDlgBatch, 0))
+        new_add_hover = opt;
+    }
+    if (new_add_hover != app.batch_rename_add_hover) {
+      app.batch_rename_add_hover = new_add_hover;
+      draw(app);
     }
 
     bool changed = (new_hover_mode != app.batch_rename_hover_mode) ||
@@ -467,32 +362,13 @@ void handle_pointer_move(AppState& app, int x, int y) {
                dy >= app.open_with_hit_default[1] && dy < app.open_with_hit_default[1] + app.open_with_hit_default[3]) {
       new_hover = -5;
     } else {
-      int pad = 16, pad_in = 12, top_bar_h = 44, entry_h = 40, section_h = 26;
-      int total = static_cast<int>(app.open_with_apps.size());
-      int rec_count = app.open_with_exact_count;
-      int total_content_h = total * entry_h;
-      if (rec_count > 0) total_content_h += section_h;
-      if (rec_count < total) total_content_h += section_h;
-      int list_h = std::min(total_content_h, 320);
-      int list_x = static_cast<int>(app.open_with_x) + pad_in;
-      int list_y = static_cast<int>(app.open_with_y) + pad + top_bar_h + pad_in;
-      int list_w = static_cast<int>(app.open_with_w) - 2 * pad_in;
-      if (dx >= list_x && dx < list_x + list_w &&
-          dy >= list_y && dy < list_y + list_h) {
-        int content_y = app.open_with_scroll + static_cast<int>(dy - list_y);
-        int cy_off = 0;
-        for (int i = 0; i < total; ++i) {
-          if (i == 0 && rec_count > 0) {
-            if (content_y >= cy_off && content_y < cy_off + section_h) { new_hover = -1; break; }
-            cy_off += section_h;
-          }
-          if (i == rec_count && rec_count < total) {
-            if (content_y >= cy_off && content_y < cy_off + section_h) { new_hover = -1; break; }
-            cy_off += section_h;
-          }
-          if (content_y >= cy_off && content_y < cy_off + entry_h) { new_hover = i; break; }
-          cy_off += entry_h;
-        }
+      // App list rows resolved through the retained hit registry.
+      const uint32_t list_hid = app.hit_main.query(x, y);
+      int ctrl = hui::Hit::dialog_ctrl(list_hid);
+      int row = ctrl - hui::Hit::kOpenRowBase;
+      if (row >= 0 && row < static_cast<int>(app.open_with_apps.size()) &&
+          (list_hid & 0xFFFFC00) == hui::Hit::dialog(hui::Hit::kDlgOpenWith, 0)) {
+        new_hover = row;
       }
     }
 
@@ -504,29 +380,14 @@ void handle_pointer_move(AppState& app, int x, int y) {
   }
 
   if (app.term_chooser_open) {
-    const int kPad = 20, kTopBarH = 44, kEntryH = 40, kBottomBarH = 52;
-    const int kMaxListH = 300;
-    const int total = static_cast<int>(app.term_chooser_apps.size());
-    const int max_visible = std::max(1, kMaxListH / kEntryH);
-    const int visible = std::min(total, max_visible);
-    const int list_h = visible * kEntryH;
-    const int card_w = app.term_chooser_w;
-    const int card_h = kPad + kTopBarH + 8 + list_h + 8 + kBottomBarH + kPad;
-    const int card_x = app.term_chooser_x;
-    const int card_y = (app.height - card_h) / 2;
-
-    const int close_x = card_x + card_w - kPad - 28;
-    const int close_y = card_y + kPad - 4;
-    const int list_x = card_x + 12;
-    const int list_y = card_y + kPad + kTopBarH + 8;
-
+    const uint32_t hid = app.hit_main.query(x, y);
     int new_hover = -1;
-    if (x >= close_x && x < close_x + 28 && y >= close_y && y < close_y + 28)
+    if (hid == hui::Hit::dialog(hui::Hit::kDlgTerm, hui::Hit::kTermClose)) {
       new_hover = -2;
-    else if (x >= list_x && x < list_x + card_w - 24 && y >= list_y && y < list_y + list_h) {
-      int rel_y = y - list_y + app.term_chooser_scroll * kEntryH;
-      int idx = rel_y / kEntryH;
-      if (idx >= 0 && idx < total) new_hover = idx;
+    } else {
+      int ctrl = hui::Hit::dialog_ctrl(hid);
+      int idx = ctrl - hui::Hit::kTermRowBase;
+      if (idx >= 0 && idx < static_cast<int>(app.term_chooser_apps.size())) new_hover = idx;
     }
     app.term_chooser_hover = new_hover;
     draw(app);
@@ -567,21 +428,17 @@ void handle_pointer_move(AppState& app, int x, int y) {
       if (y >= content_y && y < content_y + app.top_bar_height)
         bar_y = y - content_y;
     }
-    double zf = app.zoom_pct / 100.0;
-    int btn_w = static_cast<int>(36.0 * zf);
-    int gap4 = static_cast<int>(6.0 * zf);
-    int bx = app.nav_origin_x();
+    // Top-bar hovers via retained registry (recalculated every paint).
+    const uint32_t thid = app.hit_main.query(x, y);
+    auto top_hover = [&](int ctrl) {
+      return thid == hui::Hit::topbar(app.active_pane, ctrl);
+    };
     // Sidebar fold toggle hover (drawn before the arrows when folded)
-    bool toggle_h = (bar_y < app.top_bar_height && app.sidebar_folded &&
-                     app.sidebar_toggle_w > 0 &&
-                     x >= app.sidebar_toggle_x &&
-                     x < app.sidebar_toggle_x + app.sidebar_toggle_w);
-    bool bh = (bar_y < app.top_bar_height && x >= bx && x < bx + btn_w);
-    bx += btn_w + gap4;
-    bool fh = (bar_y < app.top_bar_height && x >= bx && x < bx + btn_w);
-    bx += btn_w + gap4;
-    bool uh = (bar_y < app.top_bar_height && x >= bx && x < bx + btn_w) &&
-              can_navigate_up(app);
+    bool toggle_h = (thid == hui::Hit::topbar(0, hui::Hit::kTopFoldToggle) ||
+                     thid == hui::Hit::topbar(1, hui::Hit::kTopFoldToggle));
+    bool bh = top_hover(hui::Hit::kTopNavBack);
+    bool fh = top_hover(hui::Hit::kTopNavForward);
+    bool uh = top_hover(hui::Hit::kTopNavUp) && can_navigate_up(app);
 
     bool vh = (bar_y < app.top_bar_height && x >= pm_view_btn_x && x < pm_view_btn_x + pm_view_btn_w);
     bool search_h = (bar_y < app.top_bar_height && x >= pm_search_btn_x && x < pm_search_btn_x + pm_search_btn_w);
@@ -590,9 +447,7 @@ void handle_pointer_move(AppState& app, int x, int y) {
     bool filter_h = ((app.active_pane ? app.r_search_active : app.search_active) || (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active)) &&
                      bar_y < app.top_bar_height && x >= pm_filter_btn_x && x < pm_filter_btn_x + pm_filter_btn_w;
 
-    int gear_w = static_cast<int>(36.0 * zf);
-    int gear_x = pm_sort_btn_x + pm_sort_btn_w + gap4;
-    bool gh = (bar_y < app.top_bar_height && x >= gear_x && x < gear_x + gear_w);
+    bool gh = (thid == hui::Hit::topbar(app.active_pane, hui::Hit::kTopGear));
 
     bool dh = (pm_dots_btn_w > 0 &&
                bar_y >= pm_dots_btn_y && bar_y < pm_dots_btn_y + pm_dots_btn_h &&
@@ -686,12 +541,11 @@ void handle_pointer_move(AppState& app, int x, int y) {
 
   // ── Sort menu item hover ──
   if ((app.active_pane ? app.r_sort_menu_open : app.sort_menu_open)) {
+    const uint32_t hid = app.hit_main.query(x, y);
     int new_hover = -1;
-    if (x >= (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) && x < (app.active_pane ? app.r_sort_menu_x : app.sort_menu_x) + (app.active_pane ? app.r_sort_menu_w : app.sort_menu_w) &&
-        y >= (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) && y < (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) + (app.active_pane ? app.r_sort_menu_h : app.sort_menu_h)) {
-      int rel_y = y - (app.active_pane ? app.r_sort_menu_y : app.sort_menu_y) - kSortMenuPad;
-      int idx = rel_y / kSortMenuItemH +
-                (app.active_pane ? app.r_sort_menu_scroll : app.sort_menu_scroll);
+    if ((hid & hui::Hit::kGroupMask) == hui::Hit::kMenu &&
+        hui::Hit::menu_id(hid) == hui::Hit::kMenuSort) {
+      int idx = hui::Hit::menu_row(hid);
       if (idx >= 0 && idx < sort_menu_row_count() &&
           sort_menu_row(idx).kind != SortMenuRow::Kind::Separator &&
           sort_menu_row(idx).kind != SortMenuRow::Kind::GroupCaption)
@@ -706,15 +560,12 @@ void handle_pointer_move(AppState& app, int x, int y) {
 
   // ── Column chooser item hover ──
   if ((app.active_pane ? app.r_columns_menu_open : app.columns_menu_open)) {
-    auto& cmx = app.active_pane ? app.r_columns_menu_x : app.columns_menu_x;
-    auto& cmy = app.active_pane ? app.r_columns_menu_y : app.columns_menu_y;
-    auto& cmw = app.active_pane ? app.r_columns_menu_w : app.columns_menu_w;
-    auto& cmh = app.active_pane ? app.r_columns_menu_h : app.columns_menu_h;
     auto& cmh_hover = app.active_pane ? app.r_columns_menu_hover : app.columns_menu_hover;
+    const uint32_t hid = app.hit_main.query(x, y);
     int new_hover = -1;
-    if (x >= cmx && x < cmx + cmw && y >= cmy && y < cmy + cmh) {
-      int rel_y = y - cmy - kSortMenuPad;
-      int idx = rel_y / kSortMenuItemH;
+    if ((hid & hui::Hit::kGroupMask) == hui::Hit::kMenu &&
+        hui::Hit::menu_id(hid) == hui::Hit::kMenuColumns) {
+      int idx = hui::Hit::menu_row(hid);
       if (idx >= 0 && idx <= 4) new_hover = idx;
     }
     if (new_hover != cmh_hover) {
@@ -729,33 +580,20 @@ void handle_pointer_move(AppState& app, int x, int y) {
     auto& pm_filter_section = app.active_pane ? app.r_filter_dropdown_section : app.filter_dropdown_section;
     auto& pm_filter_hover = app.active_pane ? app.r_filter_dropdown_hover : app.filter_dropdown_hover;
     if (pm_filter_section > 0) {
+      const uint32_t hid = app.hit_main.query(x, y);
       int new_hover = -1;
-      if (x >= pm_filter_dd_x && x < pm_filter_dd_x + pm_filter_dd_w &&
-          y >= pm_filter_dd_y && y < pm_filter_dd_y + pm_filter_dd_h) {
-        int rel_y = y - pm_filter_dd_y - kFilterPD;
-        int gy = 0;
-        int glob = 0;
-        int section = pm_filter_section;
-        for (int si = 1; si <= 3; ++si) {
-          // Header
-          if (rel_y >= gy && rel_y < gy + kFilterHdrH) { new_hover = glob; break; }
-          ++glob;
-          gy += kFilterHdrH;
-
-          // Items if expanded
-          if (section == si) {
-            int cnt = (si == 1) ? 13 : (si == 2) ? 7 : 5;
-            int item_y = gy;
-            for (int i = 0; i < cnt; ++i) {
-              if (rel_y >= item_y && rel_y < item_y + kFilterItemH) { new_hover = glob; break; }
-              ++glob;
-              item_y += kFilterItemH;
-            }
-            gy = item_y;
-            if (new_hover >= 0) break;
-          }
-
-          gy += kFilterSep;
+      if ((hid & hui::Hit::kGroupMask) == hui::Hit::kMenu &&
+          hui::Hit::menu_id(hid) == hui::Hit::kMenuFilter) {
+        int ctrl = hui::Hit::menu_row(hid);
+        if (ctrl >= 200) {
+          // Header: glob is the header's position in the walk (counts only).
+          int si = ctrl - 200;
+          int glob = 0;
+          for (int s = 1; s < si; ++s)
+            glob += 1 + (pm_filter_section == s ? (s == 1 ? 13 : s == 2 ? 7 : 5) : 0);
+          new_hover = glob;
+        } else {
+          new_hover = ctrl;
         }
       }
       if (new_hover != pm_filter_hover) {
@@ -780,16 +618,11 @@ void handle_pointer_move(AppState& app, int x, int y) {
     auto& pm_pe_sel_start = app.active_pane ? app.r_path_edit_sel_start : app.path_edit_sel_start;
     auto& pm_pe_sel_end = app.active_pane ? app.r_path_edit_sel_end : app.path_edit_sel_end;
     double zf = app.zoom_pct / 100.0;
-    int arrow_w = static_cast<int>(36.0 * zf);
-    int gap4 = static_cast<int>(6.0 * zf);
-    int mx6 = static_cast<int>(24.0 * zf);
-    int path_pad = static_cast<int>(12.0 * zf);
-    int house_w = static_cast<int>(16.0 * zf);
-    int gap12 = static_cast<int>(12.0 * zf);
-    int nav_origin = app.nav_origin_x();
-    int path_x_inner = nav_origin + 3 * arrow_w + 2 * gap4 + mx6 + path_pad + house_w + gap12;
-    int path_w_inner = pm_search_btn_x - static_cast<int>(6.0 * zf) - path_x_inner;
-    int text_x = path_x_inner;
+    const hui::HitRegion* pe_field =
+        app.hit_main.find_id(hui::Hit::topbar(app.active_pane, hui::Hit::kTopPathText));
+    if (pe_field != nullptr) {
+    int path_w_inner = pe_field->w;
+    int text_x = pe_field->x;
     cairo_surface_t* tmp = cairo_image_surface_create(CAIRO_FORMAT_ARGB32, 1, 1);
     cairo_t* cr_tmp = cairo_create(tmp);
     cairo_select_font_face(cr_tmp, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
@@ -843,6 +676,7 @@ void handle_pointer_move(AppState& app, int x, int y) {
       pm_pe_sel_end = pm_pe_cursor;
       draw(app);
     }
+    } // pe_field
     return;
     }
   }

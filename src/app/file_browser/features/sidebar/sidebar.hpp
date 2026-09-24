@@ -22,7 +22,7 @@ namespace eh::file_browser {
 void sidebar_content_geometry(AppState& app, int& cx, int& cy, int& cw,
                               int& ch, int& banner_h);
 
-/// Recompute the Nautilus-style fold for window width `width`; resets the
+/// Recompute the narrow-window fold for width `width`; resets the
 /// fold-flap reveal whenever the fold state flips.
 void update_sidebar_fold(AppState& app, int width);
 
