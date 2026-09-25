@@ -481,7 +481,13 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
   (app.active_pane ? app.r_sort_btn_x : app.sort_btn_x) = show_sort ? sort_x : 0;
   (app.active_pane ? app.r_sort_btn_w : app.sort_btn_w) = show_sort ? sort_w : 0;
 
-  // Path bar fills remaining space down to the last-resort floor.
+  // Path bar fills remaining space. It never overlaps its neighbours: the
+  // width is clamped to the available gap so the pill, traffic lights and
+  // toolbar buttons can never overdraw each other no matter how narrow the
+  // window (or split pane) gets. Like GNOME Files, the location field
+  // shrinks and ellipsizes instead of painting over adjacent chrome; the
+  // inner content below further degrades (icon/dots and secondary search
+  // controls hide first) so the bar stays legible.
   int leftmost_right;
   if (show_folder) leftmost_right = folder_search_btn_x;
   else if (show_search) leftmost_right = search_btn_x;
@@ -491,7 +497,7 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
   else leftmost_right = (pane_w == 0) ? traffic_rx : content_right - right_margin;
   int path_x = path_left + path_margin;
   int path_w = leftmost_right - gap - path_x;
-  if (path_w < 60) path_w = 60;
+  if (path_w < 0) path_w = 0;
 
   int path_h = top_h - static_cast<int>(16.0 * zf);
   int path_y = (top_h - path_h) / 2;
@@ -535,25 +541,55 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
                     (pane_w > 0) ? (app.active_pane ? 2 : 1) : 0);
 
   // M3 focus ring: 2px accent outline while searching or editing the path.
-  if ((app.active_pane ? app.r_search_active : app.search_active) ||
-      (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active) ||
-      (app.active_pane ? app.r_path_editing : app.path_editing)) {
+  if (path_w > 0 &&
+      ((app.active_pane ? app.r_search_active : app.search_active) ||
+       (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active) ||
+       (app.active_pane ? app.r_path_editing : app.path_editing))) {
     cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.9);
     cairo_set_line_width(cr, 1.5);
     draw_rounded_rect(cr, path_x, path_y, path_w, path_h, path_h / 2.0);
     cairo_stroke(cr);
   }
 
-  // ── Three-dot menu on the far right ──
+  // ── Responsive pill chrome (GNOME-style graceful degradation) ──
+  // The location icon is decorative; the ⋮ button stays as long as it fits
+  // because it carries the toolbar overflow menu for hidden buttons. When
+  // the pill gets too narrow, the icon drops first so the folder name keeps
+  // whatever room remains and ellipsizes instead of overlapping neighbours.
   int dots_btn_w = static_cast<int>(24.0 * zf);
+  int icon_sz = static_cast<int>(12.0 * zf);
+  int head_pad = static_cast<int>(12.0 * zf);
+  int icon_gap = static_cast<int>(12.0 * zf); // gap-3
+  int tail_pad = static_cast<int>(16.0 * zf);
+  int min_label = std::max(12, static_cast<int>(20.0 * zf)); // room for "…" + a char
+  bool show_dots = path_w >= dots_btn_w + static_cast<int>(8.0 * zf);
+  bool show_icon = false;
+  if (show_dots) {
+    show_icon = path_w >= head_pad + icon_sz + icon_gap + min_label + dots_btn_w + tail_pad;
+  } else {
+    show_icon = path_w >= head_pad + icon_sz + icon_gap + min_label + static_cast<int>(8.0 * zf);
+  }
+  if (path_w <= 0) {
+    show_dots = false;
+    show_icon = false;
+  }
+
+  // ── Three-dot menu on the far right ──
   int dots_x = path_x + path_w - dots_btn_w + static_cast<int>(2.0 * zf);
   int dots_y = path_y;
-  (app.active_pane ? app.r_dots_btn_x : app.dots_btn_x) = dots_x;
-  (app.active_pane ? app.r_dots_btn_y : app.dots_btn_y) = dots_y;
-  (app.active_pane ? app.r_dots_btn_w : app.dots_btn_w) = dots_btn_w;
-  (app.active_pane ? app.r_dots_btn_h : app.dots_btn_h) = path_h;
+  if (show_dots) {
+    (app.active_pane ? app.r_dots_btn_x : app.dots_btn_x) = dots_x;
+    (app.active_pane ? app.r_dots_btn_y : app.dots_btn_y) = dots_y;
+    (app.active_pane ? app.r_dots_btn_w : app.dots_btn_w) = dots_btn_w;
+    (app.active_pane ? app.r_dots_btn_h : app.dots_btn_h) = path_h;
+  } else {
+    (app.active_pane ? app.r_dots_btn_x : app.dots_btn_x) = 0;
+    (app.active_pane ? app.r_dots_btn_y : app.dots_btn_y) = 0;
+    (app.active_pane ? app.r_dots_btn_w : app.dots_btn_w) = 0;
+    (app.active_pane ? app.r_dots_btn_h : app.dots_btn_h) = 0;
+  }
   // Three dots (⋮) — bold SVG, circle fallback
-  {
+  if (show_dots) {
     bool dhover = (app.active_pane ? app.r_dots_btn_hover : app.dots_btn_hover);
     if (dhover) {
       cairo_save(cr);
@@ -581,13 +617,13 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
       cairo_restore(cr);
     } else {
       double dot_r = 1.1 * zf;
-      double gap = 2.8 * zf;
+      double dgap = 2.8 * zf;
       double cx = dots_x + dots_btn_w / 2.0;
-      double cy0 = path_y + path_h / 2.0 - gap - dot_r;
+      double cy0 = path_y + path_h / 2.0 - dgap - dot_r;
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
                               dhover ? 0.85 : 0.5);
       for (int i = 0; i < 3; ++i) {
-        cairo_arc(cr, cx, cy0 + i * (2.0 * dot_r + gap), dot_r, 0.0, 2.0 * M_PI);
+        cairo_arc(cr, cx, cy0 + i * (2.0 * dot_r + dgap), dot_r, 0.0, 2.0 * M_PI);
         cairo_fill(cr);
       }
     }
@@ -598,14 +634,14 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
                           CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 13.0 * zf);
 
-  int text_x = path_x + static_cast<int>(12.0 * zf);
+  int text_x = path_x + head_pad;
   int text_y = top_h / 2 + static_cast<int>(4.0 * zf);
 
   // Draw location icon (home / music / video / documents — bold SVG,
-  // vector house fallback). Sidebar icons are untouched.
-  int icon_sz = static_cast<int>(12.0 * zf);
+  // vector house fallback). Sidebar icons are untouched. Hidden on very
+  // narrow pills so the folder name keeps the room.
   int icon_y = (top_h - icon_sz) / 2;
-  {
+  if (show_icon) {
     cairo_surface_t* nav_svg = app.home_nav_svg;
     std::string hp = home_dir();
     const std::string& cp = app.cur_tab().current_path;
@@ -630,8 +666,11 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     }
   }
 
-  int path_text_x = text_x + icon_sz + static_cast<int>(12.0 * zf); // gap-3
-  int path_text_w = path_w - (path_text_x - path_x) - dots_btn_w - static_cast<int>(16.0 * zf);
+  int path_text_x = text_x + (show_icon ? icon_sz + icon_gap : 0);
+  int dots_reserved = show_dots ? dots_btn_w : 0;
+  int tail_reserved = show_dots ? tail_pad : static_cast<int>(8.0 * zf);
+  int path_text_w = path_w - (path_text_x - path_x) - dots_reserved - tail_reserved;
+  if (path_text_w < 0) path_text_w = 0;
   app.hit_main.add(hui::Hit::topbar(app.active_pane, hui::Hit::kTopPathBar), path_x, y0, path_w,
                    top_h);
   app.hit_main.add(hui::Hit::topbar(app.active_pane, hui::Hit::kTopPathText), path_text_x,
@@ -639,36 +678,45 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
 
   if ((app.active_pane ? app.r_search_active : app.search_active) || (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active)) {
     // ── Search bar ──
+    // The right edge respects a hidden ⋮ (its space is reclaimed for the query).
     int search_left = path_text_x;
-    int search_right = path_x + path_w - dots_btn_w - static_cast<int>(8.0 * zf);
+    int search_right = path_x + path_w - (show_dots ? dots_btn_w : 0) - static_cast<int>(8.0 * zf);
+    if (search_right < search_left) search_right = search_left;
     int search_w = search_right - search_left;
+    if (search_w < 0) search_w = 0;
     int search_icon_size = static_cast<int>(14.0 * zf);
+    int query_min = std::max(24, static_cast<int>(40.0 * zf));
+    bool show_search_icon =
+        search_w >= search_icon_size + static_cast<int>(8.0 * zf) + query_min;
     int search_icon_x = search_left;
-    int search_text_left = search_left + search_icon_size + static_cast<int>(8.0 * zf);
+    int search_text_left =
+        search_left + (show_search_icon ? search_icon_size + static_cast<int>(8.0 * zf) : 0);
     (app.active_pane ? app.r_search_bar_x : app.search_bar_x) = search_left;
     (app.active_pane ? app.r_search_bar_w : app.search_bar_w) = search_w;
 
     // Draw magnifying glass icon (SVG or fallback text)
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    if (app.search_svg) {
-      double svg_w = static_cast<double>(cairo_image_surface_get_width(app.search_svg));
-      double svg_h = static_cast<double>(cairo_image_surface_get_height(app.search_svg));
-      int sz = search_icon_size;
-      int ox = search_icon_x;
-      int oy = (top_h - sz) / 2;
-      double display_scale = sz / std::max(svg_w, svg_h);
-      cairo_save(cr);
-      cairo_rectangle(cr, ox, oy, sz, sz);
-      cairo_clip(cr);
-      cairo_translate(cr, ox, oy);
-      cairo_scale(cr, display_scale, display_scale);
-      cairo_mask_surface(cr, app.search_svg, 0, 0);
-      cairo_restore(cr);
-    } else {
-      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-      cairo_set_font_size(cr, search_icon_size * 0.8);
-      cairo_move_to(cr, search_icon_x + 2.0, (top_h + search_icon_size * 0.4) / 2);
-      cairo_show_text(cr, "\u2315");
+    if (show_search_icon) {
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+      if (app.search_svg) {
+        double svg_w = static_cast<double>(cairo_image_surface_get_width(app.search_svg));
+        double svg_h = static_cast<double>(cairo_image_surface_get_height(app.search_svg));
+        int sz = search_icon_size;
+        int ox = search_icon_x;
+        int oy = (top_h - sz) / 2;
+        double display_scale = sz / std::max(svg_w, svg_h);
+        cairo_save(cr);
+        cairo_rectangle(cr, ox, oy, sz, sz);
+        cairo_clip(cr);
+        cairo_translate(cr, ox, oy);
+        cairo_scale(cr, display_scale, display_scale);
+        cairo_mask_surface(cr, app.search_svg, 0, 0);
+        cairo_restore(cr);
+      } else {
+        cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+        cairo_set_font_size(cr, search_icon_size * 0.8);
+        cairo_move_to(cr, search_icon_x + 2.0, (top_h + search_icon_size * 0.4) / 2);
+        cairo_show_text(cr, "\u2315");
+      }
     }
 
     // Search text
@@ -678,58 +726,77 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
                             CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, 13.0 * zf);
 
-    if (has_text) {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    } else {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.35);
-      cairo_move_to(cr, search_text_left, text_y);
-      cairo_show_text(cr, (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active) ? "Recursive search..." : "Search...");
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    }
-    cairo_move_to(cr, search_text_left, text_y);
-    cairo_show_text(cr, display.c_str());
-
-    // Cursor (text-height, centered)
-    {
-      std::string before = (app.active_pane ? app.r_search_query : app.search_query).substr(0, static_cast<std::size_t>(app.active_pane ? app.r_search_cursor : app.search_cursor));
-      cairo_text_extents_t cur_te;
-      cairo_text_extents(cr, before.c_str(), &cur_te);
-      int cursor_x = search_text_left + static_cast<int>(cur_te.width);
-      int cursor_h = static_cast<int>(14.0 * zf);
-      int cursor_y = (top_h - cursor_h) / 2;
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.8);
-      cairo_rectangle(cr, cursor_x, cursor_y, 1, cursor_h);
-      cairo_fill(cr);
-    }
-
-    // ── Filter button + clear button (right-to-left layout) ──
-    int right_cursor = search_right;
+    // Measure the secondary controls up front so narrow pills can shed
+    // them (lock → case → mode → filter) while the query keeps a minimum
+    // readable budget. Like GNOME, the query field itself never overlaps.
+    bool any_active = (app.active_pane ? app.r_filter_type_idx : app.filter_type_idx) > 0 || (app.active_pane ? app.r_filter_size_idx : app.filter_size_idx) > 0 || (app.active_pane ? app.r_filter_date_idx : app.filter_date_idx) > 0;
+    std::string filter_label = any_active ? "Filtered" : "Filter";
+    cairo_text_extents_t filter_te;
+    cairo_text_extents(cr, filter_label.c_str(), &filter_te);
+    int filter_bw = static_cast<int>(filter_te.width) + static_cast<int>(20.0 * zf);
     int btn_gap = static_cast<int>(6.0 * zf);
+    int clear_w = 0;
+    if (has_text) {
+      cairo_text_extents_t clear_te0;
+      cairo_text_extents(cr, "×", &clear_te0);
+      clear_w = static_cast<int>(clear_te0.width) + static_cast<int>(12.0 * zf);
+    }
+    int seg_total = static_cast<int>(34.0 * zf) * 4;
+    int case_w = static_cast<int>(28.0 * zf);
+    int lock_w = static_cast<int>(26.0 * zf);
+    int icon_part = show_search_icon ? search_icon_size + static_cast<int>(8.0 * zf) : 0;
+    bool show_f = true, show_m = true, show_c = true, show_l = true;
+    auto search_needs = [&](bool f, bool m, bool c, bool l) -> int {
+      int need = icon_part + query_min + clear_w;
+      if (f) need += btn_gap + filter_bw;
+      if (l) need += btn_gap + lock_w;
+      if (c) need += btn_gap + case_w;
+      if (m) need += btn_gap + seg_total;
+      if (f || m || c || l) need += btn_gap; // breathing room before the query
+      return need;
+    };
+    // Shed least-essential controls first until the query fits.
+    for (int step = 0; step < 4; ++step) {
+      if (search_needs(show_f, show_m, show_c, show_l) <= search_w) break;
+      if (show_l) show_l = false;
+      else if (show_c) show_c = false;
+      else if (show_m) show_m = false;
+      else if (show_f) show_f = false;
+      else break;
+    }
+
+    // Lay out the surviving right-side controls so the query budget below
+    // matches exactly what is painted (no overdraw at any width).
+    int right_cursor = search_right;
 
     // Clear button (×)
     if (has_text) {
       std::string clear_str = "×";
       cairo_text_extents_t clear_te;
       cairo_text_extents(cr, clear_str.c_str(), &clear_te);
-      int clear_w = static_cast<int>(clear_te.width) + static_cast<int>(12.0 * zf);
       right_cursor -= clear_w;
       (app.active_pane ? app.r_search_clear_x : app.search_clear_x) = right_cursor;
       (app.active_pane ? app.r_search_clear_w : app.search_clear_w) = clear_w;
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.5);
-      cairo_move_to(cr, right_cursor + (clear_w - clear_te.width) / 2, text_y);
-      cairo_show_text(cr, clear_str.c_str());
     } else {
       (app.active_pane ? app.r_search_clear_x : app.search_clear_x) = 0;
       (app.active_pane ? app.r_search_clear_w : app.search_clear_w) = 0;
     }
+    // Clear glyph (position reserved above so the query budget below is exact).
+    if (has_text) {
+      cairo_text_extents_t clear_te;
+      cairo_text_extents(cr, "×", &clear_te);
+      int clear_x = (app.active_pane ? app.r_search_clear_x : app.search_clear_x);
+      int clear_w_draw = (app.active_pane ? app.r_search_clear_w : app.search_clear_w);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.5);
+      cairo_move_to(cr, clear_x + (clear_w_draw - clear_te.width) / 2, text_y);
+      cairo_show_text(cr, "×");
+    }
 
-    // Single Filter button (glassy outline style like location bar)
-    {
-      bool any_active = (app.active_pane ? app.r_filter_type_idx : app.filter_type_idx) > 0 || (app.active_pane ? app.r_filter_size_idx : app.filter_size_idx) > 0 || (app.active_pane ? app.r_filter_date_idx : app.filter_date_idx) > 0;
-      std::string label = any_active ? "Filtered" : "Filter";
-      cairo_text_extents_t te;
-      cairo_text_extents(cr, label.c_str(), &te);
-      int bw = static_cast<int>(te.width) + static_cast<int>(20.0 * zf);
+    // Single Filter button (glassy outline style like location bar).
+    // Hidden on narrow pills; the query keeps the room instead.
+    if (show_f) {
+      cairo_text_extents_t te = filter_te;
+      int bw = filter_bw;
       int bh = static_cast<int>(24.0 * zf);
       int by = (top_h - bh) / 2;
       right_cursor -= (btn_gap + bw);
@@ -755,7 +822,10 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
       // Text
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, any_active ? 1.0 : hv ? 0.9 : 0.7);
       cairo_move_to(cr, right_cursor + (bw - te.width) / 2, text_y);
-      cairo_show_text(cr, label.c_str());
+      cairo_show_text(cr, filter_label.c_str());
+    } else {
+      (app.active_pane ? app.r_filter_btn_x : app.filter_btn_x) = 0;
+      (app.active_pane ? app.r_filter_btn_w : app.filter_btn_w) = 0;
     }
 
     // ── Query-mode segment, case toggle, lock (left of Filter) ──
@@ -774,13 +844,13 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
       int by2 = (top_h - bh2) / 2;
       int seg_w = static_cast<int>(34.0 * zf);
       int seg_count = 4;
-      int seg_total = seg_w * seg_count;
+      int seg_total_local = seg_w * seg_count;
 
       // Lock button (rightmost of this group)
-      dw_lock_w = static_cast<int>(26.0 * zf);
-      right_cursor -= (btn_gap + dw_lock_w);
-      dw_lock_x = right_cursor;
-      {
+      if (show_l) {
+        dw_lock_w = lock_w;
+        right_cursor -= (btn_gap + dw_lock_w);
+        dw_lock_x = right_cursor;
         bool hv2 = app.active_pane ? app.r_search_lock_hover : app.search_lock_hover;
         cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
                               dw_lock ? 0.95 : hv2 ? 0.6 : 0.35);
@@ -792,13 +862,19 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
         if (dw_lock) cairo_fill(cr); else cairo_stroke(cr);
         cairo_arc(cr, cx, cy - s * 0.1, s * 0.45, M_PI, 2 * M_PI);
         cairo_stroke(cr);
+      } else {
+        dw_lock_w = 0;
+        dw_lock_x = 0;
       }
 
       // Case toggle ("Aa")
-      dw_case_w = static_cast<int>(28.0 * zf);
-      right_cursor -= dw_case_w;
-      dw_case_x = right_cursor;
-      {
+      if (show_c) {
+        dw_case_w = case_w;
+        // Original packs case directly against lock; reclaim the gap when
+        // lock is hidden so the group stays compact.
+        if (!show_l) right_cursor -= btn_gap;
+        right_cursor -= dw_case_w;
+        dw_case_x = right_cursor;
         bool hv2 = app.active_pane ? app.r_search_case_hover : app.search_case_hover;
         cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
                               dw_case ? 0.95 : hv2 ? 0.6 : 0.35);
@@ -806,14 +882,17 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
         cairo_text_extents(cr, "Aa", &te2);
         cairo_move_to(cr, right_cursor + (dw_case_w - te2.width) / 2, text_y);
         cairo_show_text(cr, "Aa");
+      } else {
+        dw_case_w = 0;
+        dw_case_x = 0;
       }
-      right_cursor -= btn_gap;
+      if (show_c || show_l) right_cursor -= btn_gap;
 
       // Mode segment control
-      dw_mode_w = seg_total;
-      right_cursor -= seg_total;
-      dw_mode_x = right_cursor;
-      {
+      if (show_m) {
+        dw_mode_w = seg_total_local;
+        right_cursor -= seg_total_local;
+        dw_mode_x = right_cursor;
         static constexpr const char* kSegLabels[] = {"abc", "*", ".*", "txt"};
         bool hv2 = app.active_pane ? app.r_search_mode_hover : app.search_mode_hover;
         int hov_btn = app.active_pane ? app.r_search_mode_hover_btn : app.search_mode_hover_btn;
@@ -842,10 +921,50 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
         }
         cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.35);
         cairo_set_line_width(cr, 1);
-        draw_rounded_rect(cr, right_cursor + 0.5, by2 + 0.5, seg_total - 1, bh2 - 1, 5);
+        draw_rounded_rect(cr, right_cursor + 0.5, by2 + 0.5, seg_total_local - 1, bh2 - 1, 5);
         cairo_stroke(cr);
+        right_cursor -= btn_gap;
+      } else {
+        dw_mode_w = 0;
+        dw_mode_x = 0;
       }
-      right_cursor -= btn_gap;
+
+      // Clamp the query to whatever room survives: the text, placeholder,
+      // cursor and regex underline are all clipped to this budget so they
+      // can never paint over the controls (or the pill edge) when narrow.
+      bool any_ctrl = show_f || show_m || show_c || show_l;
+      int query_budget = right_cursor - search_text_left - (any_ctrl ? btn_gap : 0);
+      if (query_budget < 0) query_budget = 0;
+      // Keep the retained search-bar rect in sync with the clipped query.
+      (app.active_pane ? app.r_search_bar_x : app.search_bar_x) = search_left;
+      (app.active_pane ? app.r_search_bar_w : app.search_bar_w) = search_w;
+
+      cairo_save(cr);
+      cairo_rectangle(cr, search_text_left, path_y, query_budget, path_h);
+      cairo_clip(cr);
+      if (has_text) {
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+      } else {
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.35);
+        cairo_move_to(cr, search_text_left, text_y);
+        cairo_show_text(cr, (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active) ? "Recursive search..." : "Search...");
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+      }
+      cairo_move_to(cr, search_text_left, text_y);
+      cairo_show_text(cr, display.c_str());
+
+      // Cursor (text-height, centered)
+      {
+        std::string before = (app.active_pane ? app.r_search_query : app.search_query).substr(0, static_cast<std::size_t>(app.active_pane ? app.r_search_cursor : app.search_cursor));
+        cairo_text_extents_t cur_te;
+        cairo_text_extents(cr, before.c_str(), &cur_te);
+        int cursor_x = search_text_left + static_cast<int>(cur_te.width);
+        int cursor_h = static_cast<int>(14.0 * zf);
+        int cursor_y = (top_h - cursor_h) / 2;
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.8);
+        cairo_rectangle(cr, cursor_x, cursor_y, 1, cursor_h);
+        cairo_fill(cr);
+      }
 
       // Red invalid underline for malformed regex
       bool regex_bad = !(app.active_pane ? app.r_search_regex_valid : app.search_regex_valid);
@@ -857,9 +976,12 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
                       text_y + static_cast<int>(4.0 * zf));
         cairo_stroke(cr);
       }
+      cairo_restore(cr);
     }
   } else if (app.active_pane ? app.r_path_editing : app.path_editing) {
     // ── Editable location bar ──
+    // Clipped to the text budget so a long path can never paint over the
+    // pill edge or neighbours when the window is narrow.
     auto& dw_pe_buf = app.active_pane ? app.r_path_edit_buf : app.path_edit_buf;
     auto& dw_pe_cursor = app.active_pane ? app.r_path_edit_cursor : app.path_edit_cursor;
     auto& dw_pe_sel_start = app.active_pane ? app.r_path_edit_sel_start : app.path_edit_sel_start;
@@ -868,7 +990,7 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     cairo_text_extents(cr, dw_pe_buf.c_str(), &te);
     std::string display = dw_pe_buf;
     int scroll_offset = 0;
-    if (te.width > path_text_w) {
+    if (path_text_w > 0 && te.width > path_text_w) {
       int keep = static_cast<int>(display.size()) * path_text_w /
                  std::max(1, static_cast<int>(te.width));
       if (keep > 3 && keep < static_cast<int>(display.size())) {
@@ -882,6 +1004,10 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     cairo_font_extents(cr, &fe);
     double text_h = fe.ascent + fe.descent;
     double text_top = text_y - fe.ascent;
+
+    cairo_save(cr);
+    cairo_rectangle(cr, path_text_x, path_y, path_text_w, path_h);
+    cairo_clip(cr);
 
     if (dw_pe_sel_start >= 0 && dw_pe_sel_start != dw_pe_sel_end) {
       int sel_a = std::min(dw_pe_sel_start, dw_pe_sel_end);
@@ -919,6 +1045,7 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
       cairo_rectangle(cr, cursor_x, text_top, 1, text_h);
       cairo_fill(cr);
     }
+    cairo_restore(cr);
   } else {
     // ── Simple location label (single friendly name + house, matching Design.png aesthetic) ──
     (app.active_pane ? app.r_breadcrumbs : app.breadcrumbs).clear();
@@ -952,15 +1079,20 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
 
     cairo_set_font_size(cr, 13.0 * zf);
 
-    // Measure + elide if needed
-    std::string display_label = hui::design::clip_end(cr, label, path_text_w - 4);
+    // Measure + elide if needed. The budget is clamped to >= 0 and the
+    // paint is clipped to it, so a narrow pill shows an ellipsis instead
+    // of overlapping the ⋮ button or pill edge.
+    int label_budget = path_text_w - static_cast<int>(4.0 * zf);
+    if (label_budget < 0) label_budget = 0;
+    std::string display_label = hui::design::clip_end(cr, label, label_budget);
     cairo_text_extents_t label_te;
     cairo_text_extents(cr, display_label.c_str(), &label_te);
     int label_w = static_cast<int>(label_te.x_advance + 4.0 * zf);
     if (label_w > path_text_w) label_w = path_text_w;
+    if (label_w < 0) label_w = 0;
 
     bool label_hovered = ((app.active_pane ? app.r_breadcrumb_hover : app.breadcrumb_hover) == 0);
-    if (label_hovered) {
+    if (label_hovered && label_w > 0) {
       cairo_save(cr);
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
       draw_rounded_rect(cr, path_text_x - 2, path_y + 2, label_w + 4, path_h - 4,
@@ -969,9 +1101,13 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
       cairo_restore(cr);
     }
 
+    cairo_save(cr);
+    cairo_rectangle(cr, path_text_x, path_y, path_text_w, path_h);
+    cairo_clip(cr);
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, label_hovered ? 1.0 : 0.92);
     cairo_move_to(cr, path_text_x, text_y);
     cairo_show_text(cr, display_label.c_str());
+    cairo_restore(cr);
 
     // One breadcrumb entry for hit testing / hover (clicking it is a no-op; empty space in the bar enters edit)
     BreadcrumbSegment seg;
