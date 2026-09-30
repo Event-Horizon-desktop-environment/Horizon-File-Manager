@@ -45,7 +45,6 @@ static int hex_digit(char c) {
   return -1;
 }
 
-// ── ext-data-control-v1 ops callbacks ────────────────────────────────────
 
 void* bindExtManager([[maybe_unused]] wl_registry* registry, [[maybe_unused]] uint32_t name,
                      [[maybe_unused]] uint32_t version) {
@@ -94,7 +93,6 @@ void extOfferReceive(void* offer, const char* mimeType, int fd) {
   ext_data_control_offer_v1_receive(static_cast<ext_data_control_offer_v1*>(offer), mimeType, fd);
 }
 
-// ── wlr-data-control-unstable-v1 ops callbacks ───────────────────────────
 
 void* bindWlrManager([[maybe_unused]] wl_registry* registry, [[maybe_unused]] uint32_t name,
                      [[maybe_unused]] uint32_t version) {
@@ -186,7 +184,6 @@ namespace eh::wayland {
 const DataControlOps* ext_data_control_ops() { return build_ext_ops(); }
 const DataControlOps* wlr_data_control_ops() { return build_wlr_ops(); }
 
-// ── URI helpers ────────────────────────────────────────────────────────────
 
 std::string ClipboardService::file_uri_for_path(const std::string& abs_path) {
   std::string out = "file://";
@@ -238,7 +235,6 @@ std::string ClipboardService::canonical_abs_path(const std::string& path) {
   return std::filesystem::absolute(path, ec).string();
 }
 
-// ── Lifecycle ──────────────────────────────────────────────────────────────
 
 ClipboardService::~ClipboardService() { cleanup(); }
 
@@ -307,7 +303,6 @@ void ClipboardService::notify_changed() {
   if (changedCb_) changedCb_();
 }
 
-// ── ext-data-control-v1 C thunks ─────────────────────────────────────────
 
 void ClipboardService::ext_data_offer(void* data, ext_data_control_device_v1*, ext_data_control_offer_v1* offer) {
   auto* self = static_cast<ClipboardService*>(data);
@@ -339,7 +334,6 @@ void ClipboardService::ext_source_cancelled(void* data, ext_data_control_source_
   static_cast<ClipboardService*>(data)->handle_source_cancelled();
 }
 
-// ── wlr-data-control-unstable-v1 C thunks ────────────────────────────────
 
 void ClipboardService::wlr_data_offer(void* data, zwlr_data_control_device_v1*, zwlr_data_control_offer_v1* offer) {
   auto* self = static_cast<ClipboardService*>(data);
@@ -369,7 +363,6 @@ void ClipboardService::wlr_source_cancelled(void* data, zwlr_data_control_source
   static_cast<ClipboardService*>(data)->handle_source_cancelled();
 }
 
-// ── Internal protocol handlers ───────────────────────────────────────────
 
 void ClipboardService::handle_offer_mime_type(void* offer, const char* mime) {
   if (!mime || !offer) return;
@@ -451,7 +444,6 @@ void ClipboardService::handle_source_cancelled() {
   notify_changed();
 }
 
-// ── Source creation ───────────────────────────────────────────────────────
 
 void ClipboardService::build_source_and_set_selection() {
   // Destroy the previous outgoing source without touching outgoingData_.
@@ -490,7 +482,6 @@ void ClipboardService::build_source_and_set_selection() {
   notify_changed();
 }
 
-// ── Copy operations ───────────────────────────────────────────────────────
 
 bool ClipboardService::copy_data(std::string mime_type, std::string data) {
   if (!is_available()) return false;
@@ -553,7 +544,6 @@ bool ClipboardService::copy_files(bool cut, const std::vector<std::string>& abs_
   return true;
 }
 
-// ── Read operations ───────────────────────────────────────────────────────
 
 bool ClipboardService::selection_supports_text() const {
   for (const auto& m : selectionMimes_) {

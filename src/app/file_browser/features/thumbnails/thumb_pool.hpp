@@ -42,6 +42,11 @@ void thumb_pool_enqueue(AppState& app, const std::string& path, int size);
 cairo_surface_t* thumb_decode_sync(const std::string& path, int size,
                                    bool* used_video);
 
+// Out-of-process decode via horizon-thumbnailer(1). Spawns the helper,
+// loads the resulting PNG, cleans up. Returns null when the helper is
+// disabled/missing/failed. Safe on any thread (worker only, never UI).
+cairo_surface_t* thumb_via_helper(const std::string& path, int size);
+
 // Insert a finished surface into the app's thumb cache with LRU bookkeeping
 // and eviction (UI thread only). Takes ownership of `s` either way.
 void thumb_cache_install(AppState& app, const std::string& path, int size,

@@ -50,7 +50,6 @@ namespace fs = std::filesystem;
 namespace eh::file_browser {
 
 
-// ── list view ────────────────────────────────────────────────────
 
 // Shared Group By header band (list/grid/compact). pinned=true adds a
 // shadow so the sticky header reads as floating above content.
@@ -104,7 +103,6 @@ static void draw_column_header(AppState& app, cairo_t* cr, int x, int y, int w, 
   cairo_stroke(cr);
 }
 
-// ── draw_tab_bar ─────────────────────────────────────────────────
 
 void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int y0, int pane_x, int pane_w) {
   double zf = app.zoom_pct / 100.0;
@@ -131,7 +129,6 @@ void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int y0, int pane
   bool dragging = app.tab_dragging;
   int drag_sb_idx = dragging ? app.tab_drag_from : -1;
 
-  // ── Pass 1: measure every tab so overflow can be distributed fairly ──
   int close_w = close_icon_sz + pad;
   int min_tab_w = static_cast<int>(100.0 * zf);
   std::vector<std::string> tab_labels(tab_count);
@@ -251,7 +248,7 @@ void draw_tab_bar(AppState& app, cairo_t* cr, int w, int tab_h, int y0, int pane
     }
 
     // Store hit rect + register the retained region (single source of
-    // truth for input; see ui/hit_registry.hpp).
+    // truth for input; see ui/hit.hpp).
     app.tab_hits[i].x = x;
     app.tab_hits[i].w = tab_w;
     app.tab_hits[i].close_x = close_x;
@@ -330,7 +327,6 @@ void draw_list_view(AppState& app, cairo_t* cr, int content_x,
   int type_x = tgt_x + tgt_w;
   int type_w = content_w - (type_x - content_x);
 
-  // ── Column header row ──
   cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.05);
   cairo_rectangle(cr, content_x, content_y, content_w, entry_h);
   cairo_fill(cr);
@@ -537,7 +533,6 @@ void draw_list_view(AppState& app, cairo_t* cr, int content_x,
 
 
 
-// ── grid view ────────────────────────────────────────────────────
 
 // Per-frame Pango shaping/layout is the dominant non-pixman cost in grid
 // view (harfbuzz+pango+layout allocations). The same ~N visible labels
@@ -660,7 +655,6 @@ struct LabelRasterCache {
 };
 static LabelRasterCache g_grid_labels;
 
-// ── TEMP grid profiler ───────────────────────────────────────────
 struct DrawZone {
   const char* name;
   std::chrono::steady_clock::time_point t0;
@@ -679,7 +673,6 @@ struct DrawZone {
   }
   ~DrawZone() { end(); }
 };
-// ── end TEMP grid profiler ───────────────────────────────────────
 
 // Bench-only micro-profiler. Zero-cost when app.paint_profile is false:
 // the active check happens before either clock() call. `enabled` further
@@ -948,7 +941,6 @@ void draw_grid_view(AppState& app, cairo_t* cr, int content_x,
   }
 }
 
-// ── Build tree view entries ──────────────────────────────────────
 void build_tree_entries(AppState& app) {
   auto& tab = app.cur_tab();
   tab.tree_entries.clear();
@@ -1027,7 +1019,6 @@ void build_tree_entries(AppState& app) {
   tab.tree_entries_dirty = false;
 }
 
-// ── Tree view ────────────────────────────────────────────────────
 void draw_tree_view(AppState& app, cairo_t* cr, int content_x,
                     int content_y, int content_w, int view_h) {
   double zf = app.zoom_pct / 100.0;
@@ -1157,7 +1148,6 @@ void draw_tree_view(AppState& app, cairo_t* cr, int content_x,
   app.cur_tab().content_h = y - content_y + app.cur_tab().scroll_px;
 }
 
-// ── Compact view ─────────────────────────────────────────────────
 void draw_compact_view(AppState& app, cairo_t* cr, int content_x,
                        int content_y, int content_w, int view_h) {
   double zf = app.zoom_pct / 100.0;

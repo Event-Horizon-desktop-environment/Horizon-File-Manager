@@ -36,7 +36,6 @@ namespace fs = std::filesystem;
 namespace xdg = eh::shell::desktop::xdg;
 
 namespace eh::file_browser {
-// ── properties + settings hit tests, click handler (moved from events.cpp) ──────────────────────────
 int properties_hit_test(AppState& app, int x, int y) {
   const auto& p = app.properties;
   if (!p.open) return -1;
@@ -108,10 +107,23 @@ int properties_hit_test(AppState& app, int x, int y) {
       return 17;
   }
 
+  // Rating stars (Basic tab, single selection)
+  if (!p.multi && p.hit_rating_row[2] > 0) {
+    if (x >= p.hit_rating_row[0] && x < p.hit_rating_row[0] + p.hit_rating_row[2] &&
+        y >= p.hit_rating_row[1] && y < p.hit_rating_row[1] + p.hit_rating_row[3])
+      return 18;
+  }
+
+  // Comment row (Basic tab, single selection)
+  if (!p.multi && p.hit_comment_row[2] > 0) {
+    if (x >= p.hit_comment_row[0] && x < p.hit_comment_row[0] + p.hit_comment_row[2] &&
+        y >= p.hit_comment_row[1] && y < p.hit_comment_row[1] + p.hit_comment_row[3])
+      return 19;
+  }
+
   return 0; // inside dialog but no specific widget
 }
 
-// ── settings hit test ────────────────────────────────────────────
 
 int settings_hit_test(AppState& app, int x, int y) {
   // Resolved through the retained hit registry (rects stored during paint
@@ -126,6 +138,7 @@ int settings_hit_test(AppState& app, int x, int y) {
     case hui::Hit::kSettingsTabBase + 0: return -3;
     case hui::Hit::kSettingsTabBase + 1: return -4;
     case hui::Hit::kSettingsTabBase + 2: return -22;
+    case hui::Hit::kSettingsTabAccounts: return -26;
     case hui::Hit::kSettingsOk: return -5;
     case hui::Hit::kSettingsApply: return -6;
     case hui::Hit::kSettingsCancel: return -7;
@@ -143,17 +156,45 @@ int settings_hit_test(AppState& app, int x, int y) {
     case hui::Hit::kSettingsScaleSlider: return -23;
     case hui::Hit::kSettingsMatugen: return -18;
     case hui::Hit::kSettingsColorEng: return -24;
+    case hui::Hit::kSettingsTrashAutoToggle: return -70;
+    case hui::Hit::kSettingsTrashDaysDown: return -71;
+    case hui::Hit::kSettingsTrashDaysUp: return -72;
+    case hui::Hit::kSettingsTrashMbDown: return -73;
+    case hui::Hit::kSettingsTrashMbUp: return -74;
     case hui::Hit::kSettingsTermDrop: return -12;
     case hui::Hit::kSettingsIndepToggle: return -21;
+    case hui::Hit::kSettingsRecentToggle: return -25;
+    case hui::Hit::kSettingsRestoreSessionToggle: return -75;
+    case hui::Hit::kSettingsAcctGoogle: return -27;
+    case hui::Hit::kSettingsAcctNcConnect: return -28;
+    case hui::Hit::kSettingsAcctNcServer: return -29;
+    case hui::Hit::kSettingsAcctNcUser: return -30;
+    case hui::Hit::kSettingsAcctOwncloud: return -31;
+    case hui::Hit::kSettingsDriveClientId: return -32;
+    case hui::Hit::kSettingsDriveConnect: return -33;
+    case hui::Hit::kSettingsDriveClear: return -34;
+    case hui::Hit::kSettingsNcServerClear: return -35;
+    case hui::Hit::kSettingsNcUserClear: return -36;
+    case hui::Hit::kSettingsDriveSecret: return -37;
+    case hui::Hit::kSettingsDriveSecretClear: return -38;
+    case hui::Hit::kSettingsTabTags: return -48;
     default: break;
   }
   if (ctrl >= hui::Hit::kSettingsDropItemBase &&
       ctrl < hui::Hit::kSettingsDropItemBase + 6)
     return ctrl - hui::Hit::kSettingsDropItemBase;
+  if (ctrl >= hui::Hit::kSettingsDriveDiscBase &&
+      ctrl < hui::Hit::kSettingsDriveDiscBase + 8)
+    return -40 - (ctrl - hui::Hit::kSettingsDriveDiscBase);
+  if (ctrl >= hui::Hit::kSettingsTagSwatchBase &&
+      ctrl < hui::Hit::kSettingsTagSwatchBase + 10)
+    return -60 - (ctrl - hui::Hit::kSettingsTagSwatchBase);
+  if (ctrl >= hui::Hit::kSettingsTagRowBase &&
+      ctrl < hui::Hit::kSettingsTagRowBase + 8)
+    return -50 - (ctrl - hui::Hit::kSettingsTagRowBase);
   return -1;
 }
 
-// ── event handling ───────────────────────────────────────────────
 
 // handle_click dispatches to per-region handlers (click_dialogs.cpp,
 // click_chrome.cpp, click_views.cpp). Regions were carved at the ── region
@@ -164,7 +205,6 @@ void handle_click(AppState& app, int x, int y, int button) {
   app.pointerX = static_cast<double>(x);
   app.pointerY = static_cast<double>(y);
 
-  // ── Adaptive sidebar flap: clicks outside dismiss it ──
   // The flap is a transient overlay, so clicking anywhere outside the flap
   // closes it. The click is still processed normally (it acts on whatever
   // was clicked), matching the flap overlay behavior.
@@ -190,6 +230,9 @@ void handle_click(AppState& app, int x, int y, int button) {
   if (click_batch_rename(app, x, y, button)) return;
   if (click_open_with(app, x, y, button)) return;
   if (click_term_chooser(app, x, y, button)) return;
+  if (click_checksum(app, x, y, button)) return;
+  if (click_connect(app, x, y, button)) return;
+  if (click_remote_auth(app, x, y, button)) return;
 
   if (button == 0x110) {
     // Prefer the compositor's event timestamp: UI-thread stalls (e.g. a slow
@@ -213,6 +256,7 @@ void handle_click(AppState& app, int x, int y, int button) {
     if (click_filter_dropdown(app, x, y, button)) return;
     if (click_top_bar(app, x, y, button, now_ns)) return;
     if (click_tab_bar(app, x, y, button)) return;
+    if (click_ops_pause(app, x, y, button)) return;
     if (click_ops_cancel(app, x, y, button)) return;
     if (click_sidebar_hit(app, x, y, button)) return;
     if (click_flap_swallow(app, x, y, button)) return;
@@ -223,12 +267,18 @@ void handle_click(AppState& app, int x, int y, int button) {
 
   if (button == 0x111) {
     if (click_rpath_edit(app, x, y, button)) return;
+    if (click_rcrumb(app, x, y, button)) return;
     if (click_rtab_bar(app, x, y, button)) return;
     if (click_rcomputer(app, x, y, button)) return;
     if (click_rctx_close(app, x, y, button)) return;
+    if (click_ops_pause(app, x, y, button)) return;
     if (click_ops_cancel(app, x, y, button)) return;
     if (click_rsidebar(app, x, y, button)) return;
     if (click_rcontent(app, x, y, button)) return;
+  }
+
+  if (button == 0x112) {
+    if (click_mcrumb(app, x, y, button)) return;
   }
 }
 

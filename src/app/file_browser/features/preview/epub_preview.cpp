@@ -16,19 +16,6 @@
 
 namespace eh::file_browser {
 
-bool is_epub_extension(const std::string& path) {
-  const char suf[] = ".epub";
-  if (path.size() < 5) return false;
-  for (int i = 0; i < 5; ++i) {
-    char a = path[path.size() - 5 + i];
-    char b = suf[i];
-    if ((a >= 'A' && a <= 'Z') ? (a - 'A' + 'a') != b
-        : (a >= 'a' && a <= 'z') ? a != b
-        : a != b) return false;
-  }
-  return true;
-}
-
 static bool has_suffix_ic(const std::string& s, const char* suf) {
   size_t slen = s.size();
   size_t suflen = std::strlen(suf);

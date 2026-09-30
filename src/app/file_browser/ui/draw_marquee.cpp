@@ -46,7 +46,6 @@ namespace fs = std::filesystem;
 
 namespace eh::file_browser {
 
-// ── marquee / rubber-band selection ──────────────────────────────
 
 void draw_marquee(AppState& app, cairo_t* cr) {
   double x0 = app.marquee_x0;
@@ -74,7 +73,6 @@ void draw_marquee(AppState& app, cairo_t* cr) {
   cairo_set_dash(cr, nullptr, 0, 0.0);
 }
 
-// ── Shared split-view geometry ───────────────────────────────────
 // Single source of truth for hit-testing. pane_view_rect_at and
 // pane_tab_at live in layout.cpp / layout.hpp.
 void hit_test_marquee(AppState& app) {

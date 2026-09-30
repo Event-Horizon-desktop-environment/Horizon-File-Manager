@@ -17,7 +17,6 @@ namespace eh::dialog {
 
 namespace {
 
-// ── registry listener ───────────────────────────────────────────────
 
 struct GlobalBind {
   wl_compositor** comp;
@@ -52,7 +51,6 @@ static constexpr wl_registry_listener kRegListener_{
 
 } // anonymous namespace
 
-// ── constructor / destructor ──────────────────────────────────────
 
 DialogBase::DialogBase(int default_w, int default_h,
                            const char* title)
@@ -70,7 +68,6 @@ DialogBase::~DialogBase() {
   if (dpy_) wl_display_disconnect(dpy_);
 }
 
-// ── run ───────────────────────────────────────────────────────────
 
 auto DialogBase::run() -> Result {
    
@@ -83,7 +80,6 @@ auto DialogBase::run() -> Result {
   return result_;
 }
 
-// ── finish / request_redraw ───────────────────────────────────────
 
 void DialogBase::finish(Result res) {
    
@@ -96,7 +92,6 @@ void DialogBase::request_redraw() {
   redraw_pending_ = true;
 }
 
-// ── Wayland event thread ──────────────────────────────────────────
 
 void DialogBase::thread_main_() {
    
@@ -314,7 +309,6 @@ void DialogBase::thread_main_() {
   dpy_ = nullptr;
 }
 
-// ── xdg_listeners ─────────────────────────────────────────────────
 
 void DialogBase::on_xdg_configure_(void* data, xdg_surface* xdg, uint32_t serial) {
    
@@ -341,14 +335,12 @@ void DialogBase::on_toplevel_close_(void* data, xdg_toplevel*) {
   self->finish(std::move(r));
 }
 
-// ── buffer release ────────────────────────────────────────────────
 
 void DialogBase::on_buf_release_(void* data) {
    
   (void)data;
 }
 
-// ── drawing helpers ───────────────────────────────────────────────
 
 bool DialogBase::draw_button(cairo_t* cr, int x, int y, int w, int h,
                                const char* label, bool hovered, bool pressed,

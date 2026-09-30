@@ -9,6 +9,7 @@
 #include <cairo/cairo.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -17,11 +18,16 @@
 #include <grp.h>
 #include <pwd.h>
 #include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <fcntl.h>
 #include <unistd.h>
 
 #include "platform/common/icon_cache/icon_cache.hpp"
-#include "app/file_browser/features/preview/svg_preview.hpp"
 #include "app/file_browser/features/preview/video_preview.hpp"
+// Predicate-only headers (bodies live in preview_types.cpp): including them
+// pulls no decode-library dependency into horizon-files.
+#include "app/file_browser/features/preview/svg_preview.hpp"
 #include "app/file_browser/features/preview/pdf_preview.hpp"
 #include "app/file_browser/features/preview/epub_preview.hpp"
 #include "app/file_browser/features/preview/image_preview.hpp"
@@ -33,7 +39,6 @@ namespace eh::file_browser {
 
 void preview_log(const char* fmt, ...);
 
-// ── thumbnail cache ──────────────────────────────────────────────
 
 
 
@@ -88,23 +93,75 @@ cairo_surface_t* get_thumbnail(AppState& app, const std::string& path,
   return s;
 }
 
-// Pure thumbnail decode: disk cache first, then type-specific loader;
-// saves back to disk cache (except video). No shared state touched — safe
-// on any thread.
+// Out-of-process decode via horizon-thumbnailer(1). Returns the decoded
+// surface, or nullptr when the helper is disabled/missing/failed. Image,
+// SVG, PDF and EPUB decode ONLY here — their libraries are not linked into
+// horizon-files at all. Runs on the thumb-pool worker, never the UI thread.
+cairo_surface_t* thumb_via_helper(const std::string& path, int size) {
+  if (const char* e = std::getenv("EH_THUMB_HELPER"))
+    if (*e && e[0] == '0') return nullptr;
+  // Unsupported types cost a spawn; pre-filter to the helper's set.
+  if (!is_video_extension(path) && !is_svg_extension(path) &&
+      !is_pdf_extension(path) && !is_epub_extension(path) &&
+      !is_image_extension(path))
+    return nullptr;
+
+  char tmpl[] = "/tmp/horizon-thumb-XXXXXX.png";
+  int fd = ::mkstemps(tmpl, 4);
+  if (fd < 0) return nullptr;
+  ::close(fd);
+
+  pid_t pid = ::fork();
+  if (pid < 0) {
+    ::unlink(tmpl);
+    return nullptr;
+  }
+  if (pid == 0) {
+    int devnull = ::open("/dev/null", O_WRONLY);
+    if (devnull >= 0) {
+      ::dup2(devnull, STDERR_FILENO);
+      ::close(devnull);
+    }
+    char px[16];
+    std::snprintf(px, sizeof(px), "%d", size);
+    // Installed location (or PATH) first; EH_THUMB_HELPER_BIN overrides.
+    if (const char* bin = std::getenv("EH_THUMB_HELPER_BIN"))
+      ::execl(bin, "horizon-thumbnailer", path.c_str(), px, tmpl,
+              (char*)nullptr);
+    ::execlp("horizon-thumbnailer", "horizon-thumbnailer", path.c_str(), px,
+             tmpl, (char*)nullptr);
+    _exit(127);
+  }
+  int status = 0;
+  while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+  }
+  cairo_surface_t* s = nullptr;
+  if (WIFEXITED(status) && WEXITSTATUS(status) == 0)
+    s = cairo_image_surface_create_from_png(tmpl);
+  ::unlink(tmpl);
+  if (!s || cairo_surface_status(s) != CAIRO_STATUS_SUCCESS) {
+    if (s) cairo_surface_destroy(s);
+    return nullptr;
+  }
+  return s;
+}
+
+// Thumbnail decode: disk cache first, then the out-of-process helper.
+// No in-process image/svg/pdf/epub decoders remain in horizon-files —
+// poppler, librsvg, libjpeg and libwebp link only into horizon-thumbnailer.
+// No shared state touched — safe on any thread.
 cairo_surface_t* thumb_decode_sync(const std::string& path, int size,
                                    bool* used_video) {
   *used_video = is_video_extension(path);
   if (cairo_surface_t* cached = load_cached_thumbnail(path, size)) return cached;
-
-  cairo_surface_t* s = nullptr;
-  if      (*used_video)            s = load_video_thumbnail(path, size);
-  else if (is_svg_extension(path)) s = load_svg_thumbnail(path, size);
-  else if (is_pdf_extension(path)) s = load_pdf_thumbnail(path, size);
-  else if (is_epub_extension(path)) s = load_epub_thumbnail(path, size);
-  else if (is_image_extension(path)) s = load_image_thumbnail(path, size);
-
-  if (s && !*used_video) save_thumbnail_cache(path, size, s);
-  return s;
+  if (cairo_surface_t* h = thumb_via_helper(path, size)) {
+    // Save helper results back to disk cache (skip video — ffmpegthumbnailer
+    // manages its own cache) so repeat views never respawn.
+    if (!*used_video) save_thumbnail_cache(path, size, h);
+    return h;
+  }
+  if (*used_video) return load_video_thumbnail(path, size);
+  return nullptr;
 }
 
 // Paint-path rule: NEVER decode here. Cache hit returns the

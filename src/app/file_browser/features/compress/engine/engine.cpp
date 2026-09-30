@@ -1,4 +1,4 @@
-// Split from compress_engine.cpp: one format per translation unit.
+// Format dispatch for the per-format engine translation units.
 #include "app/file_browser/features/compress/compress_engine.hpp"
 #include "app/file_browser/features/compress/engine/engine_internal.hpp"
 #include "app/file_browser/features/compress/compress.hpp"

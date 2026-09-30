@@ -42,7 +42,6 @@ using menu_clock = std::chrono::steady_clock;
 
 namespace eh::file_browser {
 
-// ── ~/Templates discovery (XDG_TEMPLATES_DIR aware) ──────────────
 
 static std::string expand_home_path(std::string p) {
   const char* home = std::getenv("HOME");
@@ -135,7 +134,6 @@ void insert_template_submenu(AppState& app, std::size_t pos) {
                                 std::move(item));
 }
 
-// ── User scripts (~/.local/share/nemo/scripts) ────────
 
 static std::string scripts_dir() {
   const char* xdg = std::getenv("XDG_DATA_HOME");
@@ -197,9 +195,293 @@ void insert_scripts_submenu(AppState& app, std::size_t pos) {
                                 std::move(item));
 }
 
+// Minimal subset: Type=Service (or absent), Actions + [Desktop Action X]
+// groups, MimeType filtering, Exec with %f %F %u %U %d %D %n %N %c codes.
+// The expanded shell command is stored in the item's data payload and run
+// detached on click (same trust model as the Scripts submenu).
+
+namespace {
+
+struct ServiceTarget {
+  std::string path;
+  std::string mime;
+  bool is_dir = false;
+};
+
+std::string svc_trim(std::string s) {
+  while (!s.empty() && (s.back() == ' ' || s.back() == '\t' || s.back() == '\r'))
+    s.pop_back();
+  size_t i = 0;
+  while (i < s.size() && (s[i] == ' ' || s[i] == '\t')) ++i;
+  return s.substr(i);
+}
+
+// "a;b;c;" -> {"a","b","c"}
+std::vector<std::string> svc_split_semi(const std::string& s) {
+  std::vector<std::string> out;
+  size_t start = 0;
+  while (start <= s.size()) {
+    size_t end = s.find(';', start);
+    std::string part = svc_trim(end == std::string::npos ? s.substr(start)
+                                                         : s.substr(start, end - start));
+    if (!part.empty()) out.push_back(part);
+    if (end == std::string::npos) break;
+    start = end + 1;
+  }
+  return out;
+}
+
+bool svc_mime_matches(const std::vector<std::string>& patterns,
+                      const std::string& mime) {
+  if (patterns.empty()) return true; // no constraint: applies everywhere
+  auto slash = mime.find('/');
+  std::string top = slash == std::string::npos ? mime : mime.substr(0, slash);
+  for (const auto& p : patterns) {
+    if (p == mime || p == "all/all") return true;
+    if (p.size() > 2 && p.compare(p.size() - 2, 2, "/*") == 0 &&
+        p.substr(0, p.size() - 2) == top)
+      return true;
+  }
+  return false;
+}
+
+std::string svc_quote(const std::string& s) {
+  std::string out = "'";
+  for (char c : s) {
+    if (c == '\'')
+      out += "'\\''";
+    else
+      out += c;
+  }
+  out += "'";
+  return out;
+}
+
+std::string svc_file_uri(const std::string& p) {
+  std::string uri = "file://";
+  for (unsigned char c : p) {
+    if ((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') ||
+        (c >= '0' && c <= '9') || c == '/' || c == '-' || c == '_' ||
+        c == '.' || c == '~') {
+      uri += static_cast<char>(c);
+    } else {
+      char hex[4];
+      snprintf(hex, sizeof hex, "%%%02X", c);
+      uri += hex;
+    }
+  }
+  return uri;
+}
+
+bool svc_exe_ok(const std::string& prog) {
+  if (prog.empty()) return true;
+  if (prog[0] == '/') return ::access(prog.c_str(), X_OK) == 0;
+  if (const char* pe = std::getenv("PATH")) {
+    std::string paths(pe);
+    size_t start = 0;
+    while (start <= paths.size()) {
+      size_t end = paths.find(':', start);
+      std::string dir = end == std::string::npos ? paths.substr(start)
+                                                 : paths.substr(start, end - start);
+      if (!dir.empty() && ::access((dir + "/" + prog).c_str(), X_OK) == 0)
+        return true;
+      if (end == std::string::npos) break;
+      start = end + 1;
+    }
+  }
+  return false;
+}
+
+std::vector<std::string> svc_menu_dirs() {
+  std::vector<std::string> dirs;
+  if (const char* xdg = std::getenv("XDG_DATA_HOME"); xdg && xdg[0])
+    dirs.push_back(std::string(xdg) + "/kio/servicemenus");
+  else if (const char* home = std::getenv("HOME"); home && home[0])
+    dirs.push_back(std::string(home) + "/.local/share/kio/servicemenus");
+  if (const char* xdg = std::getenv("XDG_DATA_DIRS"); xdg && xdg[0]) {
+    std::string all(xdg);
+    size_t start = 0;
+    while (start <= all.size()) {
+      size_t end = all.find(':', start);
+      std::string d = end == std::string::npos ? all.substr(start)
+                                               : all.substr(start, end - start);
+      if (!d.empty()) dirs.push_back(d + "/kio/servicemenus");
+      if (end == std::string::npos) break;
+      start = end + 1;
+    }
+  } else {
+    dirs.emplace_back("/usr/local/share/kio/servicemenus");
+    dirs.emplace_back("/usr/share/kio/servicemenus");
+  }
+  return dirs;
+}
+
+// Expand Exec field codes against the target list. Returns empty when the
+// entry is unusable (missing Exec). Appends the file list when Exec names
+// no file (spec behavior).
+std::string svc_expand_exec(const std::string& exec,
+                            const std::vector<ServiceTarget>& targets) {
+  std::string files, urls, dirs, names;
+  for (size_t i = 0; i < targets.size(); ++i) {
+    const auto& t = targets[i];
+    std::string q = svc_quote(t.path);
+    std::string u = svc_quote(svc_file_uri(t.path));
+    std::string base = fs::path(t.path).filename().string();
+    files += (i ? " " : "") + q;
+    urls += (i ? " " : "") + u;
+    if (t.is_dir) dirs += (dirs.empty() ? "" : " ") + q;
+    names += (i ? " " : "") + svc_quote(base);
+  }
+  if (dirs.empty() && !targets.empty())
+    dirs = svc_quote(fs::path(targets[0].path).parent_path().string());
+  std::string first_q = targets.empty() ? "''" : svc_quote(targets[0].path);
+  std::string first_u =
+      targets.empty() ? "''" : svc_quote(svc_file_uri(targets[0].path));
+  std::string first_dir = dirs.find(' ') == std::string::npos
+                              ? dirs
+                              : dirs.substr(0, dirs.find(' '));
+  std::string first_name = targets.empty()
+                               ? "''"
+                               : svc_quote(fs::path(targets[0].path).filename().string());
+
+  std::string out;
+  bool used_file = false;
+  for (size_t i = 0; i < exec.size(); ++i) {
+    if (exec[i] == '%' && i + 1 < exec.size()) {
+      char c = exec[i + 1];
+      if (c == '%') {
+        out += '%';
+        ++i;
+        continue;
+      }
+      // A '%' not followed by a letter is literal (e.g. "50%"): keep it
+      // without swallowing the next character.
+      if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'))) {
+        out += '%';
+        continue;
+      }
+      switch (c) {
+        case 'f': out += first_q; used_file = true; break;
+        case 'F': out += files; used_file = true; break;
+        case 'u': out += first_u; used_file = true; break;
+        case 'U': out += urls; used_file = true; break;
+        case 'd': out += first_dir; used_file = true; break;
+        case 'D': out += dirs; used_file = true; break;
+        case 'n': out += first_name; used_file = true; break;
+        case 'N': out += names; used_file = true; break;
+        case 'c': out += std::to_string(targets.size()); break;
+        case '%': out += '%'; break;
+        default: break; // drop unknown codes (%i %k %m %v …)
+      }
+      ++i;
+    } else {
+      out += exec[i];
+    }
+  }
+  if (!used_file && !files.empty()) {
+    out += " ";
+    out += files;
+  }
+  return svc_trim(out);
+}
+
+void collect_service_items(const std::vector<ServiceTarget>& targets,
+                           std::vector<AppState::ContextMenuItem>& out) {
+  if (targets.empty() || out.size() >= 30) return;
+  for (const auto& dir : svc_menu_dirs()) {
+    std::error_code ec;
+    fs::directory_iterator it(dir, fs::directory_options::skip_permission_denied, ec), end;
+    if (ec) continue;
+    std::vector<fs::directory_entry> files;
+    for (; it != end && !ec; it.increment(ec)) {
+      std::error_code ec2;
+      if (!it->is_regular_file(ec2) || ec2) continue;
+      if (it->path().extension() != ".desktop") continue;
+      files.push_back(*it);
+    }
+    std::sort(files.begin(), files.end(),
+              [](const auto& a, const auto& b) {
+                return a.path().filename().string() < b.path().filename().string();
+              });
+    for (const auto& e : files) {
+      if (out.size() >= 30) return;
+      std::ifstream f(e.path());
+      if (!f) continue;
+      std::map<std::string, std::map<std::string, std::string>> groups;
+      std::string cur = "Desktop Entry";
+      std::string line;
+      while (std::getline(f, line)) {
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        std::string t = svc_trim(line);
+        if (t.empty() || t[0] == '#') continue;
+        if (t.size() > 2 && t.front() == '[' && t.back() == ']') {
+          cur = t.substr(1, t.size() - 2);
+          continue;
+        }
+        auto eq = t.find('=');
+        if (eq == std::string::npos) continue;
+        // Locale-suffixed keys (Name[de]) lose to the untranslated lookup
+        // below unless nothing else exists; keep first occurrence simple:
+        // prefer exact "Name"/"Exec", accept one suffixed fallback.
+        std::string key = svc_trim(t.substr(0, eq));
+        std::string val = svc_trim(t.substr(eq + 1));
+        auto& g = groups[cur];
+        if (g.find(key) == g.end()) g[key] = val;
+      }
+      const auto& main = groups["Desktop Entry"];
+      auto get = [&](const char* k) -> std::string {
+        auto it = main.find(k);
+        return it == main.end() ? std::string() : it->second;
+      };
+      std::string type = get("Type");
+      if (!type.empty() && type != "Service") continue;
+      if (get("NoDisplay") == "true" || get("Hidden") == "true") continue;
+      // TryExec gate (Dolphin honors it).
+      std::string try_exec = get("TryExec");
+      if (!try_exec.empty()) {
+        std::string prog = try_exec.substr(0, try_exec.find(' '));
+        if (!svc_exe_ok(prog)) continue;
+      }
+      std::vector<std::string> mimes = svc_split_semi(get("MimeType"));
+      bool ok = true;
+      for (const auto& t : targets) {
+        if (!svc_mime_matches(mimes, t.mime)) {
+          ok = false;
+          break;
+        }
+      }
+      if (!ok) continue;
+      for (const auto& aid : svc_split_semi(get("Actions"))) {
+        if (out.size() >= 30) return;
+        std::string gname = "Desktop Action " + aid;
+        auto git = groups.find(gname);
+        if (git == groups.end()) continue;
+        auto nget = [&](const char* k) -> std::string {
+          auto it = git->second.find(k);
+          return it == git->second.end() ? std::string() : it->second;
+        };
+        std::string aname = nget("Name");
+        if (aname.empty()) aname = aid;
+        std::string exec = nget("Exec");
+        if (exec.empty()) continue;
+        std::string cmd = svc_expand_exec(exec, targets);
+        if (cmd.empty()) continue;
+        // Run from the targets' common directory (Dolphin behavior).
+        std::string cwd = fs::path(targets[0].path).parent_path().string();
+        if (!cwd.empty()) cmd = "cd " + svc_quote(cwd) + " && " + cmd;
+        out.push_back(AppState::menu_item(AppState::ContextMenuAction::ServiceRun,
+                                          aname, cmd));
+      }
+    }
+  }
+}
+
+} // namespace
 
 
-// ── Overwrite/merge conflict resolution ──────────
+
+
+
 
 static void conflict_cleanup(AppState& app) {
   app.conflict_open = false;
@@ -216,7 +498,130 @@ static void conflict_cleanup(AppState& app) {
   app.conflict_hover_btn = -1;
 }
 
+// Launch the async copy/move for everything that wasn't skipped.
+// Drive traffic goes through the native worker, remote through GIO (no
+// undo records in either case); pure-local traffic keeps the engine.
+static bool conflict_involves_drive(AppState& app) {
+  if (is_drive_uri(app.conflict_dest_dir)) return true;
+  for (const auto& s : app.conflict_srcs)
+    if (is_drive_uri(s)) return true;
+  return false;
+}
+
+static void start_planned_drive_operation(AppState& app) {
+  std::vector<std::string> final_srcs;
+  std::vector<std::string> dst_names;
+  for (size_t i = 0; i < app.conflict_srcs.size(); ++i) {
+    const auto& s = app.conflict_srcs[i];
+    if (std::find(app.conflict_skipped.begin(), app.conflict_skipped.end(), s)
+        != app.conflict_skipped.end())
+      continue;
+    final_srcs.push_back(s);
+    dst_names.push_back(i < app.conflict_dst_names.size() ? app.conflict_dst_names[i] : "");
+  }
+  if (final_srcs.empty()) {
+    conflict_cleanup(app);
+    return;
+  }
+
+  bool is_move = app.conflict_is_move;
+  bool clear_cut = app.conflict_clear_cut;
+  std::string toast = app.conflict_success_toast;
+  auto prog = std::make_shared<OperationProgress>();
+  prog->type = is_move ? OperationType::Move : OperationType::Copy;
+  auto op_error = std::make_shared<std::string>();
+  app.op_progress = prog;
+  app.ops_panel_open = true;
+  drive_do_copy_move(final_srcs, app.conflict_dest_dir, is_move, prog,
+      [&app, is_move, clear_cut, toast, op_error](bool cancelled) {
+        if (!cancelled) {
+          if (clear_cut) app.cut_paths.clear();
+          if (!app.op_progress || app.op_progress->success.load()) {
+            app.operation_status = toast;
+          } else if (!op_error->empty()) {
+            app.operation_status = *op_error;
+          } else {
+            app.operation_status = is_move ? "Move incomplete" : "Copy incomplete";
+          }
+          app.operation_status_expires_ms = menu_expiry_3s();
+        }
+        app.op_progress.reset();
+        conflict_cleanup(app);
+        reload_dir(app);
+        draw(app);
+      },
+      app.conflict_overwrite, dst_names, op_error);
+}
+
+static bool conflict_involves_remote(AppState& app) {
+  if (is_remote_uri(app.conflict_dest_dir)) return true;
+  for (const auto& s : app.conflict_srcs)
+    if (is_remote_uri(s)) return true;
+  return false;
+}
+
 // Launch the async copy/move for everything that wasn't skipped
+static void start_planned_remote_operation(AppState& app) {
+  std::vector<std::string> final_srcs;
+  std::vector<std::string> dst_names;
+  for (size_t i = 0; i < app.conflict_srcs.size(); ++i) {
+    const auto& s = app.conflict_srcs[i];
+    if (std::find(app.conflict_skipped.begin(), app.conflict_skipped.end(), s)
+        != app.conflict_skipped.end())
+      continue;
+    final_srcs.push_back(s);
+    dst_names.push_back(i < app.conflict_dst_names.size() ? app.conflict_dst_names[i] : "");
+  }
+  if (final_srcs.empty()) {
+    conflict_cleanup(app);
+    return;
+  }
+
+  bool is_move = app.conflict_is_move;
+  bool clear_cut = app.conflict_clear_cut;
+  std::string toast = app.conflict_success_toast;
+  auto prog = std::make_shared<OperationProgress>();
+  prog->type = is_move ? OperationType::Move : OperationType::Copy;
+  auto op_error = std::make_shared<std::string>();
+  app.op_progress = prog;
+  app.ops_panel_open = true;
+  remote_do_copy_move(final_srcs, app.conflict_dest_dir, is_move, prog,
+      [&app, is_move, clear_cut, toast, op_error](bool cancelled) {
+        if (!cancelled) {
+          if (clear_cut) app.cut_paths.clear();
+          if (!app.op_progress || app.op_progress->success.load()) {
+            app.operation_status = toast;
+          } else if (!op_error->empty()) {
+            app.operation_status = *op_error;
+          } else {
+            app.operation_status = is_move ? "Move incomplete" : "Copy incomplete";
+          }
+          app.operation_status_expires_ms = menu_expiry_3s();
+        }
+        app.op_progress.reset();
+        conflict_cleanup(app);
+        reload_dir(app);
+        draw(app);
+      },
+      app.conflict_overwrite, dst_names, op_error);
+}
+
+// Single-file remote copy under a precomputed destination name (used by
+// Duplicate). Goes through the planner so conflicts/progress match pastes.
+static void start_planned_fs_operation(AppState& app);
+void launch_remote_copy_as(AppState& app, const std::string& src,
+                           const std::string& dest_dir, const std::string& dst_name,
+                           const std::string& toast) {
+  conflict_cleanup(app);
+  app.conflict_dest_dir = dest_dir;
+  app.conflict_is_move = false;
+  app.conflict_success_toast = toast;
+  app.conflict_clear_cut = false;
+  app.conflict_srcs.push_back(src);
+  app.conflict_dst_names.push_back(dst_name);
+  start_planned_fs_operation(app);
+}
+
 static void start_planned_fs_operation(AppState& app) {
   std::vector<std::string> final_srcs;
   std::vector<std::string> dst_names;
@@ -230,6 +635,16 @@ static void start_planned_fs_operation(AppState& app) {
   }
   if (final_srcs.empty()) {
     conflict_cleanup(app);
+    return;
+  }
+
+  if (conflict_involves_drive(app)) {
+    start_planned_drive_operation(app);
+    return;
+  }
+
+  if (conflict_involves_remote(app)) {
+    start_planned_remote_operation(app);
     return;
   }
 
@@ -286,43 +701,43 @@ void request_fs_operation(AppState& app, const std::vector<std::string>& srcs,
   app.conflict_success_toast = success_toast;
   app.conflict_clear_cut = clear_cut;
 
-  std::error_code ec;
-  fs::path dest(dest_dir);
+  auto dest_base = dest_dir;
+  while (dest_base.size() > 1 && dest_base.back() == '/')
+    dest_base.pop_back();
   for (const auto& src : srcs) {
-    fs::path sp(src);
-    if (!fs::exists(sp, ec)) continue;
+    if (!vfs_exists(src)) continue;
 
-    fs::path dp = dest / sp.filename();
+    std::string fname = fs::path(src).filename().string();
+    std::string dp = dest_base + "/" + fname;
 
     // Dropping/pasting an item onto itself — duplicate under a unique name
-    if (fs::exists(dp, ec) && fs::equivalent(sp, dp, ec)) {
+    if (vfs_exists(dp) && vfs_equivalent(src, dp)) {
+      fs::path spp(src);
+      std::string stem = spp.stem().string();
+      std::string ext = spp.extension().string();
       int n = 2;
-      fs::path unique = dp;
-      while (fs::exists(unique, ec))
-        unique = dest / (sp.stem().string() + " (" + std::to_string(n++) + ")" +
-                         sp.extension().string());
+      std::string unique = dp;
+      while (vfs_exists(unique))
+        unique = dest_base + "/" + stem + " (" + std::to_string(n++) + ")" + ext;
       app.conflict_srcs.push_back(src);
-      app.conflict_dst_names.push_back(unique.filename().string());
+      app.conflict_dst_names.push_back(fs::path(unique).filename().string());
       continue;
     }
 
     app.conflict_srcs.push_back(src);
 
-    if (fs::exists(dp, ec)) {
+    if (vfs_exists(dp)) {
       AppState::ConflictEntry c;
       c.src = src;
-      c.dest = dp.string();
-      c.src_is_dir = fs::is_directory(sp, ec);
-      c.dest_is_dir = fs::is_directory(dp, ec);
-      struct stat st{};
-      if (stat(src.c_str(), &st) == 0) {
-        c.src_size = S_ISDIR(st.st_mode) ? 0 : static_cast<uint64_t>(st.st_size);
-        c.src_mtime = st.st_mtime;
-      }
-      if (stat(c.dest.c_str(), &st) == 0) {
-        c.dest_size = S_ISDIR(st.st_mode) ? 0 : static_cast<uint64_t>(st.st_size);
-        c.dest_mtime = st.st_mtime;
-      }
+      c.dest = dp;
+      VfsInfo si = vfs_stat(src);
+      VfsInfo di = vfs_stat(dp);
+      c.src_is_dir = si.is_dir;
+      c.dest_is_dir = di.is_dir;
+      c.src_size = si.is_dir ? 0 : si.size;
+      c.src_mtime = si.mtime;
+      c.dest_size = di.is_dir ? 0 : di.size;
+      c.dest_mtime = di.mtime;
       app.conflict_queue.push_back(std::move(c));
       app.conflict_dst_names.push_back("");
     } else {
@@ -340,11 +755,22 @@ void request_fs_operation(AppState& app, const std::vector<std::string>& srcs,
   draw(app);
 }
 
-// ── Paste: file URIs if present, otherwise save clipboard image data ──
 // dest_dir overrides the target directory (empty = current directory).
 
 void paste_clipboard(AppState& app, const std::string& dest_dir) {
   const std::string& dest = dest_dir.empty() ? app.cur_tab().current_path : dest_dir;
+  // Remote destinations are served by the GIO worker; other virtual views
+  // (recent/starred/computer) have no backing directory to write to.
+  if (app.is_virtual_path(dest) && !is_remote_uri(dest)) {
+    app.operation_status = "Cannot paste into virtual views";
+    app.operation_status_expires_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count() +
+        3000;
+    draw(app);
+    return;
+  }
   auto cf = app.clipboard.read_files(app.wl.display());
   if (!cf.paths.empty()) {
     request_fs_operation(app, cf.paths, dest, cf.is_cut,
@@ -449,7 +875,6 @@ void resolve_conflict_choice(AppState& app, int choice) {
   draw(app);
 }
 
-// ── context menu ─────────────────────────────────────────────────
 
 void open_context_menu(AppState& app, int item_idx, int x, int y) {
   // A right-click over a file must not leave its hover preview floating
@@ -461,7 +886,6 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
   app.context_menu_hover = -1; app.context_menu_hover_prev = -1; app.context_menu_sub_hover = -1;
   app.context_menu_sidebar_idx = -1;   // file-list menu, not a sidebar menu
 
-  // ── Tree view rows: target a real path, not a visible_entries slot ──
   // Expanded tree rows don't exist in visible_entries, so index resolution
   // would bind to the wrong entry and actions like Delete silently no-op.
   // Materialize the row into context_menu_tree_entry and mark the menu with
@@ -555,6 +979,47 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
           AppState::menu_item(AppState::ContextMenuAction::OpenAsAdmin, "Open as Administrator"));
       app.context_menu_items.push_back(
         AppState::menu_item(AppState::ContextMenuAction::AddToFavorites, "Add to Favorites"));
+      // Default startup folder toggle (local directories only).
+      {
+        const std::string* sfpath = nullptr;
+        if (tree_row) {
+          sfpath = &app.context_menu_tree_entry.path;
+        } else if (item_idx >= 0 &&
+                   item_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+          int real_idx = app.cur_tab().visible_entries[item_idx];
+          if (real_idx >= 0 &&
+              real_idx < static_cast<int>(app.cur_tab().entries.size()))
+            sfpath = &app.cur_tab().entries[real_idx].path;
+        }
+        if (sfpath && !sfpath->empty() && (*sfpath)[0] == '/') {
+          if (app.startup_folder == *sfpath)
+            app.context_menu_items.push_back(
+              AppState::menu_item(AppState::ContextMenuAction::ClearStartupFolder,
+                                  "Unset Default Folder"));
+          else
+            app.context_menu_items.push_back(
+              AppState::menu_item(AppState::ContextMenuAction::SetStartupFolder,
+                                  "Set as Default Folder"));
+        }
+      }
+      // Local directories: analyze in Disk Usage (remote/virtual URIs
+      // never start with '/').
+      {
+        const std::string* dupath = nullptr;
+        if (tree_row) {
+          dupath = &app.context_menu_tree_entry.path;
+        } else if (item_idx >= 0 &&
+                   item_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+          int real_idx = app.cur_tab().visible_entries[item_idx];
+          if (real_idx >= 0 &&
+              real_idx < static_cast<int>(app.cur_tab().entries.size()))
+            dupath = &app.cur_tab().entries[real_idx].path;
+        }
+        if (dupath && !dupath->empty() && (*dupath)[0] == '/') {
+          app.context_menu_items.push_back(
+            AppState::menu_item(AppState::ContextMenuAction::DiskUsage, "Disk Usage"));
+        }
+      }
     }
     // Disk images get a top-level Mount/Unmount toggle so it is
     // visible without opening the Archive submenu.
@@ -585,8 +1050,9 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
     if (tree_row) {
       // .hidden bookkeeping only applies to scanned directory entries.
     } else {
-      int real_for_hide = item_idx < static_cast<int>(app.cur_tab().visible_entries.size())
-                          ? app.cur_tab().visible_entries[item_idx] : -1;
+      int real_for_hide = (item_idx >= 0 &&
+                           item_idx < static_cast<int>(app.cur_tab().visible_entries.size()))
+                          ? app.cur_tab().visible_entries[static_cast<size_t>(item_idx)] : -1;
       bool hide_listed = real_for_hide >= 0 &&
                     real_for_hide < static_cast<int>(app.cur_tab().entries.size()) &&
                     app.cur_tab().entries[real_for_hide].in_hidden_file;
@@ -654,6 +1120,27 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
       if (app.cur_tab().multi_selected.size() == 2 && compare_tool_available())
         actions_item.sub_items.push_back(
           AppState::menu_item(AppState::ContextMenuAction::CompareFiles, "Compare Files"));
+      if (!is_dir)
+        actions_item.sub_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::Checksums, "Checksums…"));
+      {
+        // Star toggle for files and folders (Starred virtual view parity).
+        std::string star_target;
+        if (tree_row) star_target = app.context_menu_tree_entry.path;
+        else if (item_idx >= 0 &&
+                 item_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+          int ri = app.cur_tab().visible_entries[item_idx];
+          if (ri >= 0 && ri < static_cast<int>(app.cur_tab().entries.size()))
+            star_target = app.cur_tab().entries[ri].path;
+        }
+        if (!star_target.empty()) {
+          bool starred = app.is_starred(star_target);
+          actions_item.sub_items.push_back(AppState::menu_item(
+              starred ? AppState::ContextMenuAction::RemoveStar
+                      : AppState::ContextMenuAction::AddStar,
+              starred ? "Remove Star" : "Add Star"));
+        }
+      }
       if (is_dir && app.per_folder_props)
         actions_item.sub_items.push_back(
           AppState::menu_item(AppState::ContextMenuAction::ApplyPropsToSubfolders,
@@ -673,8 +1160,9 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
         const std::string* archive_path = nullptr;
         if (tree_row)
           archive_path = &app.context_menu_tree_entry.path;
-        else if (item_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
-          int real_idx = app.cur_tab().visible_entries[item_idx];
+        else if (item_idx >= 0 &&
+                 item_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+          int real_idx = app.cur_tab().visible_entries[static_cast<size_t>(item_idx)];
           if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()))
             archive_path = &app.cur_tab().entries[real_idx].path;
         }
@@ -692,6 +1180,83 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
         }
       }
       app.context_menu_items.push_back(std::move(archive_item));
+    }
+
+    // Share submenu (Dolphin parity, lite: copy paths + email attachments).
+    {
+      AppState::ContextMenuItem share_item;
+      share_item.action = AppState::ContextMenuAction::Separator;
+      share_item.label = "Share";
+      share_item.sub_items = {
+        AppState::menu_item(AppState::ContextMenuAction::CopyPath, "Copy Path"),
+        AppState::menu_item(AppState::ContextMenuAction::ShareEmail,
+                            "Send as Email Attachment…"),
+      };
+      app.context_menu_items.push_back(std::move(share_item));
+    }
+
+    // Tags submenu: toggle registry tags (local files only — xattrs
+    // don't travel over SFTP/Drive). Data carries the tag name.
+    {
+      const std::string* tag_path = nullptr;
+      if (!tree_row && item_idx >= 0 &&
+          item_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+        int real_idx = app.cur_tab().visible_entries[static_cast<size_t>(item_idx)];
+        if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()))
+          tag_path = &app.cur_tab().entries[real_idx].path;
+      }
+      if (tag_path && !tag_path->empty() && (*tag_path)[0] == '/') {
+        AppState::ContextMenuItem tags_item;
+        tags_item.action = AppState::ContextMenuAction::Separator;
+        tags_item.label = "Tags";
+        for (auto& t : tag_registry(app.tag_colors))
+          tags_item.sub_items.push_back(AppState::menu_item(
+              AppState::ContextMenuAction::TagToggle, t.name, t.name));
+        app.context_menu_items.push_back(std::move(tags_item));
+      }
+    }
+
+    // Services submenu: matching kio/servicemenus .desktop actions for the
+    // selected targets (mime-filtered, Dolphin subset). Omitted when empty.
+    {
+      std::vector<ServiceTarget> targets;
+      if (tree_row) {
+        const auto& te = app.context_menu_tree_entry;
+        ServiceTarget t;
+        t.path = te.path;
+        t.is_dir = te.is_dir;
+        t.mime = te.is_dir ? "inode/directory" : "application/octet-stream";
+        if (!t.path.empty()) targets.push_back(std::move(t));
+      } else {
+        auto add_entry = [&](int vis_idx) {
+          if (vis_idx < 0 ||
+              vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size()))
+            return;
+          int ri = app.cur_tab().visible_entries[static_cast<size_t>(vis_idx)];
+          if (ri < 0 || ri >= static_cast<int>(app.cur_tab().entries.size())) return;
+          const auto& e = app.cur_tab().entries[static_cast<size_t>(ri)];
+          ServiceTarget t;
+          t.path = e.path;
+          t.is_dir = e.is_dir;
+          t.mime = e.mime_type.empty()
+                       ? (e.is_dir ? "inode/directory" : "application/octet-stream")
+                       : e.mime_type;
+          targets.push_back(std::move(t));
+        };
+        for (int vi : app.cur_tab().multi_selected) add_entry(vi);
+        if (targets.empty() && item_idx >= 0 &&
+            item_idx < static_cast<int>(app.cur_tab().visible_entries.size()))
+          add_entry(item_idx);
+      }
+      std::vector<AppState::ContextMenuItem> svc_items;
+      collect_service_items(targets, svc_items);
+      if (!svc_items.empty()) {
+        AppState::ContextMenuItem svc_menu;
+        svc_menu.action = AppState::ContextMenuAction::Separator;
+        svc_menu.label = "Services";
+        svc_menu.sub_items = std::move(svc_items);
+        app.context_menu_items.push_back(std::move(svc_menu));
+      }
     }
 
     app.context_menu_items.push_back(AppState::menu_separator());
@@ -720,6 +1285,54 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
   if (!tree_row &&
       !(item_idx >= 0 &&
         item_idx < static_cast<int>(app.cur_tab().visible_entries.size()))) {
+    if (app.in_virtual_view()) {
+      // Virtual views are read-only aggregations: no create/paste/terminal.
+      // Remote URIs get a working subset (create + paste via the GIO worker).
+      if (is_remote_uri(app.cur_tab().current_path)) {
+        app.context_menu_items = {
+          AppState::menu_item(AppState::ContextMenuAction::NewFolder, "New Folder"),
+          AppState::menu_item(AppState::ContextMenuAction::NewDocument, "New Document"),
+          AppState::menu_separator(),
+          AppState::menu_item(AppState::ContextMenuAction::Paste, "Paste"),
+          AppState::menu_separator(),
+          AppState::menu_item(AppState::ContextMenuAction::Reload, "Reload"),
+          AppState::menu_separator(),
+          AppState::menu_item(AppState::ContextMenuAction::SelectAll, "Select All"),
+          AppState::menu_item(AppState::ContextMenuAction::InvertSelection, "Invert Selection"),
+          AppState::menu_item(AppState::ContextMenuAction::SelectPattern, "Select by Pattern\u2026"),
+        };
+        return;
+      }
+      app.context_menu_items = {
+        AppState::menu_item(AppState::ContextMenuAction::Reload, "Reload"),
+        AppState::menu_separator(),
+        AppState::menu_item(AppState::ContextMenuAction::SelectAll, "Select All"),
+        AppState::menu_item(AppState::ContextMenuAction::InvertSelection, "Invert Selection"),
+        AppState::menu_item(AppState::ContextMenuAction::SelectPattern, "Select by Pattern\u2026"),
+      };
+      if (app.cur_tab().current_path == "recent://") {
+        app.context_menu_items.push_back(AppState::menu_separator());
+        app.context_menu_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::ClearRecent, "Clear Recent"));
+      }
+      // Default startup folder toggle for the virtual views that support
+      // it (My Computer / Recent / Starred).
+      {
+        const std::string& cur = app.cur_tab().current_path;
+        if (startup_folder_ok(cur)) {
+          app.context_menu_items.push_back(AppState::menu_separator());
+          if (app.startup_folder == cur)
+            app.context_menu_items.push_back(
+              AppState::menu_item(AppState::ContextMenuAction::ClearStartupFolder,
+                                  "Unset Default Folder"));
+          else
+            app.context_menu_items.push_back(
+              AppState::menu_item(AppState::ContextMenuAction::SetStartupFolder,
+                                  "Set as Default Folder"));
+        }
+      }
+      return;
+    }
     app.context_menu_items = {
       AppState::menu_item(AppState::ContextMenuAction::NewFolder, "New Folder"),
       AppState::menu_item(AppState::ContextMenuAction::NewDocument, "New Document"),
@@ -735,8 +1348,32 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
       AppState::menu_item(AppState::ContextMenuAction::InvertSelection, "Invert Selection"),
       AppState::menu_item(AppState::ContextMenuAction::SelectPattern, "Select by Pattern\u2026"),
       AppState::menu_separator(),
-      AppState::menu_item(AppState::ContextMenuAction::Properties, "Properties"),
     };
+    // Default startup folder toggle for the current folder. When the
+    // stored default is stale (deleted), still offer to clear it.
+    {
+      const std::string& cur = app.cur_tab().current_path;
+      bool cur_ok = startup_folder_ok(cur);
+      bool stored_valid = startup_folder_ok(app.startup_folder);
+      if (cur_ok && app.startup_folder == cur) {
+        app.context_menu_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::ClearStartupFolder,
+                              "Unset Default Folder"));
+        app.context_menu_items.push_back(AppState::menu_separator());
+      } else if (cur_ok) {
+        app.context_menu_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::SetStartupFolder,
+                              "Set as Default Folder"));
+        app.context_menu_items.push_back(AppState::menu_separator());
+      } else if (!app.startup_folder.empty() && !stored_valid) {
+        app.context_menu_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::ClearStartupFolder,
+                              "Unset Default Folder"));
+        app.context_menu_items.push_back(AppState::menu_separator());
+      }
+    }
+    app.context_menu_items.push_back(
+      AppState::menu_item(AppState::ContextMenuAction::Properties, "Properties"));
     insert_template_submenu(app, 2);
     insert_scripts_submenu(app, app.context_menu_items.size() - 2);
   }

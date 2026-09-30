@@ -102,6 +102,32 @@ inline constexpr int kDlgOpenWith = 7;
 inline constexpr int kDlgBatch = 8;
 inline constexpr int kDlgConflict = 9;
 inline constexpr int kDlgSettings = 10;
+inline constexpr int kDlgChecksum = 11;
+inline constexpr int kDlgConnect = 12;
+inline constexpr int kDlgRemoteAuth = 13;
+inline constexpr int kDlgDiskUsage = 14;
+
+// Disk-usage window controls.
+inline constexpr int kDuClose = 2;
+inline constexpr int kDuRescan = 3;
+inline constexpr int kDuStop = 4;
+inline constexpr int kDuZoom = 5;
+inline constexpr int kDuDelete = 6;
+inline constexpr int kDuOpenLoc = 7;
+inline constexpr int kDuUp = 8;
+inline constexpr int kDuSettings = 9;
+inline constexpr int kDuSliderBase = 10; // +0 drives, +1 dir, +2 ext, +3 map, +4 bg
+inline constexpr int kDuPanelSwallow = 15; // settings panel background
+inline constexpr int kDuDirRowBase = 20;    // +visible row (cap 128)
+inline constexpr int kDuExtRowBase = 100;   // +legend row (cap 64)
+inline constexpr int kDuDriveRowBase = 900; // +drive (cap 16)
+inline constexpr int kDuMapClick = 16; // treemap body: tiles resolve by geometry
+inline constexpr int kDuCrumbBase = 164; // +breadcrumb segment (cap 24)
+inline constexpr int kDuDirScroll = 188; // directory list scrollbar
+inline constexpr int kDuExtScroll = 189; // extension list scrollbar
+inline constexpr int kDuDupTrashAll = 17; // dup panel header: trash keep-first
+inline constexpr int kDuDuplicates = 18; // toolbar: duplicates view toggle
+inline constexpr int kDuReport = 19; // toolbar: CSV report export
 inline constexpr uint32_t dialog(int dlg, int ctrl) {
   // 10-bit control field: app-indexed rows (Open-With lists every desktop
   // entry) exceed 255 on app-heavy systems and must not wrap into the
@@ -139,6 +165,23 @@ inline constexpr int kTermRowBase = 10;
 // Settings-window controls.
 inline constexpr int kSettingsClose = 2;
 inline constexpr int kSettingsTabBase = 4; // +0..2
+inline constexpr int kSettingsTabAccounts = 45; // 4th tab (avoids kSettingsOk == 7)
+inline constexpr int kSettingsAcctGoogle = 40;
+inline constexpr int kSettingsAcctNcConnect = 41;
+inline constexpr int kSettingsAcctNcServer = 42;
+inline constexpr int kSettingsAcctNcUser = 43;
+inline constexpr int kSettingsAcctOwncloud = 44;
+inline constexpr int kSettingsDriveClientId = 46;
+inline constexpr int kSettingsDriveConnect = 47;
+inline constexpr int kSettingsDriveClear = 48;
+inline constexpr int kSettingsNcServerClear = 49;
+inline constexpr int kSettingsNcUserClear = 50;
+inline constexpr int kSettingsDriveSecret = 51;
+inline constexpr int kSettingsDriveSecretClear = 52;
+inline constexpr int kSettingsTabTags = 53;
+inline constexpr int kSettingsTagSwatchBase = 70; // +swatch index (0..9)
+inline constexpr int kSettingsTagRowBase = 80;    // +tag index (0..7)
+inline constexpr int kSettingsDriveDiscBase = 60; // +account index (0..7)
 inline constexpr int kSettingsOk = 7;
 inline constexpr int kSettingsApply = 8;
 inline constexpr int kSettingsCancel = 9;
@@ -159,9 +202,30 @@ inline constexpr int kSettingsPropsSlider = 28;
 inline constexpr int kSettingsScaleSlider = 29;
 inline constexpr int kSettingsMatugen = 30;
 inline constexpr int kSettingsColorEng = 31;
+// Trash auto-maintenance (General tab).
+inline constexpr int kSettingsTrashAutoToggle = 33;
+inline constexpr int kSettingsTrashDaysDown = 34;
+inline constexpr int kSettingsTrashDaysUp = 35;
+inline constexpr int kSettingsTrashMbDown = 36;
+inline constexpr int kSettingsTrashMbUp = 37;
 // Conflict-dialog controls: checkbox + 3 buttons.
 inline constexpr int kConflictCheck = 1;
 inline constexpr int kConflictBtnBase = 10; // +0 Skip, +1 Cancel, +2 Overwrite/Merge
+// Checksum-dialog controls.
+inline constexpr int kChecksumClose = 2;
+inline constexpr int kChecksumCopyBase = 10; // +0 MD5, +1 SHA1, +2 SHA256
+// Connect-dialog controls.
+inline constexpr int kConnectFieldBase = 10; // +0 host, +1 user, +2 pass, +3 port, +4 path
+inline constexpr int kConnectCancel = 2;
+inline constexpr int kConnectOk = 3;
+// Remote-auth dialog controls.
+inline constexpr int kRemoteAuthFieldBase = 10; // +0 user, +1 password
+inline constexpr int kRemoteAuthChoiceBase = 20; // +i approval button
+inline constexpr int kRemoteAuthCancel = 2;
+inline constexpr int kRemoteAuthOk = 3;
+// Settings-window controls (add at end).
+inline constexpr int kSettingsRecentToggle = 32;
+inline constexpr int kSettingsRestoreSessionToggle = 38;
 // Open-With rows by absolute app index (sections are layout-only).
 inline constexpr int kOpenRowBase = 10;
 // Batch-rename controls.

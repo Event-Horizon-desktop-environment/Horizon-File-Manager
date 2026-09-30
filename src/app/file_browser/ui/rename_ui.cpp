@@ -187,7 +187,6 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
   int h = app.height;
   int n = static_cast<int>(app.batch_rename_entries.size());
 
-  // ── Compute preview names ──
   bool is_template = (app.batch_rename_mode == 0);
   if (is_template) {
     int counter = 1;
@@ -236,7 +235,6 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
     }
   }
 
-  // ── Layout ──
   int dlg_w = 540;
   int list_h = std::min(n * 28 + 4, 280) + 4;
   int input_area_h = is_template ? 70 : 80;
@@ -256,7 +254,6 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
   int cx = dlg_x + 20;
   int cy = dlg_y + 14;
 
-  // ── Title (with edit icon) ──
   blit_icon(cr, app.edit_svg, cx, cy, 16,
             app.text_secondary_r, app.text_secondary_g, app.text_secondary_b);
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
@@ -268,7 +265,6 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
   std::snprintf(title, sizeof(title), "Rename %d File%s", n, n == 1 ? "" : "s");
   cairo_show_text(cr, title);
 
-  // ── Mode tabs ──
   int tab_y = cy + 28;
   int tab_h = 26;
   int tab_w = 210;
@@ -319,7 +315,6 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
   int field_h = 30;
 
   if (is_template) {
-    // ── Template mode: single text field + Add button ──
     int tf_x = cx;
     int tf_y = input_y;
 
@@ -403,7 +398,6 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
       }
     }
   } else {
-    // ── Find & Replace mode ──
     int label_w = 100;
     int fld_x = cx + label_w;
 
@@ -473,7 +467,6 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
     }
   }
 
-  // ── Preview list ──
   int list_y = input_y + (is_template ? field_h + 10 : field_h * 2 + 16);
   int list_x = cx;
   int list_w = dlg_w - 40;
@@ -530,7 +523,6 @@ void draw_batch_rename(AppState& app, cairo_t* cr) {
     row_y += 26;
   }
 
-  // ── Buttons ──
   int btn_y = dlg_y + dlg_h - 44;
   int btn_w = 90;
   int btn_h = 32;

@@ -35,7 +35,6 @@ namespace fs = std::filesystem;
 namespace xdg = eh::shell::desktop::xdg;
 
 namespace eh::file_browser {
-// ── pointer-release handler (moved from events.cpp) ──────────────────────────
 void handle_pointer_release(AppState& app, int x, int y, int button) {
   (void)x;
   (void)y;
@@ -114,6 +113,7 @@ void handle_pointer_release(AppState& app, int x, int y, int button) {
     }
   }
   end_sidebar_resize(app);
+  end_sidebar_scroll(app);
   if (app.sidebar_fav_dragging) {
     if (app.sidebar_fav_drag_from >= 0 && app.sidebar_fav_drag_to >= 0 &&
         app.sidebar_fav_drag_to != app.sidebar_fav_drag_from &&

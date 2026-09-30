@@ -43,7 +43,6 @@ using menu_clock = std::chrono::steady_clock;
 
 namespace eh::file_browser {
 
-// ── Open With dialog ──────────────────────────────────────────────
 
 static std::string detect_mime_type(const std::string& file_path) {
   const std::string quoted = "'" + file_path + "'";

@@ -18,7 +18,7 @@
 namespace eh::file_browser {
 
 // Long-side pixel cap for full-res video preview frames (hover/space preview)
-inline constexpr int kVideoPreviewFrameMaxPx = 800;
+inline constexpr int kVideoPreviewFrameMaxPx = 1920;
 
 struct VideoThumbResult {
   std::string path;

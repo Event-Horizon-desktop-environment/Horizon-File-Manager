@@ -23,7 +23,6 @@ namespace fs = std::filesystem;
 
 namespace eh::file_browser {
 
-// ── helpers ──────────────────────────────────────────────────────
 
 static std::string home_dir_path() {
   if (auto* h = std::getenv("HOME")) return h;
@@ -51,12 +50,10 @@ static std::string format_size_binary(uint64_t bytes) {
   return buf;
 }
 
-// ── refresh_computer ─────────────────────────────────────────────
 
 void refresh_computer(AppState& app) {
   app.computer_items.clear();
 
-  // ── Splitter: My Computer ──
   {
     ComputerItem split;
     split.shape = ComputerItem::ShapeType::Splitter;
@@ -65,7 +62,6 @@ void refresh_computer(AppState& app) {
     app.computer_items.push_back(split);
   }
 
-  // ── Section 1: User Directories (Small items) ──
   auto add_user_dir = [&](const std::string& label, const std::string& icon,
                            const std::string& dir_path) {
     ComputerItem item;
@@ -94,7 +90,6 @@ void refresh_computer(AppState& app) {
   add_user_dir("Pictures",   "folder-pictures",  xdg_user_dir_path("XDG_PICTURES_DIR", "Pictures"));
   add_user_dir("Videos",     "folder-videos",    xdg_user_dir_path("XDG_VIDEOS_DIR", "Videos"));
 
-  // ── Splitter: Disks ──
   {
     ComputerItem split;
     split.shape = ComputerItem::ShapeType::Splitter;
@@ -103,7 +98,6 @@ void refresh_computer(AppState& app) {
     app.computer_items.push_back(split);
   }
 
-  // ── Section 2: Drives (Large items with progress) ──
   auto& drives = eh::drives::UDisks2DriveService::instance();
   std::vector<std::string> seen_mounts;
 
@@ -355,11 +349,9 @@ void refresh_computer(AppState& app) {
     app.computer_items.push_back(item);
   }
 
-  // ── Splitter: Network (placeholder) ──
   // No network items yet; section omitted.
 }
 
-// ── draw_computer_view ───────────────────────────────────────────
 
 void draw_computer_view(AppState& app, cairo_t* cr, int content_x,
                         int content_y, int content_w, int view_h) {
@@ -633,7 +625,6 @@ void draw_computer_view(AppState& app, cairo_t* cr, int content_x,
   app.computer_content_h = std::max(computed_h, view_h);
 }
 
-// ── hit_test_computer ────────────────────────────────────────────
 
 int hit_test_computer(AppState& app, int x, int y) {
   // Resolved through the retained hit registry (item rects stored during

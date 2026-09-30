@@ -10,7 +10,13 @@ Requires a C++23 toolchain, **Meson**, **Ninja**, and the dev packages listed fo
 - [Fedora](Docs/Fedora.md)
 - [Debian / Ubuntu](Docs/Debian-Ubuntu.md)
 
-Optional: **poppler-glib** (PDF thumbnails), **libarchive** (EPUB/archive previews), **librsvg** (SVG thumbnails). Video thumbnails build **ffmpegthumbnailer** from source (needs libav\* dev packages).
+`libarchive` is required (archive viewer + EPUB previews). Optional:
+**poppler-glib** (PDF thumbnails), **librsvg** (SVG thumbnails — NanoSVG
+fallback otherwise), **libsoup3 + json-glib** (Drive), **libsecret**
+(keyring), **liburing**, **zlib/xz** (native compress engines).
+Video thumbnails build **ffmpegthumbnailer** from source (needs libav\*
++ libpng dev packages). Easiest path: `./build.sh` detects your distro,
+installs everything, builds, and offers a `pkexec` system install to `/usr`.
 
 Third-party code is vendored as git submodules (`third_party/`). After cloning:
 

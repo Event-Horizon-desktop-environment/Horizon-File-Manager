@@ -1,5 +1,7 @@
 #pragma once
 
+#include <sys/types.h>
+
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -10,6 +12,7 @@
 #include <regex>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 namespace eh::file_browser {
@@ -18,6 +21,7 @@ struct SearchResult {
   std::string path;
   std::string relative_path; // relative to search root
   bool is_dir = false;
+  std::string tags_csv;      // file's tags (for badges on result rows)
 };
 
 // Options for a recursive search run.
@@ -54,14 +58,27 @@ public:
 private:
   void thread_main();
   void walk_directory(const std::string& dir, const std::string& rel,
-                      int depth);
+                      int depth, bool names_only = false);
 
   bool match_name(const std::string& name);
+  // Name match, else tag match (xattr read only when the name missed).
+  // Used by every mode, including content mode's name fallback.
+  bool match_name_or_tags(const std::string& full_path,
+                          const std::string& name);
   bool match_content(const std::string& path);
+  // Out-of-process content search via horizon-grep(1). Returns true when the
+  // helper ran (results streamed into m_out); false when the helper is
+  // disabled/missing/failed to spawn so the caller falls back in-process.
+  bool content_via_helper(const std::string& root_dir, const std::string& query,
+                          const SearchOptions& options);
 
   std::thread m_thread;
   std::mutex m_out_mutex;
   std::queue<SearchResult> m_out;
+  // hgrep content mode emits per-line hits from many threads; the UI
+  // wants one row per file, so first-hit paths are remembered here.
+  // Guarded by m_out_mutex.
+  std::unordered_set<std::string> m_seen;
 
   std::mutex m_ctrl_mutex;
   std::string m_root_dir;
@@ -71,6 +88,10 @@ private:
   bool m_regex_ok = false;
   bool m_search_pending = false;
   bool m_cancel_requested = false;
+  // hgrep takes a const atomic&; mirrors m_cancel_requested for content runs.
+  std::atomic<bool> m_hgrep_cancel{false};
+  // horizon-grep helper child (content mode only). -1 = none running.
+  std::atomic<pid_t> m_grep_pid{-1};
 
   std::condition_variable m_cv;
   std::atomic<bool> m_running{true};

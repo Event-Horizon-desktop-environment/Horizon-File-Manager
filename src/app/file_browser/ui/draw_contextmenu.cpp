@@ -1,6 +1,7 @@
 #include "../app.hpp"
 #include "../trace.hpp"
 #include "../features/sidebar/sidebar.hpp"
+#include "../features/tags/tags.hpp"
 #include "../features/view_zoom/view_zoom.hpp"
 #include "app/file_browser/features/thumbnails/thumb_pool.hpp"
 #include "app/file_browser/features/dir_stats/dir_stats.hpp"
@@ -47,7 +48,6 @@ namespace fs = std::filesystem;
 
 namespace eh::file_browser {
 
-// ── context menu drawing ─────────────────────────────────────────
 
 namespace {
 
@@ -148,6 +148,44 @@ static void draw_submenu_popup(AppState& app, cairo_t* cr, const std::vector<App
     double ty = ry + (row_h - te.height) / 2.0 - te.y_bearing;
     cairo_move_to(cr, tx, ty);
     cairo_show_text(cr, shown.c_str());
+    // Tag toggles: registry color dot at the right; filled when the
+    // target already carries the tag, outline when it does not.
+    if (item.action == AppState::ContextMenuAction::TagToggle) {
+      double rr = 0.55, gg = 0.55, bb = 0.55;
+      for (auto& t : tag_registry(app.tag_colors)) {
+        if (t.name == item.data) {
+          rr = t.r;
+          gg = t.g;
+          bb = t.b;
+          break;
+        }
+      }
+      bool on = false;
+      if (app.context_menu_file_idx >= 0 &&
+          app.context_menu_file_idx <
+              static_cast<int>(app.cur_tab().visible_entries.size())) {
+        int ri = app.cur_tab()
+                     .visible_entries[static_cast<size_t>(
+                         app.context_menu_file_idx)];
+        if (ri >= 0 &&
+            ri < static_cast<int>(app.cur_tab().entries.size()))
+          on = has_tag(app.cur_tab().entries[ri].tags_csv, item.data);
+      }
+      double dx = sm_x + sm_w - 20, dy = ry + row_h / 2.0;
+      // Fresh path: cairo_arc would otherwise connect a line from the
+      // label text's leftover current point to the circle (stray lines).
+      cairo_new_path(cr);
+      if (on) {
+        cairo_set_source_rgba(cr, rr, gg, bb, 1.0);
+        cairo_arc(cr, dx, dy, 5.0, 0, 2 * M_PI);
+        cairo_fill(cr);
+      } else {
+        cairo_set_source_rgba(cr, rr, gg, bb, 0.9);
+        cairo_set_line_width(cr, 1.4);
+        cairo_arc(cr, dx, dy, 5.0, 0, 2 * M_PI);
+        cairo_stroke(cr);
+      }
+    }
     ry += row_h;
   }
 
@@ -231,7 +269,6 @@ void draw_context_menu(AppState& app, cairo_t* cr) {
   }
 }
 
-// ── hit testing ──────────────────────────────────────────────────
 
 int hit_test_context_menu(AppState& app, int x, int y) {
   // Resolved through the retained hit registry (row rects stored during

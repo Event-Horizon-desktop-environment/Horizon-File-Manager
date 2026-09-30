@@ -47,7 +47,6 @@ namespace fs = std::filesystem;
 
 namespace eh::file_browser {
 
-// ── status bar ───────────────────────────────────────────────────
 
 void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
                      int status_h) {
@@ -169,7 +168,6 @@ void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
     cairo_show_text(cr, shown_op.c_str());
   }
 
-  // ── Free-space readout (cached statvfs, 2 s) ──
   std::string free_str;
   {
     static std::string s_path;
@@ -229,7 +227,6 @@ void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
     cairo_show_text(cr, free_str.c_str());
   }
 
-  // ── Zoom slider (discrete levels) + −/+ buttons ──
   {
     // Fixed geometry (NOT zoom-scaled): stepping +/- must never move the
     // control out from under the cursor.
@@ -333,7 +330,6 @@ void draw_status_bar(AppState& app, cairo_t* cr, int w, int h,
   }
 }
 
-// ── directory picker bar ─────────────────────────────────────────
 
 void draw_select_dir_bar(AppState& app, cairo_t* cr, int w, int h,
                          int bar_h) {
@@ -375,7 +371,6 @@ void draw_select_dir_bar(AppState& app, cairo_t* cr, int w, int h,
   cairo_move_to(cr, pad, y + bar_h / 2 + 4);
   cairo_show_text(cr, label.c_str());
 
-  // ── Select button ──
   int btn_w = static_cast<int>(80.0 * zf);
   int btn_h = static_cast<int>(28.0 * zf);
   int btn_gap = static_cast<int>(8.0 * zf);

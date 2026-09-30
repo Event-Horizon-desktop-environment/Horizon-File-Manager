@@ -4,7 +4,6 @@
 
 namespace eh::file_browser {
 
-// ── Input module (input/*.cpp) ───────────────────────────────────
 // Shared input-module surface. The event entry points (handle_click,
 // handle_key, handle_scroll, handle_pointer_move, handle_pointer_release,
 // properties_hit_test, settings_hit_test) are declared in app.hpp and
@@ -41,7 +40,6 @@ static constexpr int kFilterSep = 4;
 // applied here. Defined in events.cpp.
 void apply_scrollbar_drag(AppState& app, int y);
 
-// ── Click region handlers (click_dialogs.cpp) ────────────────────
 // Each returns true exactly where handle_click used to `return;`, i.e. the
 // click was consumed. handle_click dispatches to them in this order.
 bool click_drop_chooser(AppState& app, int x, int y, int button);
@@ -64,8 +62,10 @@ bool click_rename_ui(AppState& app, int x, int y, int button);
 bool click_batch_rename(AppState& app, int x, int y, int button);
 bool click_open_with(AppState& app, int x, int y, int button);
 bool click_term_chooser(AppState& app, int x, int y, int button);
+bool click_checksum(AppState& app, int x, int y, int button);
+bool click_connect(AppState& app, int x, int y, int button);
+bool click_remote_auth(AppState& app, int x, int y, int button);
 
-// ── Chrome-region click handlers (click_chrome.cpp) ──────────────
 bool click_columns_menu(AppState& app, int x, int y, int button);
 bool click_sort_menu(AppState& app, int x, int y, int button);
 bool click_filter_dropdown(AppState& app, int x, int y, int button);
@@ -73,21 +73,22 @@ bool click_top_bar(AppState& app, int x, int y, int button,
                    uint64_t now_ns);
 bool click_tab_bar(AppState& app, int x, int y, int button);
 bool click_ops_cancel(AppState& app, int x, int y, int button);
+bool click_ops_pause(AppState& app, int x, int y, int button);
 bool click_flap_swallow(AppState& app, int x, int y, int button);
 bool click_column_header(AppState& app, int x, int y, int button);
 
-// ── Pane/content + right-click-region handlers (click_views.cpp) ─
 bool click_sidebar_hit(AppState& app, int x, int y, int button);
 bool click_content_hit(AppState& app, int x, int y, int button,
                        uint64_t now_ns);
 bool click_rpath_edit(AppState& app, int x, int y, int button);
+bool click_rcrumb(AppState& app, int x, int y, int button);
+bool click_mcrumb(AppState& app, int x, int y, int button);
 bool click_rtab_bar(AppState& app, int x, int y, int button);
 bool click_rcomputer(AppState& app, int x, int y, int button);
 bool click_rctx_close(AppState& app, int x, int y, int button);
 bool click_rsidebar(AppState& app, int x, int y, int button);
 bool click_rcontent(AppState& app, int x, int y, int button);
 
-// ── Key-region handlers ──────────────────────────────────────────
 // handle_key dispatches to these in flow order; each returns true exactly
 // where handle_key used to `return true`, i.e. the key was consumed.
 bool key_properties(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
@@ -111,6 +112,12 @@ bool key_rename_ui(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
 bool key_batch_rename(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
                       const char* utf8, int utf8_len);
 bool key_term_chooser(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
+                      const char* utf8, int utf8_len);
+bool key_checksum(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
+                      const char* utf8, int utf8_len);
+bool key_connect(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
+                      const char* utf8, int utf8_len);
+bool key_remote_auth(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
                       const char* utf8, int utf8_len);
 bool key_search(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
                 const char* utf8, int utf8_len, bool show_hidden_passthrough);

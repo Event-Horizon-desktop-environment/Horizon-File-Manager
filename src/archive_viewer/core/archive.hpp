@@ -76,12 +76,14 @@ bool create_archive(const std::string& archive_path,
                      const std::vector<std::string>& files,
                      std::string* error_out);
 
-// Same, with progress callback (progress updated 0.0–1.0 over total_entries).
+// Same, with progress callback (progress updated 0.0–1.0 over total_entries)
+// and optional compression level 0-9 (-1 = libarchive default).
 bool create_archive(const std::string& archive_path,
                      const std::vector<std::string>& files,
                      std::string* error_out,
                      std::atomic<float>* progress,
-                     size_t total_entries);
+                     size_t total_entries,
+                     int compression_level = -1);
 
 // Convert archive from one format to another (reads src, writes dest).
 bool convert_archive(const std::string& src,
@@ -103,7 +105,6 @@ std::string get_comment(const std::string& archive_path);
 // Last error message (thread-local).
 const std::string& last_error();
 
-// ── Batch / parallel operations ──────────────────────────────────────
 
 struct BatchItem {
   std::string path;

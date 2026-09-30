@@ -31,7 +31,6 @@ public:
 
   Button() = default;
 
-  // --- Configuration ---
   void setLabel(std::string_view text) { label_.setText(text); }
   void setGlyph(std::string_view name) { glyph_.setGlyph(name); }
   void setStyle(Style s) { style_ = s; }
@@ -55,7 +54,6 @@ public:
   void setTextColor(float r, float g, float b) { textR_ = r; textG_ = g; textB_ = b; }
   void setOutlineColor(float r, float g, float b) { outlineR_ = r; outlineG_ = g; outlineB_ = b; }
 
-  // --- Sizing ---
   void setMinSize(float w, float h) { minW_ = w; minH_ = h; }
   void setGeometry(float x, float y, float w, float h) {
     x_ = x; y_ = y;
@@ -89,12 +87,10 @@ public:
   [[nodiscard]] float minWidth() const noexcept { return minW_; }
   [[nodiscard]] float minHeight() const noexcept { return minH_; }
 
-  // --- Hit testing ---
   bool containsPoint(float px, float py) const noexcept {
     return px >= x_ && px < x_ + w_ && py >= y_ && py < y_ + h_;
   }
 
-  // --- Event handlers ---
   bool handlePointerEnter(float, float) {
     if (!enabled_) return false;
     hovered_ = true;
@@ -128,12 +124,10 @@ public:
     return wasPressed;
   }
 
-  // --- Callbacks ---
   void setOnClick(std::function<void()> cb) { onClick_ = std::move(cb); }
   void setOnPress(std::function<void()> cb) { onPress_ = std::move(cb); }
   void setOnRelease(std::function<void()> cb) { onRelease_ = std::move(cb); }
 
-  // --- Rendering ---
   void paint(cairo_t* cr, const ThemeContext& ctx = {}) {
     if (w_ <= 0.0f || h_ <= 0.0f) return;
 
@@ -161,7 +155,6 @@ public:
   }
 
 private:
-  // --- Size constants ---
   static constexpr float kSizeHeight[] = { 24.0f, 32.0f, 40.0f, 48.0f, 56.0f };
   static constexpr float kSizeHPad[]  = { 16.0f, 16.0f, 24.0f, 24.0f, 24.0f };
   static constexpr float kSizeFont[]  = { 12.0f, 13.0f, 14.0f, 16.0f, 16.0f };
@@ -186,7 +179,7 @@ private:
     // Default M3 role-based colours derived from accent/surface.
     // In a full theme system these come from ColorRole lookup.
     // For now, use the existing 3-role system.
-    // (To be replaced with m3::Palette::colorForRole() in Sprint 5.)
+    // (Replace with m3::Palette::colorForRole() once that lookup exists.)
   }
 
   void drawContainer(cairo_t* cr, const ThemeContext& ctx) {

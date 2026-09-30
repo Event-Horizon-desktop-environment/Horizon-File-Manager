@@ -32,7 +32,6 @@
 namespace archive_viewer {
 namespace {
 
-// ── Debug log ────────────────────────────────────────────────────────
 
 static void alog(const char* fmt, ...) {
   char buf[1024];
@@ -53,7 +52,6 @@ static void alog(const char* fmt, ...) {
   }
 }
 
-// ── Buffer listener ──────────────────────────────────────────────────
 
 static void wl_buffer_release(void* data, wl_buffer*) {
   auto* buf = static_cast<ArchiveState::Buffer*>(data);
@@ -62,7 +60,6 @@ static void wl_buffer_release(void* data, wl_buffer*) {
 
 static const wl_buffer_listener buffer_listener = {wl_buffer_release};
 
-// ── SHM pool helper ──────────────────────────────────────────────────
 
 static int create_shm_fd(size_t size) {
   char name[] = "/tmp/horizon-archive-XXXXXX";
@@ -123,7 +120,6 @@ void update_hover(ArchiveState* s, int mx, int my);
 void handle_click(ArchiveState* s, int mx, int my, uint32_t serial);
 extern const wl_seat_listener seat_listener;
 
-// ── Pointer events ───────────────────────────────────────────────────
 
 struct PointerState {
   ArchiveState* state;
@@ -236,7 +232,6 @@ static const wl_pointer_listener pointer_listener = {
 #pragma GCC diagnostic pop
 #pragma GCC diagnostic pop
 
-// ── Keyboard events ──────────────────────────────────────────────────
 
 static void key_keymap(void* data, wl_keyboard*, uint32_t format, int fd,
                         uint32_t size) {
@@ -271,7 +266,6 @@ static void key_key(void* data, wl_keyboard*, uint32_t, uint32_t time,
 
   xkb_keysym_t sym = xkb_state_key_get_one_sym(s->xkb, key + 8);
 
-  // ── Embedded file browser panel keyboard ──
   if (s->fb_panel.active) {
     s->fb_panel.on_key(static_cast<uint32_t>(sym));
     s->needs_redraw = true;
@@ -280,7 +274,6 @@ static void key_key(void* data, wl_keyboard*, uint32_t, uint32_t time,
 
   int row_h = static_cast<int>(ArchiveState::row_h * s->zoom_level);
 
-  // ── Create mode keyboard ──
   if (s->create_mode) {
     if (sym == XKB_KEY_Escape) {
       // Close dialog without creating
@@ -394,7 +387,6 @@ static void key_repeat_info(void*, wl_keyboard*, int32_t, int32_t) {}
 static const wl_keyboard_listener keyboard_listener = {
     key_keymap, key_enter, key_leave, key_key, key_modifiers, key_repeat_info};
 
-// ── Seat capabilities ────────────────────────────────────────────────
 
 static void seat_capabilities(void* data, wl_seat* seat_, uint32_t caps) {
   auto* s = static_cast<ArchiveState*>(data);
@@ -422,7 +414,6 @@ static void seat_name(void*, wl_seat*, const char*) {}
 
 const wl_seat_listener seat_listener = {seat_capabilities, seat_name};
 
-// ── xdg_wm_base ping ─────────────────────────────────────────────────
 
 static void xdg_wm_base_ping(void*, xdg_wm_base* wm, uint32_t serial) {
   xdg_wm_base_pong(wm, serial);
@@ -430,7 +421,6 @@ static void xdg_wm_base_ping(void*, xdg_wm_base* wm, uint32_t serial) {
 
 static const xdg_wm_base_listener wm_base_listener = {xdg_wm_base_ping};
 
-// ── Registry ─────────────────────────────────────────────────────────
 
 static void registry_global(void* data, wl_registry* registry, uint32_t name,
                              const char* iface, uint32_t version) {
@@ -456,7 +446,6 @@ static void registry_global_remove(void*, wl_registry*, uint32_t) {}
 static const wl_registry_listener registry_listener = {
     registry_global, registry_global_remove};
 
-// ── xdg-shell listeners ──────────────────────────────────────────────
 
 static void xdg_surface_configure(void* data, xdg_surface* xdg, uint32_t serial) {
   auto* s = static_cast<ArchiveState*>(data);
@@ -490,7 +479,6 @@ static const xdg_toplevel_listener toplevel_listener = {
     xdg_toplevel_configure, xdg_toplevel_close};
 #pragma GCC diagnostic pop
 
-// ── Frame callback ───────────────────────────────────────────────────
 
 static void frame_done(void* data, wl_callback* cb, uint32_t) {
   auto* s = static_cast<ArchiveState*>(data);
@@ -500,7 +488,6 @@ static void frame_done(void* data, wl_callback* cb, uint32_t) {
 
 static const wl_callback_listener frame_listener = {frame_done};
 
-// ── Helpers ──────────────────────────────────────────────────────────
 
 static void draw_rounded_rect(cairo_t* cr, double x, double y,
                                double w, double h, double r) {
@@ -516,7 +503,6 @@ static void set_color(cairo_t* cr, double r, double g, double b, double a) {
   cairo_set_source_rgba(cr, r, g, b, a);
 }
 
-// ── Embedded SVG assets ─────────────────────────────────────────────
 
 static const char close_svg[] = R"SVG(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10" fill="#e74c3c"/><path d="M8 8l8 8M16 8l-8 8" stroke="#fff" stroke-width="2" stroke-linecap="round"/></svg>)SVG";
 
@@ -548,7 +534,6 @@ static cairo_surface_t* svg_to_surface(const char* svg_data, int size) {
   return surf;
 }
 
-// ── format options ─────────────────────────────────────────────
 
 static constexpr const char* kFormatLabels[] = {
   "ZIP", "Tar.gz", "Tar.bz2", "Tar.xz", "7z", "Tar"
@@ -558,7 +543,6 @@ static constexpr const char* kFormatExts[] = {
 };
 static constexpr int kFormatCount = 6;
 
-// ── Main draw function ───────────────────────────────────────────────
 
 static void draw_create_dialog(ArchiveState& s, cairo_t* cr);
 
@@ -939,7 +923,6 @@ static void draw_archive_viewer(ArchiveState& s) {
     }
   }
 
-  // ── Settings panel overlay ────────────────────────────────────────────
   if (s.show_settings) {
     int pw = 360;
     int ph = 370;
@@ -1058,12 +1041,10 @@ static void draw_archive_viewer(ArchiveState& s) {
     }
   }
 
-  // ── Create archive dialog overlay ──
   if (s.create_mode) {
     draw_create_dialog(s, cr);
   }
 
-  // ── Embedded file browser panel ──
   if (s.fb_panel.active) {
     s.fb_panel.w = s.width / 2;
     s.fb_panel.h = s.height;
@@ -1073,7 +1054,6 @@ static void draw_archive_viewer(ArchiveState& s) {
   }
 }
 
-// ── Create archive dialog ──────────────────────────────────────
 
 static void draw_create_dialog(ArchiveState& s, cairo_t* cr) {
   int w = s.width;
@@ -1130,7 +1110,6 @@ static void draw_create_dialog(ArchiveState& s, cairo_t* cr) {
   int field_x = px + 90;
   int field_w = pw - 110;
 
-  // ── Save in row ──
   cairo_set_source_rgb(cr, s.text_r, s.text_g, s.text_b);
   cairo_move_to(cr, px + 16, ly + 14);
   cairo_show_text(cr, "Save in:");
@@ -1169,7 +1148,6 @@ static void draw_create_dialog(ArchiveState& s, cairo_t* cr) {
 
   ly += 30;
 
-  // ── Name row ──
   cairo_select_font_face(cr, "sans-serif", CAIRO_FONT_SLANT_NORMAL,
                           CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 12);
@@ -1206,7 +1184,6 @@ static void draw_create_dialog(ArchiveState& s, cairo_t* cr) {
 
   ly += 30;
 
-  // ── Format row ──
   cairo_set_font_size(cr, 12);
   cairo_set_source_rgb(cr, s.text_r, s.text_g, s.text_b);
   cairo_move_to(cr, px + 16, ly + 14);
@@ -1260,7 +1237,6 @@ static void draw_create_dialog(ArchiveState& s, cairo_t* cr) {
 
   ly += 30;
 
-  // ── Files to add ──
   cairo_set_font_size(cr, 12);
   cairo_set_source_rgb(cr, s.text_r, s.text_g, s.text_b);
   char files_buf[64];
@@ -1289,7 +1265,6 @@ static void draw_create_dialog(ArchiveState& s, cairo_t* cr) {
   }
   cairo_restore(cr);
 
-  // ── Action buttons ──
   int btn_y = py + ph - 40;
   int btn_w = 90;
   int btn_h = 28;
@@ -1319,7 +1294,6 @@ static void draw_create_dialog(ArchiveState& s, cairo_t* cr) {
   cairo_show_text(cr, "Create");
 }
 
-// ── Event handling ───────────────────────────────────────────────────
 
 static void update_hover_normal(ArchiveState* s, int mx, int my);
 void update_hover(ArchiveState* s, int mx, int my) {
@@ -1362,7 +1336,6 @@ void update_hover(ArchiveState* s, int mx, int my) {
 static void update_hover_normal(ArchiveState* s, int mx, int my) {
   int row_h = static_cast<int>(ArchiveState::row_h * s->zoom_level);
 
-  // ── Create dialog hover ──
   if (s->create_mode) {
     s->create_format_hover = -1;
     int pw = 480;
@@ -1520,7 +1493,6 @@ static void set_slider_from_x(ArchiveState* s, int slider, int mx) {
   s->needs_redraw = true;
 }
 
-// ── config path ─────────────────────────────────────────────────
 
 static std::string archive_config_path() {
   const char* xdg = std::getenv("XDG_CONFIG_HOME");
@@ -1568,7 +1540,6 @@ static void save_settings(ArchiveState* s) {
 }
 
 void handle_click(ArchiveState* s, int mx, int my, uint32_t serial) {
-  // ── Create dialog click ──
   if (s->create_mode) {
     int pw = 480;
     int ph = 350;
@@ -1858,7 +1829,6 @@ void handle_click(ArchiveState* s, int mx, int my, uint32_t serial) {
 
 } // namespace
 
-// ── ArchiveState ──────────────────────────────────────────────────────
 
 void ArchiveState::rebuild_visible() {
   visible_entries.clear();
@@ -1933,7 +1903,6 @@ void ArchiveState::open_archive(const std::string& path) {
   needs_redraw = true;
 }
 
-// ── Entry point ───────────────────────────────────────────────────────
 
 int run_gui(const std::string& archive_path,
             const std::vector<std::string>& create_files) {
@@ -1978,7 +1947,6 @@ int run_gui(const std::string& archive_path,
 
   xdg_wm_base_add_listener(static_cast<xdg_wm_base*>(s.wm_base), &wm_base_listener, nullptr);
 
-  // Create surface
   s.surface = wl_compositor_create_surface(s.compositor);
   s.xdg_surf = xdg_wm_base_get_xdg_surface(static_cast<xdg_wm_base*>(s.wm_base), s.surface);
   xdg_surface_add_listener(static_cast<xdg_surface*>(s.xdg_surf), &xdg_surface_listener, &s);

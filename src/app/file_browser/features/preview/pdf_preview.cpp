@@ -38,19 +38,6 @@ void pdf_log(const char* fmt, ...) {
 
 } // anonymous namespace
 
-bool is_pdf_extension(const std::string& path) {
-  const char suf[] = ".pdf";
-  if (path.size() < 4) return false;
-  for (int i = 0; i < 4; ++i) {
-    char a = path[path.size() - 4 + i];
-    char b = suf[i];
-    if ((a >= 'A' && a <= 'Z') ? (a - 'A' + 'a') != b
-        : (a >= 'a' && a <= 'z') ? a != b
-        : a != b) return false;
-  }
-  return true;
-}
-
 cairo_surface_t* load_pdf_thumbnail(const std::string& path, int max_px) {
   pdf_log("load_pdf_thumbnail called with path=%s max_px=%d", path.c_str(), max_px);
 

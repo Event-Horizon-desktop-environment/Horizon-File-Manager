@@ -6,7 +6,6 @@
 
 namespace eh::file_browser {
 
-// ── filetype.cpp shared surface ──────────────────────────────────
 // File-type classification helpers defined in features/filetype.cpp.
 // detect_file_type / mime_by_ext / user_name / group_name are consumed by
 // the scan pipeline (features/scan.cpp) and the hover/space preview

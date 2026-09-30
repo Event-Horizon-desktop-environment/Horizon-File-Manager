@@ -43,7 +43,6 @@ using menu_clock = std::chrono::steady_clock;
 
 namespace eh::file_browser {
 
-// ── Settings dialog open / apply ──────────────────────────────────
 
 void open_settings(AppState& app) {
   // File browser settings come from the live app state (already loaded
@@ -52,6 +51,19 @@ void open_settings(AppState& app) {
   app.settings_zoom_pct = app.zoom_pct;
   app.settings_folders_before_files = app.folders_before_files;
   app.settings_independent_dir_views = app.independent_dir_views;
+  app.settings_recent_enabled = app.recent_enabled;
+  app.settings_restore_session = app.restore_session;
+  app.settings_tag_colors = app.tag_colors;
+  app.settings_tag_selected = -1;
+  app.settings_nextcloud_server = app.nextcloud_server;
+  app.settings_nextcloud_user = app.nextcloud_user;
+  app.settings_drive_client_id = app.drive_client_id;
+  app.settings_drive_editing = false;
+  // Session-only: mirror live memory, never disk (no fbs field exists).
+  app.settings_drive_client_secret = app.drive_client_secret;
+  app.settings_drive_secret_editing = false;
+  app.settings_nc_editing = 0;
+  app.settings_accounts_stale = true;
   app.settings_opacity_pct = app.surface_opacity_pct;
   app.settings_sidebar_opacity_pct = app.sidebar_opacity_pct;
   app.settings_topbar_opacity_pct = app.topbar_opacity_pct;
@@ -59,6 +71,9 @@ void open_settings(AppState& app) {
   app.settings_preview_opacity_pct = app.preview_opacity_pct;
   app.settings_dialog_opacity_pct = app.dialog_opacity_pct;
   app.settings_properties_opacity_pct = app.properties_opacity_pct;
+  app.settings_trash_auto_purge = app.trash_auto_purge;
+  app.settings_trash_max_days = app.trash_max_days;
+  app.settings_trash_max_mb = app.trash_max_mb;
 
   {
     const auto& sc = eh::config::shell_config_snapshot();
@@ -125,7 +140,9 @@ static void dir_views_to_config(eh::config::FileBrowserSettings& fbs,
   if (independent) {
     const std::string& cur = app.cur_tab().current_path;
     if (!cur.empty() && cur != "computer://" && cur != "trash://" &&
-        cur.rfind("recent://", 0) != 0) {
+        cur != "recent://" && cur != "starred://" &&
+        cur.rfind("recent://", 0) != 0 && cur.rfind("starred://", 0) != 0 &&
+        cur.rfind("sftp://", 0) != 0) {
       const auto& t = app.cur_tab();
       eh::config::FileBrowserDirView dv;
       dv.view_mode = static_cast<int>(t.view_mode);
@@ -172,6 +189,9 @@ void save_file_browser_settings(AppState& app) {
   fbs.preview_scale = app.preview_scale;
   fbs.dialog_opacity_pct = app.dialog_opacity_pct;
   fbs.properties_opacity_pct = app.properties_opacity_pct;
+  fbs.trash_auto_purge = app.trash_auto_purge;
+  fbs.trash_max_days = app.trash_max_days;
+  fbs.trash_max_mb = app.trash_max_mb;
   fbs.view_mode = static_cast<int>(app.cur_tab().view_mode);
   fbs.sort_field = static_cast<int>(app.cur_tab().sort_field);
   fbs.sort_descending = app.cur_tab().sort_descending;
@@ -187,6 +207,38 @@ void save_file_browser_settings(AppState& app) {
   fbs.independent_dir_views = app.independent_dir_views;
   fbs.show_hidden = app.show_hidden;
   fbs.favorites = app.favorites;
+  fbs.starred = app.starred;
+  fbs.recent = app.recent;
+  fbs.track_recent = app.recent_enabled;
+  fbs.restore_session = app.restore_session;
+  fbs.startup_folder = app.startup_folder;
+  fbs.tag_colors = app.tag_colors;
+  fbs.nextcloud_server = app.nextcloud_server;
+  fbs.nextcloud_user = app.nextcloud_user;
+  fbs.drive_client_id = app.drive_client_id;
+  fbs.drive_account_emails.clear();
+  for (const auto& a : app.drive_accounts)
+    fbs.drive_account_emails.push_back(a.email);
+  // Merge, don't overwrite: a save from a logged-out session must not
+  // forget keyring-backed logins (only Disconnect removes them).
+  {
+    eh::config::FileBrowserSettings cur =
+        eh::config::read_file_browser_toml();
+    for (const auto& e : cur.drive_account_emails)
+      if (std::find(fbs.drive_account_emails.begin(),
+                    fbs.drive_account_emails.end(),
+                    e) == fbs.drive_account_emails.end())
+        fbs.drive_account_emails.push_back(e);
+  }
+  fbs.remote_servers.clear();
+  for (const auto& s : app.remote_servers) {
+    eh::config::FileBrowserSettings::RemoteServerBookmark b;
+    b.host = s.host;
+    b.user = s.user;
+    b.path = s.path;
+    b.port = s.port;
+    fbs.remote_servers.push_back(std::move(b));
+  }
   fbs.window_controls_left = app.window_controls_left;
   dir_views_to_config(fbs, app, app.independent_dir_views);
   (void)eh::config::write_file_browser_toml(fbs);
@@ -210,6 +262,9 @@ void settings_apply(AppState& app) {
   fbs.preview_scale = app.settings_preview_scale;
   fbs.dialog_opacity_pct = app.settings_dialog_opacity_pct;
   fbs.properties_opacity_pct = app.settings_properties_opacity_pct;
+  fbs.trash_auto_purge = app.settings_trash_auto_purge;
+  fbs.trash_max_days = app.settings_trash_max_days;
+  fbs.trash_max_mb = app.settings_trash_max_mb;
   fbs.view_mode = static_cast<int>(app.cur_tab().view_mode);
   fbs.sort_field = static_cast<int>(app.cur_tab().sort_field);
   fbs.sort_descending = app.cur_tab().sort_descending;
@@ -222,6 +277,37 @@ void settings_apply(AppState& app) {
   fbs.col_target = app.col_target;
   fbs.show_hidden = app.show_hidden;
   fbs.favorites = app.favorites;
+  fbs.starred = app.starred;
+  fbs.recent = app.recent;
+  fbs.track_recent = app.settings_recent_enabled;
+  fbs.restore_session = app.settings_restore_session;
+  fbs.startup_folder = app.startup_folder;
+  fbs.tag_colors = app.settings_tag_colors;
+  fbs.nextcloud_server = app.settings_nextcloud_server;
+  fbs.nextcloud_user = app.settings_nextcloud_user;
+  fbs.drive_client_id = app.settings_drive_client_id;
+  fbs.drive_account_emails.clear();
+  for (const auto& a : app.drive_accounts)
+    fbs.drive_account_emails.push_back(a.email);
+  // Same merge as the live-state save above (see comment there).
+  {
+    eh::config::FileBrowserSettings cur =
+        eh::config::read_file_browser_toml();
+    for (const auto& e : cur.drive_account_emails)
+      if (std::find(fbs.drive_account_emails.begin(),
+                    fbs.drive_account_emails.end(),
+                    e) == fbs.drive_account_emails.end())
+        fbs.drive_account_emails.push_back(e);
+  }
+  fbs.remote_servers.clear();
+  for (const auto& s : app.remote_servers) {
+    eh::config::FileBrowserSettings::RemoteServerBookmark b;
+    b.host = s.host;
+    b.user = s.user;
+    b.path = s.path;
+    b.port = s.port;
+    fbs.remote_servers.push_back(std::move(b));
+  }
   fbs.independent_dir_views = app.settings_independent_dir_views;
   dir_views_to_config(fbs, app, app.settings_independent_dir_views);
   (void)eh::config::write_file_browser_toml(fbs);
@@ -242,6 +328,7 @@ void settings_apply(AppState& app) {
   }
 
   reload_settings_from_config(app);
+  refresh_sidebar(app);
 }
 
 void reload_colors_from_config(AppState& app) {
@@ -324,7 +411,14 @@ void reload_settings_from_config(AppState& app) {
   app.settings_preview_scale = fbs.preview_scale;
   app.dialog_opacity_pct = fbs.dialog_opacity_pct;
   app.properties_opacity_pct = fbs.properties_opacity_pct;
-  app.cur_tab().view_mode = static_cast<ViewMode>(fbs.view_mode);
+  app.trash_auto_purge = fbs.trash_auto_purge;
+  app.trash_max_days = fbs.trash_max_days;
+  app.trash_max_mb = fbs.trash_max_mb;
+  // Never clobber the Computer view with the persisted List/Grid mode:
+  // the startup settings sync fires on the first frame (and Apply fires
+  // any time), and List-over-computer:// paints a blank listing.
+  if (app.cur_tab().current_path != "computer://")
+    app.cur_tab().view_mode = static_cast<ViewMode>(fbs.view_mode);
   if (app.cur_tab().view_mode != ViewMode::Computer)
     app.last_browser_view_mode = app.cur_tab().view_mode;
   app.cur_tab().sort_field = static_cast<SortField>(std::clamp(
@@ -359,6 +453,24 @@ void reload_settings_from_config(AppState& app) {
   app.sidebar_width = std::max(120, static_cast<int>(app.sidebar_width_base * app.zoom_pct / 100.0));
 
   app.favorites = fbs.favorites;
+  app.starred = fbs.starred;
+  app.recent = fbs.recent;
+  app.recent_enabled = fbs.track_recent;
+  app.restore_session = fbs.restore_session;
+  app.startup_folder = fbs.startup_folder;
+  app.tag_colors = fbs.tag_colors;
+  app.nextcloud_server = fbs.nextcloud_server;
+  app.nextcloud_user = fbs.nextcloud_user;
+  app.drive_client_id = fbs.drive_client_id;
+  app.remote_servers.clear();
+  for (const auto& b : fbs.remote_servers) {
+    AppState::RemoteServer s;
+    s.host = b.host;
+    s.user = b.user;
+    s.path = b.path.empty() ? "/" : b.path;
+    s.port = b.port > 0 ? b.port : 22;
+    app.remote_servers.push_back(std::move(s));
+  }
   app.window_controls_left = fbs.window_controls_left;
 
   // Sync icon theme from shell config

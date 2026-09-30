@@ -23,7 +23,6 @@ namespace eh::file_browser {
 
 namespace {
 
-// ── URI encoding helpers (mirrors ClipboardService) ────────────
 
 std::string file_uri_for_path(const std::string& abs_path) {
   std::string out = "file://";
@@ -59,7 +58,6 @@ std::string canonical_abs_path(const std::string& path) {
   return std::filesystem::absolute(path, ec).string();
 }
 
-// ── wl_data_source listener table ─────────────────────────────
 
 constexpr wl_data_source_listener kDataSourceListener = {
   .target = data_source_target,
@@ -72,7 +70,6 @@ constexpr wl_data_source_listener kDataSourceListener = {
 
 } // namespace
 
-// ── wl_data_source callbacks ──────────────────────────────────
 
 void data_source_target(void*, wl_data_source*, const char*) {
 }
@@ -132,7 +129,6 @@ void data_source_action(void*, wl_data_source*, uint32_t dnd_action) {
   // but for other apps receiving our drag it's informational.
 }
 
-// ── Start drag ────────────────────────────────────────────────
 
 void start_drag(AppState& app) {
   if (!app.data_device || app.drag_paths.empty()) {
@@ -501,7 +497,6 @@ void start_drag(AppState& app) {
   }
 }
 
-// ── Cancel drag ───────────────────────────────────────────────
 
 void cancel_drag(AppState& app) {
   if (app.drag_source) {
@@ -536,7 +531,6 @@ void update_drag_icon(AppState& app) {
   (void)app;
 }
 
-// ── Drop receiver (wl_data_device listener) ─────────────────────
 
 namespace {
 
@@ -864,7 +858,6 @@ void data_device_drop(void* data, wl_data_device*) {
   auto& app = *static_cast<AppState*>(data);
   if (!app.drop_offer) return;
 
-  // ── Within-app drop ─────────────────────────────────────────────
   if (app.drag_source && !app.drag_paths.empty()) {
     auto* offer_data = static_cast<DropOfferData*>(wl_data_offer_get_user_data(app.drop_offer));
     delete offer_data;
@@ -932,7 +925,6 @@ void data_device_drop(void* data, wl_data_device*) {
     return;
   }
 
-  // ── External drop: read URI data through the compositor ─────────
   int fds[2];
   if (pipe2(fds, O_CLOEXEC) < 0) return;
 
@@ -1041,7 +1033,6 @@ void setup_drop_receiver(AppState& app) {
   wl_data_device_add_listener(app.data_device, &kDataDeviceListener, &app);
 }
 
-// ── Drop action chooser (Copy/Move prompt) ───────────────────────
 
 void open_drop_chooser(AppState& app, std::vector<std::string> ops,
                        std::string target) {

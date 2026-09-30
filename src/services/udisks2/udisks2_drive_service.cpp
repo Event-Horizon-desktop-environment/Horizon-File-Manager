@@ -182,7 +182,6 @@ void UDisks2DriveService::add_fstab_async(const std::string&, const std::string&
 
 void UDisks2DriveService::bind_signals() {}
 
-// ── ISO loop helpers ───────────────────────────────────────────────
 
 namespace {
 

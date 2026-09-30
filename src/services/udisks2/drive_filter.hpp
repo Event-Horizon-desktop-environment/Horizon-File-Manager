@@ -12,7 +12,6 @@
 
 namespace eh::drives {
 
-// ── GPT partition type GUIDs to hide (from udisks2 80-udisks2.rules) ──
 
 inline const std::set<std::string>& hidden_partition_guids() {
   static const std::set<std::string> guids = {
@@ -26,19 +25,16 @@ inline const std::set<std::string>& hidden_partition_guids() {
   return guids;
 }
 
-// ── Filesystem types to hide ──
 
 inline bool is_hidden_fstype(const std::string& fs_type) {
   return fs_type == "swap" || fs_type == "squashfs";
 }
 
-// ── Mount points to hide ──
 
 inline bool is_hidden_mount_point(const std::string& mp) {
   return mp == "/boot" || mp == "/boot/efi" || mp == "/recovery";
 }
 
-// ── Device name patterns to hide ──
 
 inline bool is_hidden_device(const std::string& device) {
   auto name = device.substr(device.find_last_of('/') + 1);
@@ -46,7 +42,6 @@ inline bool is_hidden_device(const std::string& device) {
          name.starts_with("snap") || name.starts_with("dm-");
 }
 
-// ── ISO loop exemption ─────────────────────────────────────────────
 // Mounted ISOs must show as drives in the sidebar, so loop
 // devices backed by .iso/.img/.udf files are exempt from the loop hide rule.
 // Snap squashfs loops (backing *.snap) stay hidden.
@@ -84,7 +79,6 @@ inline bool is_iso_loop_device(const std::string& device) {
   return lower.ends_with(".iso") || lower.ends_with(".img") || lower.ends_with(".udf");
 }
 
-// ── Partition label strings to hide (fallback when GUID unavailable) ──
 
 inline bool is_hidden_partition_label(const std::string& label) {
   return label == "EFI" ||
@@ -96,7 +90,6 @@ inline bool is_hidden_partition_label(const std::string& label) {
          label == "linux-boot" || label == "linux-efi";
 }
 
-// ── Generic system partition labels that should show device size instead ──
 
 inline bool is_generic_partition_label(const std::string& label) {
   return label == "root" ||
@@ -105,7 +98,6 @@ inline bool is_generic_partition_label(const std::string& label) {
          label == "swap";
 }
 
-// ── GPT partition type GUID reading ──
 
 /// Read partition type GUIDs from GPT on device.
 /// Returns map of partition_number → type_guid (lowercase with dashes).

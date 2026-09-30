@@ -3,6 +3,7 @@
 
 #include "../app.hpp"
 #include "../features/sidebar/sidebar.hpp"
+#include "app/file_browser/features/tags/tags.hpp"
 #include "app/file_browser/features/thumbnails/thumb_pool.hpp"
 #include "draw_file_icons.hpp"
 
@@ -28,7 +29,6 @@ namespace fs = std::filesystem;
 
 namespace eh::file_browser {
 
-// ── icon debug logger ──────────────────────────────────────────────
 static std::mutex g_icon_log_mtx;
 static void icon_log(const char* fmt, ...) {
   static FILE* f = nullptr;
@@ -102,6 +102,7 @@ static void draw_emblem_badge(AppState& app, cairo_t* cr, double cx, double cy,
   } else {
     cairo_set_source_rgba(cr, 0.85, 0.25, 0.25, 1.0);
   }
+  cairo_new_path(cr); // standalone disc: no connector from prior drawing
   cairo_arc(cr, cx, cy, r, 0, 2 * M_PI);
   cairo_fill(cr);
   cairo_set_line_width(cr, std::max(1.0, r * 0.14));
@@ -357,6 +358,44 @@ void draw_file_icon_cairo(AppState& app, cairo_t* cr, int x, int y,
   if (!entry->readable || (entry->is_dir && entry->mode &&
                            !(entry->mode & S_IXUSR))) {
     draw_emblem_badge(app, cr, cx + drawn * (r * 2 + pad * 1.6), cy, r, 2);
+  }
+
+  // Tag badges: colored dots, top-right, one per tag (registry colors,
+  // neutral gray for custom names). Needs icon room, so tiny icons skip.
+  if (!entry->tags_csv.empty() && size >= 32) {
+    auto names = split_tags(entry->tags_csv);
+    if (!names.empty()) {
+      auto reg = tag_registry(app.tag_colors);
+      double br = std::max(3.5, size * 0.075);
+      double bx = x + size - br - 1.0;
+      double by = y + br + 1.0;
+      size_t shown = std::min(names.size(), size_t{4});
+      for (size_t i = 0; i < shown; ++i) {
+        double rr = 0.55, gg = 0.55, bb = 0.55; // custom-tag gray
+        for (auto& t : reg) {
+          if (t.name == names[i]) {
+            rr = t.r;
+            gg = t.g;
+            bb = t.b;
+            break;
+          }
+        }
+        double dx = bx - i * (br * 2 + 2.0);
+        cairo_new_path(cr); // no stray connector from prior drawing
+        cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
+        cairo_arc(cr, dx + 0.8, by + 0.8, br, 0, 2 * M_PI);
+        cairo_fill(cr);
+        cairo_new_path(cr);
+        cairo_set_source_rgba(cr, rr, gg, bb, 1.0);
+        cairo_arc(cr, dx, by, br, 0, 2 * M_PI);
+        cairo_fill(cr);
+        cairo_new_path(cr);
+        cairo_set_source_rgba(cr, 1, 1, 1, 0.55);
+        cairo_arc(cr, dx, by, br, 0, 2 * M_PI);
+        cairo_set_line_width(cr, 1.0);
+        cairo_stroke(cr);
+      }
+    }
   }
 }
 

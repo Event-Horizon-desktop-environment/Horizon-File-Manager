@@ -4,6 +4,8 @@
 #include "../app.hpp"
 #include "../trace.hpp"
 #include "../features/sidebar/sidebar.hpp"
+#include "../features/drive/drive.hpp"
+#include "../features/remote/remote.hpp"
 #include "../features/view_zoom/view_zoom.hpp"
 
 #include <cairo/cairo.h>
@@ -26,7 +28,6 @@ namespace fs = std::filesystem;
 
 namespace eh::file_browser {
 
-// ── top bar ──────────────────────────────────────────────────────
 
 static void draw_house_icon(cairo_t* cr, int x, int y, int size) {
   cairo_save(cr);
@@ -215,7 +216,6 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
   // In split view, the global bar only draws window controls (per-pane bars draw everything else)
   if (!app.split_view || pane_w > 0) {
 
-  // ── Responsive visibility ──
   // Lowest-priority controls hide first so the path bar never collapses
   // into overlap. Back + path + traffic always stay; everything hidden
   // remains reachable via keyboard shortcuts.
@@ -297,10 +297,8 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     }
   }
 
-  // ── Navigation arrows (back, forward) ──
   int x = sidebar_w + static_cast<int>(20.0 * zf); // px-5
 
-  // ── Sidebar fold toggle button ──
   // Appears at the far left when the sidebar is folded into a flap overlay.
   if (app.sidebar_folded && pane_w == 0) {
     int slot_w = static_cast<int>(36.0 * zf);
@@ -308,8 +306,11 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     bool t_active = app.sidebar_folded_revealed;
     app.sidebar_toggle_x = x;
     app.sidebar_toggle_w = slot_w;
-    app.hit_main.add(hui::Hit::topbar(app.active_pane, hui::Hit::kTopFoldToggle), x, y0 + (top_h - slot_w) / 2,
-                     slot_w, slot_w);
+    // Full bar height: the slot is only 36px tall but, like every other
+    // top-bar button, it must stay hittable across the whole bar so
+    // horizontal approaches near the bar edges never go dead.
+    app.hit_main.add(hui::Hit::topbar(app.active_pane, hui::Hit::kTopFoldToggle), x, y0,
+                     slot_w, top_h);
     if (t_hover || t_active) {
       cairo_save(cr);
       if (t_active) {
@@ -405,8 +406,10 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     else if (idx == 1) (app.active_pane ? app.r_arrow_forward_x : app.arrow_forward_x) = x;
     else (app.active_pane ? app.r_arrow_up_x : app.arrow_up_x) = x;
     const int nav_ctrl = (idx == 0) ? hui::Hit::kTopNavBack : (idx == 1) ? hui::Hit::kTopNavForward : hui::Hit::kTopNavUp;
-    app.hit_main.add(hui::Hit::topbar(app.active_pane, nav_ctrl), x, y0 + (top_h - slot_w) / 2, slot_w,
-                     slot_w);
+    // Full bar height, matching the view/sort/search buttons (which test
+    // only bar_y < top_bar_height): no dead strips at the bar edges.
+    app.hit_main.add(hui::Hit::topbar(app.active_pane, nav_ctrl), x, y0, slot_w,
+                     top_h);
     x += slot_w + static_cast<int>(6.0 * zf); // 6px header-bar spacing
   };
 
@@ -428,7 +431,6 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
 
   int path_left = x;
 
-  // ── Right-side controls ──
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                           CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 13.0 * zf);
@@ -502,7 +504,6 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
   int path_h = top_h - static_cast<int>(16.0 * zf);
   int path_y = (top_h - path_h) / 2;
 
-  // ── Compound "View Options" control (split-button style) ──
   // View toggle + sort chevron share one linked pill (rounded outer corners,
   // square inner edge) with a 1px divider between the two halves.
   // Hidden halves collapse: a lone survivor renders as a standalone button.
@@ -536,7 +537,6 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     }
   }
 
-  // ── Gradient bar background + semi-glassy design (inner glassy rim, not outer)
   draw_top_bar_pill(app, cr, path_x, path_y, path_w, path_h,
                     (pane_w > 0) ? (app.active_pane ? 2 : 1) : 0);
 
@@ -551,7 +551,6 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     cairo_stroke(cr);
   }
 
-  // ── Responsive pill chrome (GNOME-style graceful degradation) ──
   // The location icon is decorative; the ⋮ button stays as long as it fits
   // because it carries the toolbar overflow menu for hidden buttons. When
   // the pill gets too narrow, the icon drops first so the folder name keeps
@@ -574,8 +573,7 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     show_icon = false;
   }
 
-  // ── Three-dot menu on the far right ──
-  int dots_x = path_x + path_w - dots_btn_w + static_cast<int>(2.0 * zf);
+  int dots_x = path_x + path_w - dots_btn_w - static_cast<int>(4.0 * zf);
   int dots_y = path_y;
   if (show_dots) {
     (app.active_pane ? app.r_dots_btn_x : app.dots_btn_x) = dots_x;
@@ -594,7 +592,15 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     if (dhover) {
       cairo_save(cr);
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
-      draw_rounded_rect(cr, dots_x - 2, path_y + 2, dots_btn_w + 4, path_h - 4,
+      // Compact square highlight centered on the glyph — stays inside the
+      // pill instead of bleeding over its edge like the old full-height pad.
+      int hov_sz = static_cast<int>(24.0 * zf);
+      if (hov_sz > path_h - static_cast<int>(8.0 * zf))
+        hov_sz = path_h - static_cast<int>(8.0 * zf);
+      if (hov_sz < 16) hov_sz = 16;
+      int hov_x = dots_x + (dots_btn_w - hov_sz) / 2;
+      int hov_y = path_y + (path_h - hov_sz) / 2;
+      draw_rounded_rect(cr, hov_x, hov_y, hov_sz, hov_sz,
                         static_cast<int>(8.0 * zf));
       cairo_fill(cr);
       cairo_restore(cr);
@@ -623,13 +629,13 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
                               dhover ? 0.85 : 0.5);
       for (int i = 0; i < 3; ++i) {
+        cairo_new_path(cr); // standalone disc
         cairo_arc(cr, cx, cy0 + i * (2.0 * dot_r + dgap), dot_r, 0.0, 2.0 * M_PI);
         cairo_fill(cr);
       }
     }
   }
 
-  // ── Path content (house icon + breadcrumbs or editing) ──
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                           CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 13.0 * zf);
@@ -677,7 +683,6 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
                    y0 + path_y, path_text_w, path_h);
 
   if ((app.active_pane ? app.r_search_active : app.search_active) || (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active)) {
-    // ── Search bar ──
     // The right edge respects a hidden ⋮ (its space is reclaimed for the query).
     int search_left = path_text_x;
     int search_right = path_x + path_w - (show_dots ? dots_btn_w : 0) - static_cast<int>(8.0 * zf);
@@ -828,7 +833,6 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
       (app.active_pane ? app.r_filter_btn_w : app.filter_btn_w) = 0;
     }
 
-    // ── Query-mode segment, case toggle, lock (left of Filter) ──
     {
       auto& dw_mode = app.active_pane ? app.r_search_mode : app.search_mode;
       auto& dw_case = app.active_pane ? app.r_search_case_sensitive : app.search_case_sensitive;
@@ -860,6 +864,7 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
         cairo_set_line_width(cr, 1.4);
         cairo_rectangle(cr, cx - s * 0.75, cy - s * 0.1, s * 1.5, s * 1.1);
         if (dw_lock) cairo_fill(cr); else cairo_stroke(cr);
+        cairo_new_path(cr); // standalone disc
         cairo_arc(cr, cx, cy - s * 0.1, s * 0.45, M_PI, 2 * M_PI);
         cairo_stroke(cr);
       } else {
@@ -979,7 +984,6 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
       cairo_restore(cr);
     }
   } else if (app.active_pane ? app.r_path_editing : app.path_editing) {
-    // ── Editable location bar ──
     // Clipped to the text budget so a long path can never paint over the
     // pill edge or neighbours when the window is narrow.
     auto& dw_pe_buf = app.active_pane ? app.r_path_edit_buf : app.path_edit_buf;
@@ -1047,78 +1051,293 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     }
     cairo_restore(cr);
   } else {
-    // ── Simple location label (single friendly name + house, matching Design.png aesthetic) ──
-    (app.active_pane ? app.r_breadcrumbs : app.breadcrumbs).clear();
-    (app.active_pane ? app.r_breadcrumb_hover : app.breadcrumb_hover) = -1;
+    // Each path component is its own segment: hover highlights, click
+    // navigates, clicking the current folder enters edit mode (empty-area
+    // click still enters edit). Overflow collapses leading segments into
+    // a "…" segment so the bar never overdraws at narrow widths.
+    auto& bc_vec = app.active_pane ? app.r_breadcrumbs : app.breadcrumbs;
+    auto& bc_hover = app.active_pane ? app.r_breadcrumb_hover : app.breadcrumb_hover;
+    int prev_hover = bc_hover;
+    bc_vec.clear();
+    // Don't reset hover here: pointer.cpp sets it from last frame's geometry
+    // and draw must still highlight it. It is clamped to the rebuilt list
+    // at the end of this block.
 
-    // Compute friendly display name (Home / Pictures / current folder basename etc.)
-    std::string label;
     std::string cur = app.cur_tab().current_path;
-    if (!cur.empty() && cur[0] == '/') {
-      std::string h = home_dir();
-      if (cur == h || cur == h + "/") {
-        label = "Home";
-      } else {
-        bool found = false;
-        for (const auto& loc : app.sidebar_locations) {
-          if (!loc.path.empty() && loc.path == cur) {
-            label = loc.label;
-            found = true;
-            break;
+    struct RawSeg { std::string label; std::string path; };
+    std::vector<RawSeg> raw;
+    bool is_virtual = cur.empty() || cur[0] != '/';
+    if (cur == "recent://") {
+      raw.push_back({"Recent", cur});
+    } else if (cur == "starred://") {
+      raw.push_back({"Starred", cur});
+    } else if (is_drive_uri(cur)) {
+      // googledrive://email[/a/b] -> clickable [email, a, b] with full-URI
+      // prefixes. Path segments are %-escaped (Drive names may contain '/'),
+      // so labels are unescaped for display.
+      auto dpos = cur.find("://");
+      std::string drest = cur.substr(dpos + 3);
+      auto dslash = drest.find('/');
+      std::string demail =
+          (dslash == std::string::npos) ? drest : drest.substr(0, dslash);
+      if (demail.empty()) demail = "Google Drive";
+      raw.push_back({demail, "googledrive://" + demail + "/"});
+      if (dslash != std::string::npos) {
+        std::string acc = "googledrive://" + demail;
+        size_t i = dslash + 1;
+        while (i <= drest.size()) {
+          size_t j = drest.find('/', i);
+          if (j == std::string::npos) j = drest.size();
+          if (j > i) {
+            std::string comp = drest.substr(i, j - i);
+            acc += "/" + comp;
+            gchar* u = g_uri_unescape_string(comp.c_str(), nullptr);
+            std::string label = u ? u : comp;
+            g_free(u);
+            raw.push_back({label, acc});
           }
-        }
-        if (!found) {
-          auto pos = cur.rfind('/');
-          label = (pos != std::string::npos && pos + 1 < cur.size()) ? cur.substr(pos + 1) : cur;
-          if (label.empty()) label = "/";
+          i = j + 1;
         }
       }
+    } else if (is_remote_uri(cur)) {
+      // scheme://[user@]host[:port][/a/b] -> clickable [host, a, b] with
+      // full-URI prefixes (mirrors the sidebar bookmark labels).
+      auto rpos = cur.find("://");
+      std::string scheme = cur.substr(0, rpos);
+      std::string rest = cur.substr(rpos + 3);
+      auto rslash = rest.find('/');
+      std::string authority =
+          (rslash == std::string::npos) ? rest : rest.substr(0, rslash);
+      std::string base = scheme + "://" + authority;
+      std::string first_label;
+      if (scheme == "google-drive") {
+        first_label = "Google Drive";
+      } else {
+        auto at = authority.find('@');
+        std::string hostport =
+            (at == std::string::npos) ? authority : authority.substr(at + 1);
+        auto colon = hostport.rfind(':');
+        std::string host =
+            (colon == std::string::npos) ? hostport : hostport.substr(0, colon);
+        first_label = (at == std::string::npos ? "" : authority.substr(0, at + 1)) + host;
+      }
+      if (first_label.empty()) first_label = base;
+      raw.push_back({first_label, base + "/"});
+      if (rslash != std::string::npos) {
+        std::string acc = base;
+        size_t i = rslash + 1;
+        while (i <= rest.size()) {
+          size_t j = rest.find('/', i);
+          if (j == std::string::npos) j = rest.size();
+          if (j > i) {
+            std::string comp = rest.substr(i, j - i);
+            acc += "/" + comp;
+            raw.push_back({comp, acc});
+          }
+          i = j + 1;
+        }
+      }
+    } else if (is_virtual && cur != "computer://") {
+      // Unknown virtual location: single friendly label (old behavior).
+      std::string label = cur.empty() ? "Home" : cur;
+      raw.push_back({label, cur});
+    } else if (cur == "computer://") {
+      raw.push_back({"My Computer", cur});
     } else {
-      label = cur.empty() ? "Home" : cur;
+      std::string h = home_dir();
+      std::vector<std::string> parts;
+      std::string acc;
+      // Split "/a/b/c" -> ["a","b","c"], acc tracks "/a", "/a/b", ...
+      for (size_t i = 1; i <= cur.size(); ++i) {
+        if (i == cur.size() || cur[i] == '/') {
+          std::string comp = cur.substr(acc.size() + 1, i - acc.size() - 1);
+          if (!comp.empty()) {
+            acc += "/" + comp;
+            parts.push_back(comp);
+          } else if (acc.empty()) {
+            acc = "";
+          }
+          if (i < cur.size()) continue;
+        }
+      }
+      if (parts.empty()) {
+        raw.push_back({"/", "/"});
+      } else {
+        // Leading "Home" when under home, else root "/".
+        size_t start_idx = 0;
+        if ((cur == h || cur.compare(0, h.size(), h) == 0) &&
+            (cur.size() == h.size() || cur[h.size()] == '/')) {
+          raw.push_back({"Home", h});
+          // Skip home's own components ("home","matt") in `parts`.
+          size_t h_parts = 0;
+          for (char c : h) if (c == '/') ++h_parts;
+          // h="/home/matt" has 2 slashes -> 2 components; parts[0]="home", parts[1]="matt".
+          size_t skip = 0;
+          for (size_t k = 0; k < parts.size(); ++k) {
+            std::string prefix = "/";
+            for (size_t j = 0; j <= k; ++j) prefix += (j ? "/" : "") + parts[j];
+            if (prefix == h) { skip = k + 1; break; }
+          }
+          (void)h_parts;
+          start_idx = skip;
+          if (cur == h) {
+            // Exactly home: single segment.
+          } else {
+            acc = h;
+            for (size_t k = start_idx; k < parts.size(); ++k) {
+              acc += "/" + parts[k];
+              raw.push_back({parts[k], acc});
+            }
+          }
+        } else {
+          raw.push_back({"/", "/"});
+          acc.clear();
+          for (auto& p : parts) {
+            acc += "/" + p;
+            raw.push_back({p, acc});
+          }
+        }
+      }
     }
 
     cairo_set_font_size(cr, 13.0 * zf);
-
-    // Measure + elide if needed. The budget is clamped to >= 0 and the
-    // paint is clipped to it, so a narrow pill shows an ellipsis instead
-    // of overlapping the ⋮ button or pill edge.
-    int label_budget = path_text_w - static_cast<int>(4.0 * zf);
-    if (label_budget < 0) label_budget = 0;
-    std::string display_label = hui::design::clip_end(cr, label, label_budget);
-    cairo_text_extents_t label_te;
-    cairo_text_extents(cr, display_label.c_str(), &label_te);
-    int label_w = static_cast<int>(label_te.x_advance + 4.0 * zf);
-    if (label_w > path_text_w) label_w = path_text_w;
-    if (label_w < 0) label_w = 0;
-
-    bool label_hovered = ((app.active_pane ? app.r_breadcrumb_hover : app.breadcrumb_hover) == 0);
-    if (label_hovered && label_w > 0) {
-      cairo_save(cr);
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
-      draw_rounded_rect(cr, path_text_x - 2, path_y + 2, label_w + 4, path_h - 4,
-                        static_cast<int>(8.0 * zf));
-      cairo_fill(cr);
-      cairo_restore(cr);
+    int sep_w = 0;
+    {
+      cairo_text_extents_t se;
+      cairo_text_extents(cr, "›", &se);
+      sep_w = static_cast<int>(se.x_advance + 8.0 * zf); // gaps around chevron
     }
+    int seg_pad = static_cast<int>(8.0 * zf); // pill padding per side
+    auto seg_text_w = [&](const std::string& s) {
+      cairo_text_extents_t te;
+      cairo_text_extents(cr, s.c_str(), &te);
+      return static_cast<int>(te.x_advance);
+    };
+
+    // Natural widths (unpadded text + pill padding).
+    std::vector<int> nat_w;
+    nat_w.reserve(raw.size());
+    for (auto& r : raw) nat_w.push_back(seg_text_w(r.label) + seg_pad * 2);
+
+    // Total with separators.
+    auto total_for = [&](size_t from) {
+      int t = 0;
+      for (size_t i = from; i < raw.size(); ++i) {
+        t += nat_w[i];
+        if (i + 1 < raw.size()) t += sep_w;
+      }
+      return t;
+    };
+
+    size_t first = 0;
+    bool collapsed = false;
+    if (!raw.empty() && total_for(0) > path_text_w && raw.size() > 1) {
+      // Keep as many trailing segments as fit, reserve room for "…".
+      int ellipsis_w = seg_text_w("…") + seg_pad * 2;
+      // Always keep the current (last) segment if it alone fits.
+      size_t keep = raw.size() - 1;
+      int budget = path_text_w - ellipsis_w - sep_w;
+      int acc_w = nat_w.back();
+      while (keep > 0) {
+        int need = acc_w + sep_w + nat_w[keep - 1];
+        if (need > budget) break;
+        acc_w = need;
+        --keep;
+      }
+      if (keep > 0) {
+        // If even the last segment doesn't fit, clip it below.
+        first = keep;
+        collapsed = true;
+      } else if (total_for(0) > path_text_w) {
+        // Everything fits except needing ellipsis is worse; keep all.
+        first = 0;
+        collapsed = false;
+        if (total_for(0) > path_text_w && raw.size() > 2) {
+          first = raw.size() - 2;
+          collapsed = true;
+        }
+      }
+    }
+
+    struct VisSeg { std::string label; std::string path; int w; bool ellipsis; };
+    std::vector<VisSeg> vis;
+    auto& bc_hidden = app.active_pane ? app.r_breadcrumbs_hidden : app.breadcrumbs_hidden;
+    bc_hidden.clear();
+    if (collapsed) {
+      // "…" navigates to the parent of the first visible segment.
+      std::string up = raw[first].path;
+      auto slash = up.rfind('/');
+      std::string up_path = (slash == std::string::npos || slash == 0) ? "/" : up.substr(0, slash);
+      if (first == 1) up_path = raw[0].path;
+      vis.push_back({"…", up_path, seg_text_w("…") + seg_pad * 2, true});
+      for (size_t i = 0; i < first; ++i) {
+        BreadcrumbSegment h;
+        h.label = raw[i].label;
+        h.path = raw[i].path;
+        h.x = 0;
+        h.w = 0;
+        bc_hidden.push_back(h);
+      }
+    }
+    for (size_t i = first; i < raw.size(); ++i)
+      vis.push_back({raw[i].label, raw[i].path, nat_w[i], false});
 
     cairo_save(cr);
     cairo_rectangle(cr, path_text_x, path_y, path_text_w, path_h);
     cairo_clip(cr);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, label_hovered ? 1.0 : 0.92);
-    cairo_move_to(cr, path_text_x, text_y);
-    cairo_show_text(cr, display_label.c_str());
-    cairo_restore(cr);
+    int cx = path_text_x;
+    int hover_idx = prev_hover;
+    for (size_t vi = 0; vi < vis.size(); ++vi) {
+      int wseg = vis[vi].w;
+      // Last resort: a single visible segment wider than the budget gets ellipsized.
+      std::string draw_label = vis[vi].label;
+      if (vis.size() == 1 && wseg > path_text_w) {
+        draw_label = hui::design::clip_end(cr, draw_label, path_text_w - seg_pad * 2);
+        wseg = path_text_w;
+      } else if (cx + wseg > path_text_x + path_text_w && vi + 1 == vis.size()) {
+        // Trailing segment clipped by a few px: ellipsize instead of overflowing.
+        int avail = path_text_x + path_text_w - cx;
+        if (avail < wseg && avail > seg_pad * 2 + 8) {
+          draw_label = hui::design::clip_end(cr, draw_label, avail - seg_pad * 2);
+          wseg = avail;
+        } else if (avail <= 0) {
+          break;
+        }
+      }
+      bool hov = (hover_idx == static_cast<int>(bc_vec.size()));
+      if (hov) {
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
+        draw_rounded_rect(cr, cx, path_y + 2, wseg, path_h - 4,
+                          static_cast<int>(8.0 * zf));
+        cairo_fill(cr);
+      }
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, hov ? 1.0 : 0.92);
+      cairo_text_extents_t te;
+      cairo_text_extents(cr, draw_label.c_str(), &te);
+      cairo_move_to(cr, cx + (wseg - te.x_advance) / 2, text_y);
+      cairo_show_text(cr, draw_label.c_str());
 
-    // One breadcrumb entry for hit testing / hover (clicking it is a no-op; empty space in the bar enters edit)
-    BreadcrumbSegment seg;
-    seg.label = display_label;
-    seg.path = cur;
-    seg.x = path_text_x;
-    seg.w = label_w;
-    (app.active_pane ? app.r_breadcrumbs : app.breadcrumbs).push_back(seg);
+      BreadcrumbSegment seg;
+      seg.label = draw_label;
+      seg.path = vis[vi].path;
+      seg.x = cx;
+      seg.w = wseg;
+      bc_vec.push_back(seg);
+
+      cx += wseg;
+      if (vi + 1 < vis.size()) {
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.45);
+        cairo_text_extents_t se;
+        cairo_text_extents(cr, "›", &se);
+        cairo_move_to(cr, cx + (sep_w - se.x_advance) / 2, text_y);
+        cairo_show_text(cr, "›");
+        cx += sep_w;
+      }
+    }
+    cairo_restore(cr);
+    if (bc_hover >= static_cast<int>(bc_vec.size())) bc_hover = -1;
   }
 
-  // ── View-mode toggle (cycles List→Grid→Compact→Tree→List) ──
   if (show_view) {
     // Icon previews the mode the next click switches TO.
     cairo_surface_t* svg = nullptr;
@@ -1153,7 +1372,6 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     }
   }
 
-  // ── Folder-search button (folder + magnifying glass) ──
   if (show_folder) {
     bool hv = app.active_pane ? app.r_folder_search_btn_hover : app.folder_search_btn_hover;
     bool active = (app.active_pane ? app.r_search_active : app.search_active);
@@ -1198,7 +1416,6 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     }
   }
 
-  // ── Search button (magnifying glass) ──
   if (show_search) {
     bool hv = app.active_pane ? app.r_search_btn_hover : app.search_btn_hover;
     bool active = (app.active_pane ? app.r_recursive_search_active : app.recursive_search_active);
@@ -1242,7 +1459,6 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     }
   }
 
-  // ── Sort chevron (dropdown segment of the compound View Options control) ──
   if (show_sort) {
     int csz = static_cast<int>(18.0 * zf); // same as the other toolbar icons
     int cx = sort_x + (sort_w - csz) / 2;
@@ -1268,11 +1484,14 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
     }
   }
 
-  // ── Settings gear button ──
   if (show_gear) {
     bool hv = app.active_pane ? app.r_settings_btn_hover : app.settings_btn_hover;
-    app.hit_main.add(hui::Hit::topbar(app.active_pane, hui::Hit::kTopGear), gear_x, y0 + path_y, gear_w,
-                     path_h);
+    // Full bar height: the drawn slot is 36x32 but the view/sort/search
+    // neighbours all hit-test the whole bar height, so a shorter gear rect
+    // leaves dead strips at the bar edges where horizontal approaches go
+    // dead and clicks fall through to path editing.
+    app.hit_main.add(hui::Hit::topbar(app.active_pane, hui::Hit::kTopGear), gear_x, y0, gear_w,
+                     top_h);
     if (hv) {
       cairo_save(cr);
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
@@ -1308,7 +1527,6 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
 
   } // end split-view guard (skip full bar when split_view && global)
 
-  // ── macOS-style traffic lights (always right) ──
   if (pane_w == 0) {
     // Recalculate traffic_x since it's inside the split-view guard above
     int right_margin = static_cast<int>(16.0 * zf);
@@ -1323,10 +1541,12 @@ void draw_top_bar(AppState& app, cairo_t* cr, int w, int top_h, int y0, int pane
       double rad = light_d / 2.0;
       if (hover) {
         cairo_set_source_rgba(cr, r, g, b, 0.4);
+        cairo_new_path(cr); // standalone disc
         cairo_arc(cr, lx + rad, light_y + rad, rad + 2, 0, 2 * M_PI);
         cairo_fill(cr);
       }
       cairo_set_source_rgba(cr, r, g, b, 1.0);
+      cairo_new_path(cr); // standalone disc
       cairo_arc(cr, lx + rad, light_y + rad, rad, 0, 2 * M_PI);
       cairo_fill(cr);
     };

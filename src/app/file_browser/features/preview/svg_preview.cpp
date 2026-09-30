@@ -20,19 +20,6 @@
 
 namespace eh::file_browser {
 
-bool is_svg_extension(const std::string& path) {
-  const char suf[] = ".svg";
-  if (path.size() < 4) return false;
-  for (int i = 0; i < 4; ++i) {
-    char a = path[path.size() - 4 + i];
-    char b = suf[i];
-    if ((a >= 'A' && a <= 'Z') ? (a - 'A' + 'a') != b
-        : (a >= 'a' && a <= 'z') ? a != b
-        : a != b) return false;
-  }
-  return true;
-}
-
 cairo_surface_t* load_svg_thumbnail(const std::string& path, int max_px) {
 #ifdef EH_HAVE_RSVG
   GError* err = nullptr;

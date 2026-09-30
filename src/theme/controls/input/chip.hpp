@@ -104,7 +104,6 @@ public:
     const float closeSize = 18.0f;
     const float alpha = enabled_ ? 1.0f : 0.38f;
 
-    // ---- Resolve colours from variant ----
     const float selectT = variant_ == Variant::Filter ? selectTween_.value(ctx.now_ms) : 0.0f;
 
     float bgR, bgG, bgB, bgA;

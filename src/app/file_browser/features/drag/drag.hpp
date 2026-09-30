@@ -14,7 +14,6 @@ void cancel_drag(AppState& app);
 /// Update the drag icon position (for pointer-move feedback).
 void update_drag_icon(AppState& app);
 
-// ── wl_data_source callbacks ────────────────────────────────────
 
 void data_source_target(void* data, wl_data_source* src, const char* mime);
 void data_source_send(void* data, wl_data_source* src, const char* mime, int32_t fd);
@@ -23,7 +22,6 @@ void data_source_dnd_drop_performed(void* data, wl_data_source* src);
 void data_source_dnd_finished(void* data, wl_data_source* src);
 void data_source_action(void* data, wl_data_source* src, uint32_t dnd_action);
 
-// ── Drop receiver (wl_data_device listener) ───────────────────
 
 void data_device_enter(void* data, wl_data_device* dev, uint32_t serial, wl_surface* surface,
                        wl_fixed_t x, wl_fixed_t y, wl_data_offer* offer);

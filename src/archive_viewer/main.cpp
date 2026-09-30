@@ -4,6 +4,8 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <clocale>
 #include <cinttypes>
 #include <cstdio>
@@ -24,7 +26,7 @@ void print_usage(const char* prog) {
     "  %s list <archive> [<path/>]              List archive contents\n"
     "  %s search <archive> <pattern>            Search entries by glob\n"
     "  %s extract <archive> <dest> [<path>...]  Extract files\n"
-    "  %s create <archive> <file>...            Create archive\n"
+    "  %s create [--level N] [-jN] [--progress] <archive> <file>...\n"
     "  %s convert <src> <dest>                  Convert between formats\n"
     "  %s check <archive>                       Verify integrity\n"
     "  %s hash <archive>                        SHA256 per entry\n"
@@ -148,9 +150,45 @@ int cmd_search(const std::string& archive, const std::string& pattern) {
 }
 
 int cmd_create(const std::string& archive,
-                const std::vector<std::string>& files) {
+                const std::vector<std::string>& files, int level,
+                bool progress) {
   std::string error;
-  if (archive_viewer::create_archive(archive, files, &error)) {
+  if (!progress) {
+    if (archive_viewer::create_archive(archive, files, &error, nullptr, 0,
+                                       level)) {
+      std::printf("Created %s (%zu files)\n", archive.c_str(), files.size());
+      return 0;
+    }
+    std::fprintf(stderr, "Error: %s\n", error.c_str());
+    return 1;
+  }
+  // Progress mode: run on a worker, poll the fraction, emit machine lines.
+  std::atomic<float> frac{0.0f};
+  std::atomic<bool> done{false};
+  int rc = 1;
+  size_t total = files.empty() ? 1 : files.size();
+  std::thread worker([&] {
+    if (archive_viewer::create_archive(archive, files, &error, &frac, total,
+                                       level)) {
+      rc = 0;
+    } else {
+      rc = 1;
+    }
+    done.store(true);
+  });
+  int last_done = -1;
+  while (!done.load()) {
+    int d = static_cast<int>(frac.load() * (float)total);
+    if (d != last_done) {
+      last_done = d;
+      std::fprintf(stderr, "ARCHIVE-PROGRESS %d %zu\n", d, total);
+      std::fflush(stderr);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+  }
+  worker.join();
+  std::fprintf(stderr, "ARCHIVE-PROGRESS %zu %zu\n", total, total);
+  if (rc == 0) {
     std::printf("Created %s (%zu files)\n", archive.c_str(), files.size());
     return 0;
   }
@@ -191,7 +229,6 @@ int cmd_comment(const std::string& archive) {
   return 0;
 }
 
-// ── Batch commands ───────────────────────────────────────────────────
 
 // Parse -j<N> from args, remove the flag and return jobs count (0 = default).
 // Updates argc/argv in-place to exclude the flag.
@@ -368,12 +405,41 @@ int main(int argc, char** argv) {
 
   if (cmd == "create") {
     if (argc < 4) {
-      std::fprintf(stderr, "Usage: %s create <archive> <file>...\n", argv[0]);
+      std::fprintf(stderr,
+                   "Usage: %s create [--level N] [-jN] [--progress] <archive> "
+                   "<file>...\n",
+                   argv[0]);
       return 1;
     }
+    int level = -1;
+    bool progress = false;
     std::vector<std::string> files;
-    for (int i = 3; i < argc; ++i) files.emplace_back(argv[i]);
-    return cmd_create(archive, files);
+    std::string archive;
+    for (int i = 2; i < argc; ++i) {
+      std::string a = argv[i];
+      if (a == "--progress") {
+        progress = true;
+      } else if (a == "--level" && i + 1 < argc) {
+        level = std::atoi(argv[++i]);
+      } else if (a.rfind("--level=", 0) == 0) {
+        level = std::atoi(a.c_str() + 8);
+      } else if (a.size() > 2 && a[0] == '-' && a[1] == 'j') {
+        continue;  // accepted: libarchive writes single-stream
+      } else if (archive.empty()) {
+        archive = a;
+      } else {
+        files.emplace_back(std::move(a));
+      }
+    }
+    if (archive.empty() || files.empty()) {
+      std::fprintf(stderr,
+                   "Usage: %s create [--level N] [-jN] [--progress] <archive> "
+                   "<file>...\n",
+                   argv[0]);
+      return 1;
+    }
+    if (level < 0 || level > 9) level = -1;
+    return cmd_create(archive, files, level, progress);
   }
 
   if (cmd == "convert") {

@@ -23,7 +23,6 @@ struct DesktopEntryInfo {
   std::string startup_wm_class;
   std::vector<DesktopAction> actions;
 
-  // ── Autostart / desktop entry spec fields (populated by read_desktop_entry_info) ──
   bool hidden = false;
   bool noDisplay = false;
   std::vector<std::string> onlyShowIn;

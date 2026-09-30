@@ -2,6 +2,7 @@
 #include "config/shell_config.hpp"
 #include <toml++/toml.hpp>
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <filesystem>
@@ -14,7 +15,6 @@ namespace eh::config {
 
 namespace fs = std::filesystem;
 
-// ── path helpers ──────────────────────────────────────────────────────
 
 static std::string config_dir() {
   const char* xdg = std::getenv("XDG_CONFIG_HOME");
@@ -38,6 +38,10 @@ std::string state_file_browser_toml_path() {
   return file_browser_toml_path();
 }
 
+std::string session_toml_path() {
+  return config_dir() + "/session.toml";
+}
+
 std::string state_settings_toml_path() {
   return config_dir() + "/state-settings.toml";
 }
@@ -46,7 +50,6 @@ std::string legacy_ini_path() {
   return config_dir() + "/settings.ini";
 }
 
-// ── singleton config snapshot ────────────────────────────────────────
 
 static ShellConfig g_snapshot;
 
@@ -171,7 +174,6 @@ void shell_config_apply_from_memory(ShellConfig sc) {
   g_snapshot = std::move(sc);
 }
 
-// ── chrome colors ────────────────────────────────────────────────────
 
 ChromePaintColors derived_chrome_colors(const ShellAppearance& appearance) {
   ChromePaintColors mc;
@@ -215,7 +217,49 @@ ChromePaintColors derived_chrome_colors(const ShellAppearance& appearance) {
   return mc;
 }
 
-// ── icon theme ───────────────────────────────────────────────────────
+// -- Disk usage settings (own file: disk-usage.toml) --
+
+static std::string disk_usage_toml_path() {
+  return config_dir() + "/disk-usage.toml";
+}
+
+DiskUsageSettings read_disk_usage_toml() {
+  DiskUsageSettings du;
+  std::ifstream f(disk_usage_toml_path());
+  if (!f.is_open()) return du;
+  try {
+    toml::table tbl = toml::parse(f);
+    du.drives_opacity_pct =
+        std::clamp(tbl["drives_opacity_pct"].value_or(100), 0, 100);
+    du.dir_opacity_pct =
+        std::clamp(tbl["dir_opacity_pct"].value_or(100), 0, 100);
+    du.ext_opacity_pct =
+        std::clamp(tbl["ext_opacity_pct"].value_or(100), 0, 100);
+    du.map_opacity_pct =
+        std::clamp(tbl["map_opacity_pct"].value_or(100), 0, 100);
+    du.bg_opacity_pct =
+        std::clamp(tbl["bg_opacity_pct"].value_or(100), 0, 100);
+  } catch (...) {}
+  return du;
+}
+
+bool write_disk_usage_toml(const DiskUsageSettings& du) {
+  try {
+    toml::table tbl;
+    tbl.emplace("drives_opacity_pct", du.drives_opacity_pct);
+    tbl.emplace("dir_opacity_pct", du.dir_opacity_pct);
+    tbl.emplace("ext_opacity_pct", du.ext_opacity_pct);
+    tbl.emplace("map_opacity_pct", du.map_opacity_pct);
+    tbl.emplace("bg_opacity_pct", du.bg_opacity_pct);
+    std::string path = disk_usage_toml_path();
+    fs::create_directories(fs::path(path).parent_path());
+    std::ofstream out(path);
+    if (!out.is_open()) return false;
+    out << tbl << "\n";
+    return true;
+  } catch (...) { return false; }
+}
+
 
 std::string read_dock_icon_theme_from_disk() {
   std::string path = state_settings_toml_path();
@@ -230,7 +274,6 @@ std::string read_dock_icon_theme_from_disk() {
   return {};
 }
 
-// ── File Browser settings ────────────────────────────────────────────
 
 FileBrowserSettings read_file_browser_toml() {
   FileBrowserSettings fbs;
@@ -250,6 +293,11 @@ FileBrowserSettings read_file_browser_toml() {
     fbs.preview_scale = tbl["preview_scale"].value_or(1.0);
     fbs.dialog_opacity_pct = tbl["dialog_opacity_pct"].value_or(100);
     fbs.properties_opacity_pct = tbl["properties_opacity_pct"].value_or(100);
+    fbs.trash_auto_purge = tbl["trash_auto_purge"].value_or(false);
+    fbs.trash_max_days =
+        std::clamp(tbl["trash_max_days"].value_or(30), 1, 365);
+    fbs.trash_max_mb =
+        std::clamp(tbl["trash_max_mb"].value_or(0), 0, 100000);
     fbs.view_mode = tbl["view_mode"].value_or(0);
     fbs.sort_field = tbl["sort_field"].value_or(0);
     fbs.sort_descending = tbl["sort_descending"].value_or(false);
@@ -273,6 +321,47 @@ FileBrowserSettings read_file_browser_toml() {
     if (auto* fav = tbl["favorites"].as_array()) {
       for (auto& el : *fav) {
         if (auto s = el.value<std::string>()) fbs.favorites.push_back(*s);
+      }
+    }
+    if (auto* st = tbl["starred"].as_array()) {
+      for (auto& el : *st) {
+        if (auto s = el.value<std::string>()) fbs.starred.push_back(*s);
+      }
+    }
+    if (auto* rc = tbl["recent"].as_array()) {
+      for (auto& el : *rc) {
+        if (auto s = el.value<std::string>()) fbs.recent.push_back(*s);
+      }
+    }
+    fbs.track_recent = tbl["track_recent"].value_or(true);
+    fbs.startup_folder = tbl["startup_folder"].value_or("");
+    fbs.restore_session = tbl["restore_session"].value_or(false);
+    fbs.nextcloud_server = tbl["nextcloud_server"].value_or("");
+    fbs.nextcloud_user = tbl["nextcloud_user"].value_or("");
+    fbs.drive_client_id = tbl["drive_client_id"].value_or("");
+    if (auto* tc = tbl["tag_colors"].as_table()) {
+      for (auto& kv : *tc) {
+        if (auto s = kv.second.value<std::string>())
+          fbs.tag_colors[std::string(kv.first)] = *s;
+      }
+    }
+    if (auto* da = tbl["drive_account_emails"].as_array()) {
+      for (auto& el : *da) {
+        if (auto e = el.value<std::string>()) fbs.drive_account_emails.push_back(*e);
+      }
+    }
+
+    // Remote server bookmarks (host/user/path/port only — never passwords).
+    if (auto* rem = tbl["remote_servers"].as_array()) {
+      for (auto& el : *rem) {
+        const toml::table* sub = el.as_table();
+        if (!sub) continue;
+        FileBrowserSettings::RemoteServerBookmark srv;
+        srv.host = (*sub)["host"].value_or("");
+        srv.user = (*sub)["user"].value_or("");
+        srv.path = (*sub)["path"].value_or("/");
+        srv.port = (*sub)["port"].value_or(22);
+        if (!srv.host.empty()) fbs.remote_servers.push_back(std::move(srv));
       }
     }
 
@@ -312,6 +401,9 @@ bool write_file_browser_toml(const FileBrowserSettings& fbs) {
     tbl.emplace("preview_scale", fbs.preview_scale);
     tbl.emplace("dialog_opacity_pct", fbs.dialog_opacity_pct);
     tbl.emplace("properties_opacity_pct", fbs.properties_opacity_pct);
+    tbl.emplace("trash_auto_purge", fbs.trash_auto_purge);
+    tbl.emplace("trash_max_days", fbs.trash_max_days);
+    tbl.emplace("trash_max_mb", fbs.trash_max_mb);
     tbl.emplace("view_mode", fbs.view_mode);
     tbl.emplace("sort_field", fbs.sort_field);
     tbl.emplace("sort_descending", fbs.sort_descending);
@@ -335,6 +427,34 @@ bool write_file_browser_toml(const FileBrowserSettings& fbs) {
     toml::array favs;
     for (const auto& f : fbs.favorites) favs.push_back(f);
     tbl.emplace("favorites", std::move(favs));
+    toml::array starred;
+    for (const auto& s : fbs.starred) starred.push_back(s);
+    tbl.emplace("starred", std::move(starred));
+    toml::array recent;
+    for (const auto& r : fbs.recent) recent.push_back(r);
+    tbl.emplace("recent", std::move(recent));
+    tbl.emplace("track_recent", fbs.track_recent);
+    tbl.emplace("startup_folder", fbs.startup_folder);
+    tbl.emplace("restore_session", fbs.restore_session);
+    tbl.emplace("nextcloud_server", fbs.nextcloud_server);
+    tbl.emplace("nextcloud_user", fbs.nextcloud_user);
+    tbl.emplace("drive_client_id", fbs.drive_client_id);
+    toml::table tag_tbl;
+    for (const auto& kv : fbs.tag_colors) tag_tbl.emplace(kv.first, kv.second);
+    tbl.emplace("tag_colors", std::move(tag_tbl));
+    toml::array drive_mails;
+    for (const auto& e : fbs.drive_account_emails) drive_mails.push_back(e);
+    tbl.emplace("drive_account_emails", std::move(drive_mails));
+    toml::array remotes;
+    for (const auto& s : fbs.remote_servers) {
+      toml::table sub;
+      sub.emplace("host", s.host);
+      sub.emplace("user", s.user);
+      sub.emplace("path", s.path);
+      sub.emplace("port", s.port);
+      remotes.push_back(std::move(sub));
+    }
+    tbl.emplace("remote_servers", std::move(remotes));
 
     toml::table dvs;
     for (const auto& [path, dv] : fbs.dir_views) {

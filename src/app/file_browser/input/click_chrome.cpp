@@ -42,7 +42,7 @@ static bool modal_blocks_content(const AppState& app) {
          app.rename_ui_open || app.batch_rename_open || app.confirm_open ||
          app.conflict_open || app.password_dialog_open ||
          app.compress_dialog_open || app.term_chooser_open ||
-         app.open_with_open || app.context_menu_open || app.settings_open ||
+         app.open_with_open || app.checksum_open || app.connect_open || app.remote_auth_open || app.context_menu_open || app.settings_open ||
          app.properties.open || app.sort_menu_open || app.r_sort_menu_open ||
          app.columns_menu_open || app.r_columns_menu_open ||
          app.filter_dropdown_section > 0 || app.r_filter_dropdown_section > 0 ||
@@ -51,7 +51,6 @@ static bool modal_blocks_content(const AppState& app) {
 
 
 bool click_scrollbar(AppState& app, int x, int y, int button) {
-  // ── Main-view scrollbar: grab thumb / jump-to-tap ──
   if (button == 0x110 && !modal_blocks_content(app)) {
     for (const auto& sb : app.scrollbar_rects) {
       // Forgiving strip: a few px on each side of the 6px track.
@@ -83,7 +82,6 @@ bool click_scrollbar(AppState& app, int x, int y, int button) {
 }
 
 bool click_path_edit_cancel(AppState& app, int x, int y, int button) {
-  // ── Click outside the nav/path field cancels path editing ──
   // Field bounds come from the retained registry (stored during paint).
   if ((app.active_pane ? app.r_path_editing : app.path_editing) && button == 0x110) {
     const hui::HitRegion* bar =
@@ -102,7 +100,6 @@ bool click_path_edit_cancel(AppState& app, int x, int y, int button) {
 }
 
 bool click_status_zoom(AppState& app, int x, int y, int button) {
-  // ── Status-bar zoom controls (− / track / +) ──
   if ((app.status_zoom_slider_w > 0 || app.status_zoom_minus[2] > 0 ||
        app.status_zoom_plus[2] > 0) &&
       y >= app.height - app.status_bar_height) {
@@ -139,7 +136,6 @@ bool click_status_zoom(AppState& app, int x, int y, int button) {
 }
 
 bool click_picker_bar(AppState& app, int x, int y, int button) {
-  // ── Picker bar buttons (dir or file) ──
   if ((app.select_dir_mode || app.select_file_mode) && button == 0x110) {
     if (y >= app.select_bar_y && y < app.select_bar_y + app.select_bar_h) {
       if (x >= app.select_btn_x && x < app.select_btn_x + app.select_btn_w) {
@@ -166,7 +162,6 @@ bool click_picker_bar(AppState& app, int x, int y, int button) {
 }
 
 bool click_info_tab(AppState& app, int x, int y, int button) {
-  // ── Info panel tab click (in the left‑click handler) ──
   if (app.info_panel_open) {
     int panel_px = app.width - app.info_panel_width;
     int top_h = app.top_bar_height + app.tab_bar_height;
@@ -188,7 +183,9 @@ bool click_info_tab(AppState& app, int x, int y, int button) {
 }
 
 bool click_sidebar_drag(AppState& app, int x, int y, int button) {
-  // ── Sidebar drag start ──
+  if (button == 0x110 && begin_sidebar_scroll(app, x, y)) {
+    return true;
+  }
   if (button == 0x110 && begin_sidebar_resize(app, x)) {
     return true;
   }
@@ -196,8 +193,6 @@ bool click_sidebar_drag(AppState& app, int x, int y, int button) {
 }
 
 bool click_columns_menu(AppState& app, int x, int y, int button) {
-  // ── Sort menu item click (handle before top bar, so menu stays on top) ──
-  // ── Column chooser popup clicks ──
   // Rows resolved through the retained hit registry.
   if ((app.active_pane ? app.r_columns_menu_open : app.columns_menu_open)) {
     auto& cmo = app.active_pane ? app.r_columns_menu_open : app.columns_menu_open;
@@ -291,7 +286,6 @@ bool click_sort_menu(AppState& app, int x, int y, int button) {
 }
 
 bool click_filter_dropdown(AppState& app, int x, int y, int button) {
-  // ── Filter dropdown click (handled before top bar) ──
   auto& click_filter_dd_x = app.active_pane ? app.r_filter_dropdown_x : app.filter_dropdown_x;
   auto& click_filter_dd_y = app.active_pane ? app.r_filter_dropdown_y : app.filter_dropdown_y;
   auto& click_filter_dd_w = app.active_pane ? app.r_filter_dropdown_w : app.filter_dropdown_w;
@@ -442,6 +436,7 @@ bool click_top_bar(AppState& app, int x, int y, int button, uint64_t now_ns) {
         AppState::menu_item(AppState::ContextMenuAction::Separator, ""),
         AppState::menu_item(AppState::ContextMenuAction::Reload, "Reload"),
         AppState::menu_item(AppState::ContextMenuAction::CopyLocation, "Copy Location"),
+        AppState::menu_item(AppState::ContextMenuAction::ConnectServer, "Connect to Server…"),
         AppState::menu_item(AppState::ContextMenuAction::Separator, ""),
         AppState::menu_item(AppState::ContextMenuAction::Paste, "Paste"),
         AppState::menu_item(AppState::ContextMenuAction::SelectAll, "Select All"),
@@ -852,10 +847,9 @@ bool click_top_bar(AppState& app, int x, int y, int button, uint64_t now_ns) {
 }
 
 bool click_tab_bar(AppState& app, int x, int y, int button) {
-  // ── Tab bar click ──
   // Resolved through the retained hit registry (rects stored during paint),
   // never re-derived here: the band geometry cannot drift (see
-  // ui/hit_registry.hpp). A miss falls through to the sidebar/content.
+  // ui/hit.hpp). A miss falls through to the sidebar/content.
   uint32_t hid = app.hit_main.query(x, y);
   if ((hid & hui::Hit::kGroupMask) != hui::Hit::kTab &&
       (hid & hui::Hit::kGroupMask) != hui::Hit::kTabClose)
@@ -902,8 +896,23 @@ bool click_tab_bar(AppState& app, int x, int y, int button) {
   return false;
 }
 
+bool click_ops_pause(AppState& app, int x, int y, int button) {
+  (void)button;
+  if (app.ops_panel_open && app.ops_pause_w > 0 && app.op_progress &&
+      app.op_progress->active.load(std::memory_order_relaxed)) {
+    if (x >= app.ops_pause_x && x < app.ops_pause_x + app.ops_pause_w &&
+        y >= app.ops_pause_y && y < app.ops_pause_y + app.ops_pause_h) {
+      bool paused =
+          app.op_progress->paused.load(std::memory_order_relaxed);
+      app.op_progress->paused.store(!paused, std::memory_order_relaxed);
+      draw(app);
+      return true;
+    }
+  }
+  return false;
+}
+
 bool click_ops_cancel(AppState& app, int x, int y, int button) {
-  // ── Operations panel cancel button ──
   if (app.ops_panel_open && app.ops_cancel_w > 0) {
     if (x >= app.ops_cancel_x && x < app.ops_cancel_x + app.ops_cancel_w &&
         y >= app.ops_cancel_y && y < app.ops_cancel_y + app.ops_cancel_h) {
@@ -920,7 +929,6 @@ bool click_ops_cancel(AppState& app, int x, int y, int button) {
 }
 
 bool click_flap_swallow(AppState& app, int x, int y, int button) {
-  // ── Flap swallow ──
   // Inside the revealed overlay but not on a sidebar item: swallow the click
   // so it doesn't act on the content hidden beneath the flap.
   if (app.sidebar_folded && app.sidebar_folded_revealed && button == 0x110 &&
@@ -932,7 +940,6 @@ bool click_flap_swallow(AppState& app, int x, int y, int button) {
 }
 
 bool click_column_header(AppState& app, int x, int y, int button) {
-  // ── Column header click (list view) ──
   // Segments/dividers resolved through the retained hit registry (rects
   // stored during paint); the width recomputation is gone.
   if (app.cur_tab().view_mode != ViewMode::List) return false;

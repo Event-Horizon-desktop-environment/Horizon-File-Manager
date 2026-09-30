@@ -17,23 +17,6 @@
 
 namespace eh::file_browser {
 
-bool is_image_extension(const std::string& path) {
-  auto dot = path.rfind('.');
-  if (dot == std::string::npos) return false;
-  std::string ext;
-  for (size_t i = dot; i < path.size(); ++i) {
-    char c = path[i];
-    if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
-    ext += c;
-  }
-  return ext == ".jpg" || ext == ".jpeg" || ext == ".png" ||
-         ext == ".gif" || ext == ".bmp" || ext == ".webp" ||
-         ext == ".tiff" || ext == ".tif" ||
-         // Freedesktop avatar files — plain image data despite the name
-         ext == ".face" || ext == ".icon";
-}
-
-// ── helpers ────────────────────────────────────────────────────────────
 
 static cairo_surface_t* create_cairo_surface_from_rgba(
     const unsigned char* data, int w, int h) {
@@ -100,7 +83,6 @@ static std::vector<unsigned char> read_whole_file(const std::string& path) {
   return buf;
 }
 
-// ── JPEG fast path (IDCT downscaling via libjpeg) ─────────────────────
 
 struct jpeg_error_mgr_wrap {
   struct jpeg_error_mgr pub;
@@ -215,7 +197,6 @@ static cairo_surface_t* load_jpeg_thumbnail(const std::string& path,
   return create_cairo_surface_from_rgba(rgba.data(), out_w, out_h);
 }
 
-// ── WebP fast path (decode with built-in scaling) ──────────────────────
 
 static cairo_surface_t* load_webp_thumbnail(const std::string& path,
                                             int max_px) {
@@ -258,7 +239,6 @@ static cairo_surface_t* load_webp_thumbnail(const std::string& path,
   return surf;
 }
 
-// ── Main entry point ───────────────────────────────────────────────────
 
 cairo_surface_t* load_image_thumbnail(const std::string& path, int max_px) {
   // JPEG fast path — IDCT downscaling via libjpeg (huge win for large photos)

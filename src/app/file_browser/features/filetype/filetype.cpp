@@ -367,6 +367,14 @@ FileType detect_file_type(const std::string& name, bool is_dir,
     }
   }
 
+  // Caller-provided MIME (e.g. Drive API / GIO content types): trust it
+  // when the name gave nothing better. This fixes extension-less files
+  // whose type is known from metadata (a PDF named "Untitled document").
+  if (!mime_type.empty()) {
+    FileType ft = mime_to_file_type(mime_type);
+    if (ft != FileType::File) return ft;
+  }
+
   // Old-style mime prefix fallback
   if (mime_type.size() > 6 && mime_type.substr(0, 6) == "image/")
     return FileType::Image;
@@ -380,7 +388,6 @@ std::string mime_by_ext(const std::string& path) {
   std::string ext = path.substr(dot + 1);
   for (auto& c : ext) c = static_cast<char>(std::tolower(c));
 
-  // ── Images ──────────────────────────────────────────────────────
   if (ext == "png") return "image/png";
   if (ext == "jpg" || ext == "jpeg") return "image/jpeg";
   if (ext == "gif") return "image/gif";
@@ -409,7 +416,6 @@ std::string mime_by_ext(const std::string& path) {
   if (ext == "afdesign") return "image/x-affinity-designer";
   if (ext == "afpub") return "image/x-affinity-publisher";
 
-  // ── Video ───────────────────────────────────────────────────────
   if (ext == "mp4") return "video/mp4";
   if (ext == "mkv") return "video/x-matroska";
   if (ext == "webm") return "video/webm";
@@ -425,7 +431,6 @@ std::string mime_by_ext(const std::string& path) {
   if (ext == "ts" || ext == "mts" || ext == "m2ts") return "video/mp2t";
   if (ext == "vob") return "video/dvd";
 
-  // ── Audio ───────────────────────────────────────────────────────
   if (ext == "mp3") return "audio/mpeg";
   if (ext == "wav") return "audio/x-wav";
   if (ext == "flac") return "audio/flac";
@@ -445,7 +450,6 @@ std::string mime_by_ext(const std::string& path) {
   if (ext == "ra") return "audio/x-realaudio";
   if (ext == "caf") return "audio/x-caf";
 
-  // ── Web ─────────────────────────────────────────────────────────
   if (ext == "html" || ext == "htm" || ext == "xhtml") return "text/html";
   if (ext == "css") return "text/css";
   if (ext == "scss" || ext == "sass") return "text/x-scss";
@@ -455,12 +459,10 @@ std::string mime_by_ext(const std::string& path) {
   if (ext == "jsp") return "application/x-jsp";
   if (ext == "wasm") return "application/wasm";
 
-  // ── Markdown ────────────────────────────────────────────────────
   if (ext == "md" || ext == "markdown" || ext == "mdown" || ext == "mdwn" ||
       ext == "mkd" || ext == "mkdn")
     return "text/markdown";
 
-  // ── Code / Source ───────────────────────────────────────────────
   if (ext == "c") return "text/x-c";
   if (ext == "cpp" || ext == "cxx" || ext == "cc") return "text/x-c++";
   if (ext == "h") return "text/x-chdr";
@@ -508,7 +510,6 @@ std::string mime_by_ext(const std::string& path) {
   if (ext == "d") return "text/x-d";
   if (ext == "makefile" || ext == "cmake") return "text/x-cmake";
 
-  // ── Text / config ───────────────────────────────────────────────
   if (ext == "txt") return "text/plain";
   if (ext == "conf" || ext == "cfg") return "text/x-config";
   if (ext == "ini") return "text/x-ini";
@@ -526,7 +527,6 @@ std::string mime_by_ext(const std::string& path) {
   if (ext == "nfo" || ext == "info") return "text/x-nfo";
   if (ext == "tex" || ext == "sty" || ext == "bst") return "text/x-tex";
 
-  // ── Documents ───────────────────────────────────────────────────
   if (ext == "pdf") return "application/pdf";
   if (ext == "djvu") return "image/vnd.djvu";
   if (ext == "epub") return "application/epub+zip";
@@ -553,7 +553,6 @@ std::string mime_by_ext(const std::string& path) {
   if (ext == "pub") return "application/x-mspublisher";
   if (ext == "indd") return "application/x-indesign";
 
-  // ── Fonts ───────────────────────────────────────────────────────
   if (ext == "ttf") return "font/ttf";
   if (ext == "otf") return "font/otf";
   if (ext == "woff") return "font/woff";
@@ -564,7 +563,6 @@ std::string mime_by_ext(const std::string& path) {
   if (ext == "dfont") return "font/x-dfont";
   if (ext == "sfd") return "font/x-sfd";
 
-  // ── Archives ────────────────────────────────────────────────────
   if (ext == "zip") return "application/zip";
   if (ext == "tar") return "application/x-tar";
   if (ext == "gz" || ext == "tgz") return "application/gzip";
@@ -585,7 +583,6 @@ std::string mime_by_ext(const std::string& path) {
   if (ext == "hqx") return "application/mac-binhex40";
   if (ext == "sit") return "application/x-stuffit";
 
-  // ── Executables ─────────────────────────────────────────────────
   if (ext == "sh" || ext == "bash" || ext == "zsh") return "application/x-shellscript";
   if (ext == "bin") return "application/x-executable";
   if (ext == "elf") return "application/x-executable";

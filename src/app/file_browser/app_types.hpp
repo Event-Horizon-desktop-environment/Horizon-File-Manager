@@ -2,8 +2,10 @@
 
 #include <map>
 #include <cairo/cairo.h>
+#include <gio/gio.h>
 
 #include <array>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -19,6 +21,10 @@
 #include <vector>
 
 #include "app/file_browser/features/progress/progress.hpp"
+#include "app/file_browser/features/remote/remote.hpp"
+#include "app/file_browser/features/drive/drive.hpp"
+#include "app/file_browser/features/diskusage/diskusage.hpp"
+#include "app/file_browser/features/accounts/accounts.hpp"
 
 #include "wayland/buffer/shm_buffer.hpp"
 #include "wayland/buffer/cairo_cpu_buffer.hpp"
@@ -95,6 +101,7 @@ struct FileEntry {
   uint32_t mode = 0;             // st_mode
   std::string extension;         // lowercase, without dot ("" if none)
   std::string link_target;       // symlink target (readlink)
+  std::string tags_csv;          // user.xdg.tags cache (local files; "" if none)
 };
 
 struct SidebarLocation {
@@ -107,10 +114,15 @@ struct SidebarLocation {
     Music,
     Videos,
     Trash,
+    Recent,
+    Starred,
+    Network,
+    Remote,
     Favorite,
     Drive,
     Root,
     Computer,
+    SavedSearch,
     Other,
   };
 
@@ -123,15 +135,23 @@ struct SidebarLocation {
   std::string drive_id;
   uint64_t total_bytes = 0;
   uint64_t free_bytes = 0;
+  // For saved searches: index into AppState::saved_searches.
+  int saved_search_idx = -1;
 };
 
-// ── Thumbnail pending entry ──
+// One saved recursive search: replayed verbatim (query + options + base).
+struct SavedSearch {
+  std::string query;
+  int mode = 0; // QueryMode: 0=Plain, 1=Glob, 2=Regex, 3=Content
+  bool case_sensitive = false;
+  std::string base_path; // folder active when saved (home for global)
+};
+
 struct ThumbPending {
   int visible_idx;
   int size;
 };
 
-// ── Computer view item (Deepin "My Computer" style) ──
 struct ComputerItem {
   enum class ShapeType { Splitter, Small, Large };
   enum class Group { UserDirs, Disks, Removable, Network };
@@ -150,7 +170,6 @@ struct ComputerItem {
   bool is_user_label = false;
 };
 
-// ── Tree view entry ──
 struct TreeEntry {
   std::string name;
   std::string path;
@@ -165,7 +184,6 @@ struct TreeEntry {
   std::vector<unsigned char> guides;
 };
 
-// ── Breadcrumb segment ──
 struct BreadcrumbSegment {
   std::string label;
   std::string path;
@@ -173,7 +191,6 @@ struct BreadcrumbSegment {
   int w = 0;
 };
 
-// ── Tab ──
 struct Tab {
   std::string current_path;
   std::vector<std::string> nav_history;   // back stack
@@ -264,7 +281,6 @@ struct AppState {
   double pointerY = 0;
   bool pointerLeftDown = false;
 
-  // ── Properties window (separate xdg-toplevel) ──
   wl_surface* props_surface = nullptr;
   xdg_surface* props_xdgSurface = nullptr;
   xdg_toplevel* props_toplevel = nullptr;
@@ -277,7 +293,6 @@ struct AppState {
   int props_pointerX = 0;
   int props_pointerY = 0;
 
-  // ── Settings window (separate xdg-toplevel) ──
   wl_surface* settings_surface = nullptr;
   xdg_surface* settings_xdgSurface = nullptr;
   xdg_toplevel* settings_toplevel = nullptr;
@@ -288,9 +303,20 @@ struct AppState {
   int settings_pointerX = 0;
   int settings_pointerY = 0;
 
+  bool du_open = false;
+  wl_surface* du_surface = nullptr;
+  xdg_surface* du_xdgSurface = nullptr;
+  xdg_toplevel* du_toplevel = nullptr;
+  int du_win_width = 1120;
+  int du_win_height = 760;
+  bool du_pendingRedraw = false;
+  std::array<eh::wayland::ShmBuffer, 2> du_buf{};
+  int du_pointerX = 0;
+  int du_pointerY = 0;
+  hui::HitRegistry hit_diskusage; // own coordinate space, like settings
+
   wl_surface* focused_surface = nullptr; // which surface currently has pointer focus
 
-  // ── Double-click tracking ──
   uint64_t last_click_ns = 0;
   int last_click_x = -1;
   int last_click_y = -1;
@@ -307,10 +333,8 @@ struct AppState {
 
   bool embedded = false;
 
-  // ── Initial navigation (set before event loop starts) ──
   std::string initial_navigate_path;
 
-  // ── Picker modes ──
   bool select_dir_mode = false;
   bool select_file_mode = false;
   std::string select_dir_result;
@@ -321,9 +345,12 @@ struct AppState {
   bool select_btn_hover = false;
   bool cancel_btn_hover = false;
 
-  // ── Tabs ──
   std::vector<Tab> tabs;
   int active_tab = 0;
+  // Session restore (local paths only): last-written snapshot text to
+  // avoid rewriting an unchanged session.toml every few seconds.
+  std::string session_last_saved;
+  int64_t session_last_ms = 0;
   Tab& cur_tab() {
     return split_view && active_pane == 1 ? right_pane : tabs[active_tab];
   }
@@ -331,7 +358,6 @@ struct AppState {
     return split_view && active_pane == 1 ? right_pane : tabs[active_tab];
   }
 
-  // ── Split pane ──
   bool split_view = false;
   int active_pane = 0;          // 0=left, 1=right
   int split_divider_x = 0;      // pixel position of divider (from content left edge)
@@ -339,7 +365,6 @@ struct AppState {
   bool split_divider_dragging = false;
   Tab right_pane;
 
-  // ── Independent views per directory (session cache) ──
   struct DirViewState {
     ViewMode view_mode = ViewMode::List;
     SortField sort_field = SortField::Name;
@@ -350,7 +375,6 @@ struct AppState {
   };
   std::unordered_map<std::string, DirViewState> dir_view_states;
 
-  // ── Main-view scrollbar (click/drag) ──
   struct ScrollbarRect {
     int x = 0, y = 0, w = 0, h = 0;
     int content_h = 0, view_h = 0;
@@ -367,11 +391,13 @@ struct AppState {
   int scrollbar_grab_dy = 0;                   // grab offset inside thumb
   ScrollbarRect scrollbar_drag_rect{};         // snapshot taken at grab time
 
-  // ── Background directory scan ──
   struct DirScanResult {
     uint64_t generation = 0;
     std::string path;
     std::vector<FileEntry> entries;
+    // Worker-reported failure (remote listings): surfaced as a status toast
+    // by apply_scan_result instead of being cleared with the old status.
+    std::string error;
   };
   std::mutex scan_mtx;
   DirScanResult scan_result;                 // guarded by scan_mtx
@@ -402,7 +428,6 @@ struct AppState {
   // to whichever pane happens to be active when the scan lands.
   int scan_target_pane = 0;
 
-  // ── Directed inotify watcher (auto-refresh without per-frame stat) ──
   // One inotify descriptor backs up to two directory watches (the active tab
   // and, when split view is on, the right pane). Events let us reload the
   // listing on create/delete/move AND re-stat individual children in place
@@ -428,16 +453,20 @@ struct AppState {
 
   bool show_hidden = false;
 
-  // ── Selection ──
   bool rubber_banding = false;
   double rubber_x0 = 0, rubber_y0 = 0;
 
-  // ── Sidebar ──
   int sidebar_content_h = 0;           // total content height for scroll clamping
   std::vector<SidebarLocation> sidebar_locations;
   int sidebar_hover_idx = -1;
   int sidebar_mount_hover_idx = -1;    // sidebar item index whose mount indicator is hovered
   int sidebar_scroll_px = 0;
+  // Scrollbar thumb drag state (retained geometry from the last paint).
+  bool sidebar_scroll_dragging = false;
+  int sidebar_scroll_grab = 0; // y offset from thumb top at grab
+  int sidebar_scroll_track[4]{}; // x, y, w, h (w = 0 when not scrollable)
+  int sidebar_scroll_thumb[4]{}; // x, y, w, h
+  int sidebar_scroll_max = 0;
   bool sidebar_expanded = true;
   int sidebar_width = 0;          // computed: sidebar_width_base * zoom_pct / 100
   int sidebar_width_base = 288;   // user's preferred width at 100% zoom
@@ -446,7 +475,6 @@ struct AppState {
   int sidebar_drag_start_x = 0;
   int sidebar_drag_start_width = 0;
 
-  // ── Adaptive sidebar (fold on narrow windows) ──
   // Below this width the sidebar auto-hides and becomes a temporary
   // overlay (flap) revealed by the toolbar toggle button instead of
   // consuming layout space. 682 = the narrow-window breakpoint at which
@@ -511,10 +539,52 @@ struct AppState {
            min_path_w;
   }
 
-  // ── Favorites (persistent bookmark folders) ──
   std::vector<std::string> favorites;
+  // Default folder to open on startup (empty = home / session restore).
+  std::string startup_folder;
+  // Restore last open folders on startup (Settings toggle, off by default).
+  bool restore_session = false;
+  std::vector<SavedSearch> saved_searches;
+  static constexpr size_t kSavedSearchMax = 32;  std::vector<std::string> starred;
+  std::vector<std::string> recent;
+  static constexpr size_t kRecentMax = 50;
+  struct RemoteServer {
+    std::string host;
+    std::string user;
+    std::string path = "/";
+    int port = 22;
+  };
+  std::vector<RemoteServer> remote_servers;
+  // One-shot remote password for the next mount (session-only).
+  std::string remote_pending_password;
+  // In-flight remote GIO cancellable (guarded by scan_mtx, may be null).
+  GCancellable* remote_cancellable = nullptr;
+  // Interactive auth request (password retry / host-key approval).
+  RemoteAuthRequest remote_auth;
+  bool remote_auth_open = false;
+  std::string remote_auth_user_buf;
+  std::string remote_auth_pass_buf;
+  int remote_auth_focus = 0;     // input index among visible fields
+  int remote_auth_hover_btn = -1; // -1 none, 0 submit, 1 cancel, 10+i choice
+  bool connect_open = false;
+  std::string connect_host;
+  std::string connect_user;
+  std::string connect_pass; // session-only, cleared on connect/close
+  std::string connect_path = "/";
+  std::string connect_port_buf = "22";
+  int connect_port = 22;
+  int connect_focus = 0;    // 0 host, 1 user, 2 password, 3 port, 4 path
+  int connect_hover_btn = -1; // -1 none, 0 connect, 1 cancel
+  bool is_starred(const std::string& p) const {
+    return std::find(starred.begin(), starred.end(), p) != starred.end();
+  }
+  bool is_virtual_path(const std::string& p) const {
+    return p == "computer://" || p == "recent://" || p == "starred://" ||
+           p == "trash://" || p.rfind("recent://", 0) == 0 ||
+           is_remote_uri(p) || is_drive_uri(p);
+  }
+  bool in_virtual_view() const { return is_virtual_path(cur_tab().current_path); }
 
-  // ── Search ──
   bool search_active = false;          // local folder inline filter
   bool r_search_active = false;
   std::string search_query;
@@ -541,6 +611,8 @@ struct AppState {
   // Search results banner (drawn under the top bar while searching)
   int search_banner_clear_x = 0, search_banner_clear_w = 0;
   bool search_banner_clear_hover = false;
+  int search_banner_save_x = 0, search_banner_save_w = 0;
+  bool search_banner_save_hover = false;
   bool filter_bar_open_by_default = false; // persisted preference
   bool filter_bar_default_applied = false; // one-shot startup activation
   // Status-bar zoom slider (discrete levels)
@@ -562,6 +634,14 @@ struct AppState {
   // Independent views per directory: each folder remembers its own view
   // mode/sort/group for the current session (no files written)
   bool independent_dir_views = false;
+  // Recent tracking (Recent virtual view MRU; off hides the entry)
+  bool recent_enabled = true;
+  // Trash auto-maintenance (General tab settings mirror).
+  bool trash_auto_purge = false;
+  int trash_max_days = 30;
+  int trash_max_mb = 0; // 0 = no size quota
+  // Tag color overrides (name -> "#rrggbb"); empty = built-in defaults.
+  std::map<std::string, std::string> tag_colors;
   // Media-folder auto-icon cache: dir path -> first image child ("" = none)
   std::unordered_map<std::string, std::string> media_folder_child;
   int search_bar_x = 0, search_bar_w = 0;
@@ -592,7 +672,6 @@ struct AppState {
   bool folder_search_btn_hover = false;
   bool r_folder_search_btn_hover = false;
 
-  // ── Search filters ──
   int filter_type_idx = 0;   // 0=All, 1=Folder, 2=Image, 3=Audio, 4=Video, 5=Text, 6=Document, 7=Archive, 8=Code, 9=Executable, 10=Web, 11=Font, 12=Markdown
   int r_filter_type_idx = 0;
   int filter_size_idx = 0;   // 0=Any, 1=<10K, 2=10-100K, 3=100K-1M, 4=1-10M, 5=10-100M, 6=>100M
@@ -612,19 +691,16 @@ struct AppState {
   int r_filter_dropdown_x = 0, r_filter_dropdown_y = 0;
   int r_filter_dropdown_w = 0, r_filter_dropdown_h = 0;
 
-  // ── Path bar ──
   std::string path_edit_buf;
   std::string r_path_edit_buf;
   bool path_editing = false;
   bool r_path_editing = false;
 
-  // ── Operations ──
   bool operation_in_progress = false;
   std::string operation_status;
   std::uint64_t operation_status_expires_ms = 0;
   std::shared_ptr<OperationProgress> op_progress;
 
-  // ── Resize performance tracing (EH_TRACE=1) ──
   bool resize_session_active = false;
   bool resize_buffers_dirty = false; // configure saw a new size, not yet painted
   std::chrono::steady_clock::time_point resize_last_size_change{};
@@ -634,7 +710,6 @@ struct AppState {
   double resize_buf_ms_max = 0.0, resize_draw_ms_max = 0.0;
   std::vector<std::pair<const char*, double>> resize_phase_samples;
 
-  // ── Paint micro-profiling (bench only; paint_profile=false → zero cost) ──
   bool paint_profile = false;     // bench_paint sets this to enable the counters
   std::uint64_t profile_grid_icon_ns = 0;   // draw_file_icon_cairo per grid cell
   std::uint64_t profile_grid_label_ns = 0;  // label raster blit per grid cell
@@ -643,7 +718,6 @@ struct AppState {
   std::uint64_t profile_grid_hidden_ns = 0; // hidden/cut push_group + paint_with_alpha
   std::uint64_t profile_grid_flush_ns = 0;  // BatchedBlitter::flush (icon+label batch)
 
-  // ── Operations panel (right sidebar) ──
   bool ops_panel_open = false;
   double ops_panel_slide = 0.0;
   int ops_panel_width = 320;
@@ -651,8 +725,11 @@ struct AppState {
   int ops_cancel_y = 0;
   int ops_cancel_w = 0;
   int ops_cancel_h = 0;
+  int ops_pause_x = 0;
+  int ops_pause_y = 0;
+  int ops_pause_w = 0;
+  int ops_pause_h = 0;
 
-  // ── Context menu ──
   enum class ContextMenuAction {
     Open,
     OpenWith,
@@ -689,8 +766,11 @@ struct AppState {
     MountIso,
     UnmountIso,
     Settings,
+    DiskUsage,
     OpenInNewTab,
     OpenInNewWindow,
+    SetStartupFolder,
+    ClearStartupFolder,
     EmptyTrash,
     OpenFileLocation,
     CloseTab,
@@ -701,6 +781,12 @@ struct AppState {
     InvertSelection,
     SelectPattern,
     CompareFiles,
+    Checksums,
+    AddStar,
+    RemoveStar,
+    BreadcrumbNav,
+    ShareEmail,
+    ServiceRun,
     PasteInto,
     CopyToHome,
     CopyToDesktop,
@@ -717,6 +803,10 @@ struct AppState {
     ToolbarSearchHome,
     ToolbarCycleView,
     ToolbarSortMenu,
+    ClearRecent,
+    ConnectServer,
+    RemoveServer,
+    TagToggle,
     Separator,
   };
   struct ContextMenuItem {
@@ -752,18 +842,15 @@ struct AppState {
   FileEntry context_menu_tree_entry{};
   std::vector<ContextMenuItem> context_menu_items;
 
-  // ── Path bar dots menu button hit target ──
   int dots_btn_x = 0, dots_btn_y = 0, dots_btn_w = 0, dots_btn_h = 0;
   int r_dots_btn_x = 0, r_dots_btn_y = 0, r_dots_btn_w = 0, r_dots_btn_h = 0;
   bool dots_btn_hover = false;
   bool r_dots_btn_hover = false;
 
-  // ── Sidebar context menu actions ──
   enum class SidebarMenuAction {
     RemoveFavorite,
   };
 
-  // ── New folder/file dialog ──
   bool create_dialog_open = false;
   bool create_is_folder = true;
   std::string create_template_src; // non-empty: copy this template on commit
@@ -773,13 +860,11 @@ struct AppState {
   int create_sel_end = -1;
   int create_hover_btn = -1;  // -1 none, 0 create, 1 cancel
 
-  // ── Select-by-pattern dialog ──
   bool select_pattern_open = false;
   std::string select_pattern_buf;
   int select_pattern_cursor = 0;
   int select_pattern_hover_btn = -1; // 1 = cancel, 2 = select
 
-  // ── Recently closed tabs (newest first) ──
   struct ClosedTab {
     std::string path;
     ViewMode view_mode = ViewMode::List;
@@ -787,7 +872,6 @@ struct AppState {
   std::vector<ClosedTab> closed_tabs;
   bool create_dragging = false;
 
-  // ── Rename UI dialog ──
   bool rename_ui_open = false;
   std::string rename_ui_old_name;
   std::string rename_ui_buf;
@@ -798,12 +882,10 @@ struct AppState {
   bool rename_ui_dragging = false;
   int rename_ui_hover_btn = -1;  // -1 none, 0 rename, 1 cancel
 
-  // ── Key repeat (application-level, for consistent repeat across compositors) ──
   uint32_t key_repeat_sym = 0;   // 0 = none
   uint64_t key_repeat_start_ms = 0; // steady_clock epoch ms of initial press
   uint64_t key_repeat_last_ms = 0;  // steady_clock epoch ms of last repeat fire
 
-  // ── Batch rename dialog ──
   struct BatchRenameEntry {
     std::string old_path;
     std::string old_name;
@@ -828,7 +910,6 @@ struct AppState {
   int batch_rename_hover_btn = -1; // 0=Rename, 1=Cancel, -1=none
   int batch_rename_hover_mode = -1;// 0=template tab, 1=find_replace tab
 
-  // ── Terminal chooser ──
   struct TerminalApp {
     std::string desktop_id;
     std::string name;
@@ -844,7 +925,6 @@ struct AppState {
   std::string term_chooser_target_dir;
   std::vector<TerminalApp> term_chooser_apps;
 
-  // ── Confirm dialog ──
   bool confirm_open = false;
   std::string confirm_title;
   std::string confirm_message;
@@ -853,7 +933,6 @@ struct AppState {
   int confirm_item_count = 1;        // number of items being operated on
   int confirm_hover_btn = -1;        // 0=Cancel, 1=Delete, -1=none
 
-  // ── Compress dialog ──
   bool compress_dialog_open = false;
   int compress_format = 1;          // 0=zip, 1=tar.gz, 2=tar.bz2, 3=tar.xz, 4=7z, 5=rar, 6=tar
   int compress_level = 6;           // 0-9
@@ -868,7 +947,6 @@ struct AppState {
   int compress_hover_threads = -1;
   int compress_hover_btn = -1;      // 0=Cancel, 1=Compress
 
-  // ── Password dialog (for encrypted archives) ──
   bool password_dialog_open = false;
   std::string password_buf;
   int password_cursor_pos = 0;
@@ -880,13 +958,11 @@ struct AppState {
 
   std::string last_icon_theme;
 
-  // ── Thumbnail cache ──
   std::unordered_map<std::string, cairo_surface_t*> thumb_cache;
   std::list<std::string> thumb_lru;
   std::size_t thumb_cache_bytes = 0;
   static constexpr std::size_t kThumbCacheMaxBytes = 16 * 1024 * 1024; // 16 MB
 
-  // ── Background directory stats (status bar "N items (size)") ──
   // UI-thread-owned cache; filled by dir_stats_drain() from the worker.
   struct DirStatEntry {
     uint64_t count = 0;
@@ -899,17 +975,14 @@ struct AppState {
   std::string preview_req_path;
   int preview_req_px = 0;
 
-  // ── Desktop file icon cache ──
   std::string last_reload_path;
   std::unordered_map<std::string, std::string> desktop_icon_cache;
 
-  // ── Lazy thumbnail loading ──
   std::vector<ThumbPending> thumb_pending_queue;
   int thumb_decodes_this_frame = 0;
   static constexpr int kThumbDecodesPerFrame = 16;
   static constexpr int kThumbDecodesPerLoop = 200;
 
-  // ── Preview (Phase 8) ──
   enum class PreviewMode { None, Hover, Space };
   PreviewMode preview_mode = PreviewMode::None;
   int preview_entry_idx = -1;        // visible_entries index being previewed (-1 = none)
@@ -926,12 +999,10 @@ struct AppState {
   // (hover_idx < 0). Both popups float near this point.
   int overlay_anchor_x = 0, overlay_anchor_y = 0;
 
-  // ── Preview popup surface (wl_subsurface) ──
   wl_surface* previewPopupSurface = nullptr;
   wl_subsurface* previewPopupSub = nullptr;
   eh::wayland::ShmBuffer previewPopupBuf{};
 
-  // ── Rich tooltip (metadata card for types without a live preview) ──
   wl_surface* tooltipPopupSurface = nullptr;
   wl_subsurface* tooltipPopupSub = nullptr;
   eh::wayland::ShmBuffer tooltipPopupBuf{};
@@ -940,7 +1011,6 @@ struct AppState {
   std::string tooltip_title;
   std::vector<std::string> tooltip_rows;
 
-  // ── Info panel (F11) (Phase 8) ──
   bool info_panel_open = false;
   int info_panel_tab = 0;       // 0=Preview, 1=Properties, 2=Terminal
   int info_panel_width = 0;     // computed from zoom_pct
@@ -957,12 +1027,10 @@ struct AppState {
   // Hit rects (set during draw, queried by click handler)
   double info_panel_hit_tabs[3][4]{};
 
-  // ── Background pre-cache: all image thumbnails in current folder ──
   std::vector<std::string> precache_paths;   // image file paths to pre-cache
   size_t precache_idx = 0;                   // next index to process; SIZE_MAX = done
-  static constexpr int kPrecacheBatchSize = 48;
+  static constexpr int kPrecacheBatchSize = 16;
 
-  // ── Open With dialog ──
   struct OpenWithEntry {
     std::string desktop_id;
     std::string desktop_path;
@@ -985,7 +1053,16 @@ struct AppState {
   double open_with_hit_open[4]{};
   double open_with_hit_default[4]{};
 
-  // ── Settings dialog ──
+  bool checksum_open = false;
+  std::string checksum_path;
+  std::string checksum_md5;
+  std::string checksum_sha1;
+  std::string checksum_sha256;
+  bool checksum_computing = false;
+  std::string checksum_error;
+  uint64_t checksum_generation = 0; // invalidates stale workers on reopen
+  int checksum_hover_btn = -1;      // -1 none, 0..2 copy MD5/SHA1/SHA256, 3 close
+
   bool settings_open = false;
   int settings_tab = 0;
   double settings_zoom_pct = 100.0;
@@ -1002,7 +1079,7 @@ struct AppState {
   std::vector<std::string> settings_term_opts;
   double settings_x = 0, settings_y = 0;
   double settings_w = 0, settings_h = 0;
-  double settings_tab_hit[3][4]{};
+  double settings_tab_hit[5][4]{};
   double settings_hit_ok[4]{};
   double settings_hit_apply[4]{};
   double settings_hit_cancel[4]{};
@@ -1012,6 +1089,21 @@ struct AppState {
   std::string settings_zoom_buf;
   double settings_hit_folders_toggle[4]{};
   double settings_hit_indep_views_toggle[4]{};
+  double settings_hit_recent_toggle[4]{};
+  bool settings_recent_enabled = true;
+  double settings_hit_restore_toggle[4]{};
+  bool settings_restore_session = false;
+  // Trash auto-maintenance (General tab; persisted).
+  bool settings_trash_auto_purge = false;
+  int settings_trash_max_days = 30;
+  int settings_trash_max_mb = 0; // 0 = no size quota
+  double settings_hit_trash_toggle[4]{};
+  double settings_hit_trash_days_down[4]{};
+  double settings_hit_trash_days_up[4]{};
+  double settings_hit_trash_mb_down[4]{};
+  double settings_hit_trash_mb_up[4]{};
+  std::map<std::string, std::string> settings_tag_colors;
+  int settings_tag_selected = -1; // registry index getting recolored
   double settings_hit_opacity_slider[4]{};
   double settings_hit_sidebar_opacity_slider[4]{};
   double settings_hit_topbar_opacity_slider[4]{};
@@ -1029,8 +1121,31 @@ struct AppState {
   double settings_hit_color_engine_toggle[4]{};
   bool settings_independent_dir_views = false;
   int settings_slider_dragging = 0;
+  std::string settings_nextcloud_server;
+  std::string settings_nextcloud_user;
+  int settings_nc_editing = 0; // 0 none, 1 server, 2 user
+  std::string nextcloud_server; // live mirror (persisted, never a password)
+  std::string nextcloud_user;
+  // GOA account cache for the Accounts tab (refreshed on demand).
+  std::vector<GoaAccount> settings_accounts;
+  bool settings_accounts_stale = true;
+  bool settings_goa_available = false;
+  // gvfs mount-backend support, cached alongside the account refresh so the
+  // Accounts tab can say honestly whether browsing can work at all.
+  bool settings_google_drive_supported = false;
+  bool settings_davs_supported = false;
+  // Tokens live in drive_accounts only and are never written to disk.
+  // (DriveAccount is declared in features/drive/drive.hpp.)
+  std::vector<DriveAccount> drive_accounts;
+  std::string drive_client_id; // live mirror (persisted; public ID, no secret)
+  // In-memory only: never staged to disk (see settings.cpp save sites).
+  std::string drive_client_secret;
+  std::string settings_drive_client_id; // Accounts-tab staging
+  bool settings_drive_editing = false; // client-ID field focused
+  // Session-only staging for the secret field (never written to disk).
+  std::string settings_drive_client_secret;
+  bool settings_drive_secret_editing = false;
 
-  // ── Overwrite/merge conflict dialog ──
   struct ConflictEntry {
     std::string src;
     std::string dest;
@@ -1057,10 +1172,11 @@ struct AppState {
   double conflict_check_rect[4]{};
   bool conflict_check_hover = false;
 
-  // ── Properties dialog ──
   struct PropertiesState {
     bool open = false;
     bool multi = false;                 // combined properties for a multi-selection
+    bool drive_item = false;            // Drive URI: metadata from the API,
+                                        // edits (perms/tags/rating) hidden
     std::vector<std::string> paths;     // all selected paths (multi mode)
     uint64_t file_count = 0;            // selected regular files (multi mode)
     uint64_t dir_count = 0;             // selected folders (multi mode)
@@ -1131,6 +1247,14 @@ struct AppState {
     bool tags_edit = false;
     std::string tags_buf;          // in-progress edit text
     double hit_tags_row[4]{};
+    // Star rating 0–5 (`user.xdg.rating`) + free-text comment
+    // (`user.xdg.comment`); single selection only, like tags.
+    int rating_value = 0;
+    double hit_rating_row[4]{};
+    std::string comment_value;
+    bool comment_edit = false;
+    std::string comment_buf;
+    double hit_comment_row[4]{};
     // Volume usage for the mount holding `path` + recursive contained counts
     uint64_t vol_total_bytes = 0;
     uint64_t vol_free_bytes = 0;
@@ -1141,7 +1265,8 @@ struct AppState {
   };
   PropertiesState properties;
 
-  // ── Sidebar favorite reorder drag ──
+  DiskUsageState diskusage;
+
   bool sidebar_fav_dragging = false;      // actively dragging a favorite to reorder
   int sidebar_fav_drag_from = -1;         // index in app.favorites being dragged
   int sidebar_fav_drag_to = -1;           // insertion index in app.favorites, -1 = no target
@@ -1149,7 +1274,6 @@ struct AppState {
   int sidebar_fav_drag_start_y = 0;      // pointer Y when drag started
   int sidebar_fav_drag_current_y = 0;    // pointer Y during drag (for ghost)
 
-  // ── UDisks2 mount/unmount result (set from bg thread, consumed in event loop) ──
   std::mutex mount_mtx;
   std::string mount_pending_drive_id; // non-empty = mount in progress
   bool mount_success = false;
@@ -1163,7 +1287,6 @@ struct AppState {
   bool sidebar_needs_refresh = false;
   std::string mount_navigate_drive_id; // drive_id to navigate to after mount
 
-  // ── Computer view state ──
   std::vector<ComputerItem> computer_items;
   int computer_hover_idx = -1;
   int computer_scroll_px = 0;
@@ -1172,10 +1295,8 @@ struct AppState {
   int computer_content_h = 0;
   bool computer_needs_refresh = true;
 
-  // ── Last non-computer view mode (restored when leaving computer://) ──
   ViewMode last_browser_view_mode = ViewMode::List;
 
-  // ── List view column widths (proportional, stored as fractions of total) ──
   double col_name_frac = 0.45;
   double col_size_frac = 0.20;
   double col_date_frac = 0.25;
@@ -1185,7 +1306,6 @@ struct AppState {
   double col_resize_start_frac = 0;
   bool col_hover_divider = false;
 
-  // ── List view column visibility ──
   bool col_show_name = true;
   bool col_show_size = true;
   bool col_show_date = true;
@@ -1208,7 +1328,6 @@ struct AppState {
   bool settings_btn_hover = false;
   bool r_settings_btn_hover = false;
 
-  // ── Sort menu (dropdown from top-bar sort button) ──
   bool sort_menu_open = false;
   bool r_sort_menu_open = false;
   int sort_menu_x = 0, sort_menu_y = 0;
@@ -1226,19 +1345,16 @@ struct AppState {
   int view_btn_x = 0, view_btn_w = 0;   // stored during draw for hit-testing
   int r_view_btn_x = 0, r_view_btn_w = 0;
 
-  // ── Window control buttons (minimize / maximize / close) ──
   bool window_controls_left = false;
   int win_btn_x = 0, win_btn_w = 0;     // stored during draw for hit-testing
   bool win_btn_min_hover = false;
   bool win_btn_max_hover = false;
   bool win_btn_close_hover = false;
 
-  // ── Marquee / rubber-band selection ──
   bool marquee_active = false;
   double marquee_x0 = 0, marquee_y0 = 0;
   double marquee_x1 = 0, marquee_y1 = 0;
 
-  // ── Layout tracking ──
   int top_bar_height = 48;
   int status_bar_height = 44;
   int entry_height = 36;
@@ -1247,7 +1363,6 @@ struct AppState {
   int grid_cols = 1;           // cached column count for grid view
   int grid_row_h = 0;          // cached row height for grid view (set during draw)
 
-  // ── Top-bar arrow button hover ──
   int arrow_back_x = 0;
   int arrow_forward_x = 0;
   int arrow_up_x = 0;
@@ -1261,13 +1376,14 @@ struct AppState {
   bool arrow_up_hover = false;
   bool r_arrow_up_hover = false;
 
-  // ── Breadcrumb nav bar ──
   std::vector<BreadcrumbSegment> breadcrumbs;
   std::vector<BreadcrumbSegment> r_breadcrumbs;
+  // Segments collapsed into the leading "…" (same shape, for its dropdown).
+  std::vector<BreadcrumbSegment> breadcrumbs_hidden;
+  std::vector<BreadcrumbSegment> r_breadcrumbs_hidden;
   int breadcrumb_hover = -1;
   int r_breadcrumb_hover = -1;
 
-  // ── Tab bar ──
   int tab_bar_height = 44;
   struct TabHit {
     int x = 0, w = 0;
@@ -1275,7 +1391,6 @@ struct AppState {
   };
   std::vector<TabHit> tab_hits;
 
-  // ── Tab reorder drag ──
   bool tab_dragging = false;
   int tab_drag_from = -1;
   int tab_drag_to = -1;
@@ -1283,7 +1398,6 @@ struct AppState {
   int tab_drag_start_x = 0;
   int tab_drag_current_x = 0;
 
-  // ── Path editing ──
   int path_edit_cursor = 0;
   int r_path_edit_cursor = 0;
   int path_edit_sel_start = -1;
@@ -1293,7 +1407,6 @@ struct AppState {
   bool path_edit_dragging = false;
   bool r_path_edit_dragging = false;
 
-  // ── Live config values ──
   double zoom_pct = 100.0;
   bool folders_before_files = true;
   bool sort_natural = true;          // digit-aware name comparison
@@ -1307,18 +1420,21 @@ struct AppState {
   double preview_scale = 1.0;   // hover preview size multiplier (1.0-10.0)
   int dialog_opacity_pct = 100;
   int properties_opacity_pct = 100;
+  // Disk-usage opacities (live; edited via the DU-local settings panel).
+  int du_drives_opacity_pct = 100;
+  int du_dir_opacity_pct = 100;
+  int du_ext_opacity_pct = 100;
+  int du_map_opacity_pct = 100;
+  int du_bg_opacity_pct = 100;
 
-  // ── Animation ──
   uint64_t scroll_anim_start_ns = 0;
   bool scroll_needs_redraw = false;
 
-  // ── Frame callback ──
   wl_callback* frame_cb = nullptr;
   std::chrono::steady_clock::time_point frame_cb_armed_at{};
   int last_paint_w = -1;
   int last_paint_h = -1;
 
-  // ── Arrow icon surfaces (loaded from assets/UI/ SVGs) ──
   cairo_surface_t* arrow_left_svg = nullptr;
   cairo_surface_t* arrow_right_svg = nullptr;
   cairo_surface_t* arrow_up_svg = nullptr;
@@ -1361,7 +1477,6 @@ struct AppState {
   cairo_surface_t* icon_desktop_svg = nullptr;
   cairo_surface_t* icon_documents_svg = nullptr;
 
-  // ── Path-bar glass pill render cache ──
   // The glassy pill is a multi-pass vertical-gradient decoration over a
   // ~pane-wide region; its appearance depends only on pane geometry + theme,
   // so it is preredered once per (geometry, theme) change and blitted each
@@ -1380,7 +1495,6 @@ struct AppState {
   cairo_surface_t* icon_publicshare_svg = nullptr;
   cairo_surface_t* icon_templates_svg = nullptr;
 
-  // ── Color state ──
   double bg_r = 0.0, bg_g = 0.0, bg_b = 0.0;
   double surface_r = 0.08, surface_g = 0.08, surface_b = 0.10;
   double accent_r = 0.30, accent_g = 0.58, accent_b = 0.90;
@@ -1388,7 +1502,6 @@ struct AppState {
   double text_secondary_r = 0.50, text_secondary_g = 0.50, text_secondary_b = 0.55;
   double outline_r = 0.06, outline_g = 0.06, outline_b = 0.08;
 
-  // ── Drag and drop ──
   bool drag_potential = false;
   int drag_potential_idx = -1;
   double drag_start_x = 0;
@@ -1402,7 +1515,6 @@ struct AppState {
   bool drag_initial_is_copy = false;   // modifier state at drag start (for badge)
   wl_data_offer* drop_offer = nullptr;
 
-  // ── Drop target state (enhanced within-app DnD) ──
   int drop_x = 0;
   int drop_y = 0;
   std::string drop_target_path;
@@ -1414,15 +1526,12 @@ struct AppState {
   uint32_t drop_enter_serial = 0;     // serial from data_device.enter, reused for accept
   uint32_t drop_chosen_action = 2;    // negotiated DnD action (default MOVE=2)
 
-  // ── Folder hover-to-open during drag ──
   uint64_t drop_hover_open_start_ms = 0; // epoch ms when hover began on a folder (0 = inactive)
   std::string drop_hover_open_path;      // folder path being hovered for auto-open
 
-  // ── Tab hover-to-switch during drag ──
   int drop_target_tab_idx = -1;          // tab index being hovered during drag (-1 = none)
   uint64_t drop_tab_switch_start_ms = 0; // epoch ms when hover began on a tab (0 = inactive)
 
-  // ── Drop action chooser (Copy/Move prompt shown after a drop) ──
   // When a drop lands, the operation is deferred until the user picks
   // "Copy here" or "Move here" from this small popup instead of deciding
   // implicitly from the Ctrl modifier / negotiated DnD action.
@@ -1433,7 +1542,6 @@ struct AppState {
   std::vector<std::string> drop_chooser_srcs;  // pending source paths
   std::string drop_chooser_target;             // destination directory
 
-  // ── Undo support ──
   struct UndoRecord {
     enum class Type : uint8_t {
       PasteCopy,   // undo: delete paths_b (newly created copies)
@@ -1451,10 +1559,8 @@ struct AppState {
   std::vector<UndoRecord> redo_stack;
   static constexpr std::size_t kMaxUndo = 100;
 
-  // ── Cut visual indicator ──
   std::unordered_set<std::string> cut_paths;  // paths of files marked for cut (dashed border)
 
-  // ── Scroll-delta content reuse (partial repaint) ──
   // When only scroll_px changes (signature + epoch verify it), the content
   // column can shift in place and repaint only the newly exposed band instead
   // of recompositing every cell (grid mode).

@@ -47,10 +47,8 @@
 namespace eh::color {
 namespace {
 
-// ── Upstream namespace alias ────────────────────────────────────────────────
 namespace mcu = material_color_utilities;
 
-// ── JPEG decode with ICC profile support ────────────────────────────────────
 #ifdef EH_HAVE_LIBJPEG
 
 struct EkJpegErrorMgr {
@@ -85,7 +83,6 @@ struct EkJpegErrorMgr {
   jpeg_save_markers(&cinfo, JPEG_APP0 + 2, 0xFFFF);
   jpeg_read_header(&cinfo, TRUE);
 
-  // ── Collect ICC profile from APP2 markers ────────────────────────────────
   // ICC_PROFILE\0 <seq:u8> <total:u8> <data...>   — 14-byte header, then raw profile data.
   std::map<uint8_t, std::vector<uint8_t>> icc_chunks;
   for (jpeg_saved_marker_ptr m = cinfo.marker_list; m; m = m->next) {
@@ -102,7 +99,6 @@ struct EkJpegErrorMgr {
     icc_data.insert(icc_data.end(), chunk.begin(), chunk.end());
   }
 
-  // ── Decompress to RGB ────────────────────────────────────────────────────
   jpeg_start_decompress(&cinfo);
   out_w = static_cast<int>(cinfo.output_width);
   out_h = static_cast<int>(cinfo.output_height);
@@ -116,7 +112,6 @@ struct EkJpegErrorMgr {
   jpeg_destroy_decompress(&cinfo);
   std::fclose(fp);
 
-  // ── Apply ICC profile transform → sRGB ───────────────────────────────────
   // Disabled: matugen (the Rust `image` crate) ignores embedded ICC profiles
   // and scores the raw decoded RGB. Applying an ICC transform here changes the
   // pixel colors and therefore the extracted seed, breaking byte-identical
@@ -132,7 +127,6 @@ struct EkJpegErrorMgr {
   (void)icc_data;
 #endif // EH_HAVE_LCMS2
 
-  // ── Convert RGB → ARGB ───────────────────────────────────────────────────
   const int total = out_w * out_h;
   std::vector<uint32_t> argb(static_cast<size_t>(total));
   for (int i = 0; i < total; ++i) {
@@ -144,7 +138,6 @@ struct EkJpegErrorMgr {
 
 #endif // EH_HAVE_LIBJPEG
 
-// ── Decode images → ARGB vector ──────────────────────────────────────────────
 [[nodiscard]] std::vector<uint32_t> decode_image_to_argb(const std::string& path, int& out_w, int& out_h) {
 #ifdef EH_HAVE_LIBJPEG
   // Route JPEG files through libjpeg (ICC profile support).
@@ -177,7 +170,6 @@ struct EkJpegErrorMgr {
   return argb;
 }
 
-// ── Create DynamicScheme from source color + variant ────────────────────────
 //
 // NOTE: SchemeVibrant is built inline (instead of using mcu::SchemeVibrant) so
 // its neutral-variant palette uses chroma 10. The bundled material-color-utilities
@@ -224,7 +216,6 @@ struct EkJpegErrorMgr {
   return std::make_unique<mcu::SchemeContent>(source_hct, is_dark, contrast_level);
 }
 
-// ── Convert scheme roles to PaletteResult ───────────────────────────────────
 [[nodiscard]] PaletteResult scheme_to_result(const mcu::DynamicScheme& scheme, Argb sourceArgb, bool is_dark) {
   PaletteResult r;
   r.ok = true;
@@ -334,7 +325,6 @@ struct EkJpegErrorMgr {
 
 } // namespace
 
-// ── Triangle (bilinear) resize, bit-compatible with the `image` crate ────────
 // matugen resizes to a fixed 112×112 grid through the Rust `image` crate's
 // separable Triangle filter (vertical pass then horizontal pass, f32 weights,
 // half-away-from-zero rounding). Reproduce it exactly so the pixel grid fed to
@@ -347,7 +337,6 @@ inline float TriangleAccumulate(float acc, float value, float weight) {
 
 void ResizeTriangleToGrid(const std::vector<uint32_t>& src, int sw, int sh,
                           std::vector<uint32_t>& dst, int nw, int nh) {
-  // ── Vertical pass: (sw × sh) u8 → (sw × nh) f32 ──────────────────────────
   std::vector<float> tmp(static_cast<size_t>(sw) * nh * 4);
   const float ratio_v = static_cast<float>(sh) / static_cast<float>(nh);
   const float sratio_v = ratio_v < 1.0f ? 1.0f : ratio_v;
@@ -389,7 +378,6 @@ void ResizeTriangleToGrid(const std::vector<uint32_t>& src, int sw, int sh,
     }
   }
 
-  // ── Horizontal pass: (sw × nh) f32 → (nw × nh) u8 ────────────────────────
   dst.resize(static_cast<size_t>(nw) * nh);
   const float ratio_h = static_cast<float>(sw) / static_cast<float>(nw);
   const float sratio_h = ratio_h < 1.0f ? 1.0f : ratio_h;
@@ -435,7 +423,6 @@ void ResizeTriangleToGrid(const std::vector<uint32_t>& src, int sw, int sh,
   }
 }
 
-// ── Public API ──────────────────────────────────────────────────────────────
 
 PaletteResult generate_palette_from_image(
     const std::string& image_path, SchemeVariant variant, bool is_dark,
@@ -444,7 +431,6 @@ PaletteResult generate_palette_from_image(
   std::vector<uint32_t> pixels = decode_image_to_argb(image_path, w, h);
   if (pixels.empty() || w <= 0 || h <= 0) return {};
 
-  // ── Resize to exactly 112×112 (matches matugen / material-colors) ──────────
   // matugen stretches every image to a fixed 112×112 with the `image` crate's
   // Triangle (bilinear) filter before quantization. Mirror that exactly: always
   // resize to a fixed 112×112 grid, regardless of the source aspect ratio,
@@ -500,7 +486,6 @@ PaletteResult generate_palette_from_color(
   return scheme_to_result(*scheme, source_color, is_dark);
 }
 
-// ── Cached palette generation ───────────────────────────────────────────────
 
 namespace {
 

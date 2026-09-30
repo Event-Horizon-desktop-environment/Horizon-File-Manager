@@ -18,7 +18,6 @@ namespace fs = std::filesystem;
 
 namespace archive_viewer {
 
-// ── Helpers ────────────────────────────────────────────────────────
 
 static std::string home_dir() {
   if (const char* h = getenv("HOME")) return h;
@@ -30,7 +29,6 @@ static bool is_hidden(const std::string& name) {
   return !name.empty() && name[0] == '.';
 }
 
-// ── Sidebar locations ─────────────────────────────────────────────
 
 struct SideLoc {
   std::string label;
@@ -55,7 +53,6 @@ static std::vector<SideLoc> detect_side_locations() {
   return locs;
 }
 
-// ── Draw helpers ───────────────────────────────────────────────────
 
 static void set_color(cairo_t* cr, double r, double g, double b, double a) {
   cairo_set_source_rgba(cr, r, g, b, a);
@@ -73,7 +70,6 @@ static void draw_rounded_rect(cairo_t* cr, double x, double y, double w,
   cairo_close_path(cr);
 }
 
-// ── File-type detection ────────────────────────────────────────────
 
 static FileType detect_file_type(const std::string& name, bool is_dir) {
   if (is_dir) return FileType::Folder;
@@ -172,7 +168,6 @@ static FileType detect_file_type(const std::string& name, bool is_dir) {
   return FileType::File;
 }
 
-// ── Icon drawing (system theme → colored rect + letter) ────────────
 
 static const char* icon_name_for_file_type(FileType ft) {
   switch (ft) {
@@ -250,7 +245,6 @@ static void draw_file_icon(IconLoader& icons, cairo_t* cr, double x, double y,
   cairo_show_text(cr, letter_str);
 }
 
-// ── Scrolling ──────────────────────────────────────────────────────
 
 static int calc_content_h(const std::vector<int>& visible, int row_h) {
   return static_cast<int>(visible.size()) * row_h;
@@ -263,7 +257,6 @@ static void clamp_scroll(FbPanel& p) {
   if (p.scroll_px < 0) p.scroll_px = 0;
 }
 
-// ── Implementation ─────────────────────────────────────────────────
 
 void FbPanel::reset() {
   auto saved_bg = bg_opacity;
@@ -351,7 +344,6 @@ void FbPanel::paint(cairo_t* cr) {
   set_color(cr, 0.14, 0.14, 0.16, bg_opacity);
   cairo_paint(cr);
 
-  // ── Layout ──
   int top_h = top_bar_h;
   int bar_h = pick_mode ? pick_bar_h : 0;
   int list_y = top_h;
@@ -363,7 +355,6 @@ void FbPanel::paint(cairo_t* cr) {
   int content_x = sidebar_w;
   int content_w = w - sidebar_w;
 
-  // ── Sidebar ──
   if (sidebar_w > 0) {
     set_color(cr, 0.12, 0.12, 0.14, panel_opacity);
     cairo_rectangle(cr, 0, 0, sidebar_w, h - status_h - bar_h);
@@ -407,7 +398,6 @@ void FbPanel::paint(cairo_t* cr) {
     cairo_fill(cr);
   }
 
-  // ── Top bar ──
   // Background
   set_color(cr, 0.16, 0.16, 0.18, panel_opacity);
   cairo_rectangle(cr, content_x, 0, content_w, top_h);
@@ -457,7 +447,6 @@ void FbPanel::paint(cairo_t* cr) {
   cairo_rectangle(cr, content_x, top_h - 1, content_w, 1);
   cairo_fill(cr);
 
-  // ── File list ──
   cairo_save(cr);
   cairo_rectangle(cr, content_x, list_y, content_w, list_h);
   cairo_clip(cr);
@@ -524,7 +513,6 @@ void FbPanel::paint(cairo_t* cr) {
 
   cairo_restore(cr);
 
-  // ── Scrollbar ──
   if (content_h > list_h) {
     int sb_x = x + w - 8;
     int sb_h = list_h;
@@ -535,7 +523,6 @@ void FbPanel::paint(cairo_t* cr) {
     cairo_fill(cr);
   }
 
-  // ── Status bar ──
   {
     int sby = h - status_h - bar_h;
     set_color(cr, 0.16, 0.16, 0.18, panel_opacity);
@@ -558,7 +545,6 @@ void FbPanel::paint(cairo_t* cr) {
     cairo_fill(cr);
   }
 
-  // ── Picker bar ──
   if (pick_mode) {
     int pby = h - pick_bar_h;
     set_color(cr, 0.12, 0.12, 0.14, panel_opacity);
@@ -628,7 +614,6 @@ void FbPanel::paint(cairo_t* cr) {
   cairo_restore(cr);
 }
 
-// ── Event helpers ──────────────────────────────────────────────────
 
 static int hit_test_list(FbPanel& p, int mx, int my) {
   int top_h = p.top_bar_h;
@@ -646,7 +631,6 @@ static int hit_test_list(FbPanel& p, int mx, int my) {
   return idx;
 }
 
-// ── Events ─────────────────────────────────────────────────────────
 
 void FbPanel::on_motion(int mx, int my) {
   mouse_x = mx;

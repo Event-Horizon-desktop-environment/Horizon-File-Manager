@@ -479,6 +479,111 @@ static int run_compress_piped(const std::string& cmd,
   return 1;
 }
 
+// Out-of-process compression via horizon-archive(1). Streams
+// ARCHIVE-PROGRESS lines into prog; kill on cancel. Returns 0 on success,
+// 1 on failure (caller falls back), -1 on cancel. Only for formats the
+// helper's libarchive path covers (everything except Rar).
+static int compress_via_helper(const std::string& archive,
+                               const std::vector<std::string>& sources,
+                               int level, int threads,
+                               const std::shared_ptr<OperationProgress>& prog,
+                               int total) {
+  if (const char* e = std::getenv("EH_ARCHIVE_HELPER"))
+    if (*e && e[0] == '0') return 1;
+  const char* bin = std::getenv("EH_ARCHIVE_HELPER_BIN");
+  if (!bin) bin = "horizon-archive";
+
+  int errfd[2] = {-1, -1};
+  if (pipe(errfd) != 0) return 1;
+  pid_t pid = fork();
+  if (pid < 0) {
+    close(errfd[0]);
+    close(errfd[1]);
+    return 1;
+  }
+  if (pid == 0) {
+    close(errfd[0]);
+    if (dup2(errfd[1], STDERR_FILENO) < 0) _exit(127);
+    close(errfd[1]);
+    setpgid(0, 0);
+    // argv: horizon-archive create --level N -jN --progress archive src...
+    std::string lvl = std::to_string(level < 0 ? 6 : level);
+    std::string jobs = "-j" + std::to_string(threads <= 0 ? 0 : threads);
+    std::vector<std::string> args = {"create", "--level", lvl, jobs,
+                                     "--progress", archive};
+    args.insert(args.end(), sources.begin(), sources.end());
+    std::vector<char*> argv;
+    argv.push_back(const_cast<char*>(bin));
+    for (auto& a : args) argv.push_back(a.data());
+    argv.push_back(nullptr);
+    if (bin != std::string("horizon-archive"))
+      execv(bin, argv.data());
+    else
+      execvp(bin, argv.data());
+    _exit(127);
+  }
+  close(errfd[1]);
+  setpgid(pid, pid);
+  int flags = fcntl(errfd[0], F_GETFL, 0);
+  if (flags >= 0) fcntl(errfd[0], F_SETFL, flags | O_NONBLOCK);
+
+  std::string buf;
+  char chunk[4096];
+  bool eof = false;
+  int status = 0;
+  bool child_done = false;
+  int done_count = 0;
+  while (!eof || !child_done) {
+    if (prog->cancel.load()) {
+      kill(-pid, SIGKILL);
+      while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
+      }
+      close(errfd[0]);
+      return -1;
+    }
+    while (prog->paused.load() && !prog->cancel.load())
+      std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    struct pollfd pfd{};
+    pfd.fd = errfd[0];
+    pfd.events = POLLIN;
+    int pr = poll(&pfd, 1, 100);
+    if (pr > 0 && (pfd.revents & (POLLIN | POLLHUP))) {
+      ssize_t n = read(errfd[0], chunk, sizeof(chunk));
+      if (n > 0) {
+        buf.append(chunk, static_cast<size_t>(n));
+        size_t pos = 0;
+        for (;;) {
+          size_t nl = buf.find('\n', pos);
+          if (nl == std::string::npos) break;
+          std::string line = buf.substr(pos, nl - pos);
+          pos = nl + 1;
+          int d = -1, t = -1;
+          if (std::sscanf(line.c_str(), "ARCHIVE-PROGRESS %d %d", &d, &t) ==
+                  2 &&
+              t > 0) {
+            done_count = d;
+            double frac = static_cast<double>(d) / t;
+            if (frac > 0.99) frac = 0.99;
+            prog->progress.store(frac);
+            prog->copied_files.store(d);
+          }
+        }
+        buf.erase(0, pos);
+      } else if (n == 0) {
+        eof = true;
+      }
+    }
+    pid_t w = waitpid(pid, &status, WNOHANG);
+    if (w == pid) child_done = true;
+    if (eof && child_done) break;
+  }
+  close(errfd[0]);
+  if (WIFEXITED(status) && WEXITSTATUS(status) == 0) return 0;
+  if (WIFEXITED(status) && WEXITSTATUS(status) == 127 && done_count == 0)
+    return 1;  // helper missing: caller falls back
+  return 1;
+}
+
 void execute_compress_async(AppState& app) {
   std::string archive = archive_name_for(app);
 
@@ -530,7 +635,28 @@ void execute_compress_async(AppState& app) {
 
     bool engine_ok = false;
     bool engine_tried = false;
-    if (engine_supports_format(format_idx) && !prog->cancel.load()) {
+    // Out-of-process first (non-Rar): libarchive + codecs run outside
+    // horizon-files RSS with live progress; engine/external stay as fallback.
+    int helper_ret = -2;
+    bool helper_tried = false;
+    if (format_idx != 5 && !prog->cancel.load()) {
+      helper_tried = true;
+      helper_ret = compress_via_helper(archive, sources, level, threads, prog,
+                                       total);
+      if (helper_ret == 0) {
+        // helper wrote the archive; fall through to the success path below
+      } else if (helper_ret == -1) {
+        // cancelled: fall through, ret stays -1-ish via cancel flag
+      } else {
+        std::error_code ec3;
+        fs::remove(archive, ec3);  // partial output must not confuse fallback
+      }
+    }
+    if (helper_ret == 0) {
+      engine_ok = true;  // reuse the success path (snap-to-full + toast)
+    } else if (helper_ret == -1) {
+      // cancelled: skip engine/external, handled below via cancel flag
+    } else if (engine_supports_format(format_idx) && !prog->cancel.load()) {
       engine_tried = true;
       engine_ok = engine_compress(plan, archive, format_idx, level,
                                   compress_effective_threads(threads), prog);
@@ -539,7 +665,11 @@ void execute_compress_async(AppState& app) {
     int ret = -2;
     if (engine_ok) {
       ret = 0;
-    } else if (!engine_tried && !prog->cancel.load()) {
+    } else if (!engine_tried && !helper_tried && !prog->cancel.load()) {
+      ret = run_compress_piped(cmd, prog, archive, compress_backend(format_idx),
+                               sizes, total, total_bytes);
+    } else if (helper_tried && !engine_tried && !prog->cancel.load()) {
+      // helper failed and the engine doesn't cover this format: last resort
       ret = run_compress_piped(cmd, prog, archive, compress_backend(format_idx),
                                sizes, total, total_bytes);
     } else if (!prog->cancel.load()) {
@@ -581,7 +711,6 @@ void execute_compress_async(AppState& app) {
   }).detach();
 }
 
-// ── archive detection ────────────────────────────────────────────
 
 static const char* kArchiveExts[] = {
   ".zip", ".tar.gz", ".tar.bz2", ".tar.xz", ".tgz", ".7z", ".rar", ".tar",

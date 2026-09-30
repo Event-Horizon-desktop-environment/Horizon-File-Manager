@@ -23,6 +23,9 @@
 
 
 #include "app/file_browser/features/preview/video_worker.hpp"
+#include "app/file_browser/features/remote/remote.hpp"
+#include "app/file_browser/features/drive/drive.hpp"
+#include "app/file_browser/features/accounts/accounts.hpp"
 #include "app/file_browser/features/preview/svg_preview.hpp"
 #include "app/file_browser/features/preview/pdf_preview.hpp"
 #include "app/file_browser/features/preview/epub_preview.hpp"
@@ -79,7 +82,6 @@ namespace eh::file_browser {
 
 void preview_log(const char* fmt, ...);  // defined in draw.cpp
 
-// ── helpers ──────────────────────────────────────────────────────
 
 
 bool is_hidden_file(const std::string& name) {
@@ -117,7 +119,6 @@ std::unordered_set<std::string> read_hidden_file(const std::string& dir) {
   return names;
 }
 
-// ── app state constructor ────────────────────────────────────────
 
 AppState::AppState() {
   tabs.emplace_back();
@@ -125,6 +126,14 @@ AppState::AppState() {
 }
 
 AppState::~AppState() {
+  {
+    std::lock_guard<std::mutex> lk(scan_mtx);
+    if (remote_cancellable) {
+      g_cancellable_cancel(remote_cancellable);
+      g_object_unref(remote_cancellable);
+      remote_cancellable = nullptr;
+    }
+  }
   if (dir_watch_fd >= 0) {
     ::close(dir_watch_fd);  // defensive: teardown already calls dir_watch_close
     dir_watch_fd = -1;
@@ -168,7 +177,6 @@ AppState::~AppState() {
   if (icon_templates_svg) cairo_surface_destroy(icon_templates_svg);
 }
 
-// ── home_dir ─────────────────────────────────────────────────────
 
 std::string home_dir() {
   if (auto* h = std::getenv("HOME")) return h;
@@ -176,7 +184,6 @@ std::string home_dir() {
   return "/";
 }
 
-// ── directory listing ────────────────────────────────────────────
 
 void reset_scroll_and_selection(AppState& app) {
   app.cur_tab().hover_idx = -1;
@@ -410,14 +417,28 @@ void clear_thumb_cache(AppState& app) {
   app.thumb_pending_queue.clear();
 }
 
-// ── navigation ───────────────────────────────────────────────────
 
 // Snapshot current view state into DirProps for per-folder persistence
+static bool is_virtual_nav_path(const std::string& p) {
+  return p.empty() || p == "computer://" || p == "trash://" ||
+         p == "recent://" || p == "starred://" ||
+         p.rfind("recent://", 0) == 0 || p.rfind("starred://", 0) == 0 ||
+         is_remote_uri(p);
+}
+// MRU tracking for the Recent virtual view (in-memory; persisted on exit
+// via save_file_browser_settings).
+static void push_recent(AppState& app, const std::string& p) {
+  if (!app.recent_enabled) return;
+  if (p.empty() || is_virtual_nav_path(p)) return;
+  auto it = std::find(app.recent.begin(), app.recent.end(), p);
+  if (it != app.recent.end()) app.recent.erase(it);
+  app.recent.insert(app.recent.begin(), p);
+  while (app.recent.size() > AppState::kRecentMax) app.recent.pop_back();
+}
 static void save_dir_props_before_leave(AppState& app) {
   if (!app.per_folder_props) return;
   const std::string old_dir = app.cur_tab().current_path;
-  if (old_dir.empty() || old_dir == "computer://" || old_dir == "trash://" ||
-      old_dir.rfind("recent://", 0) == 0)
+  if (is_virtual_nav_path(old_dir))
     return;
 
   DirProps p;
@@ -446,8 +467,7 @@ static void save_dir_props_before_leave(AppState& app) {
 static void remember_independent_view(AppState& app) {
   if (!app.independent_dir_views) return;
   const std::string& p = app.cur_tab().current_path;
-  if (p.empty() || p == "computer://" || p == "trash://" ||
-      p.rfind("recent://", 0) == 0)
+  if (is_virtual_nav_path(p))
     return;
   auto& t = app.cur_tab();
   AppState::DirViewState st;
@@ -463,8 +483,7 @@ static void remember_independent_view(AppState& app) {
 // Restore the cached view settings for `path` into the current tab
 static void recall_independent_view(AppState& app, const std::string& path) {
   if (!app.independent_dir_views) return;
-  if (path == "computer://" || path == "trash://" ||
-      path.rfind("recent://", 0) == 0)
+  if (is_virtual_nav_path(path))
     return;
   auto it = app.dir_view_states.find(path);
   if (it == app.dir_view_states.end()) return;
@@ -516,31 +535,83 @@ void navigate_to(AppState& app, const std::string& path) {
   save_dir_props_before_leave(app);
   remember_independent_view(app);
   nav_mark("props_saved");
-  // Handle virtual "computer://" path
-  if (path == "computer://") {
+  // Handle virtual paths ("computer://", "recent://", "starred://")
+  if (path == "computer://" || path == "recent://" || path == "starred://") {
     if (!app.cur_tab().current_path.empty() && app.cur_tab().current_path != path) {
-      if (app.cur_tab().view_mode != ViewMode::Computer)
+      if (app.cur_tab().view_mode != ViewMode::Computer && path == "computer://")
         app.last_browser_view_mode = app.cur_tab().view_mode;
       app.cur_tab().nav_history.push_back(app.cur_tab().current_path);
       app.cur_tab().nav_forward.clear();
     }
     app.cur_tab().current_path = path;
-    app.cur_tab().view_mode = ViewMode::Computer;
     app.cur_tab().selected_idx = -1;
     app.cur_tab().hover_idx = -1;
     app.cur_tab().scroll_px = 0;
     app.cur_tab().scroll_smooth_current = 0;
     app.cur_tab().scroll_smooth_target = 0;
-    app.computer_scroll_px = 0;
-    app.computer_scroll_smooth_current = 0;
-    app.computer_scroll_smooth_target = 0;
-    app.computer_needs_refresh = true;
+    if (path == "computer://") {
+      app.cur_tab().view_mode = ViewMode::Computer;
+      app.computer_scroll_px = 0;
+      app.computer_scroll_smooth_current = 0;
+      app.computer_scroll_smooth_target = 0;
+      app.computer_needs_refresh = true;
+    } else {
+      if (app.cur_tab().view_mode == ViewMode::Computer)
+        app.cur_tab().view_mode = app.last_browser_view_mode;
+      reload_dir(app);
+    }
     draw(app);
+    return;
+  }
+
+  // Handle native Drive URIs: history + virtual listing.
+  if (is_drive_uri(path)) {
+    std::string uri = drive_normalize(path);
+    if (!app.cur_tab().current_path.empty() && app.cur_tab().current_path != uri) {
+      app.cur_tab().nav_history.push_back(app.cur_tab().current_path);
+      app.cur_tab().nav_forward.clear();
+    }
+    app.cur_tab().current_path = uri;
+    app.cur_tab().selected_idx = -1;
+    app.cur_tab().hover_idx = -1;
+    app.cur_tab().scroll_px = 0;
+    app.cur_tab().scroll_smooth_current = 0;
+    app.cur_tab().scroll_smooth_target = 0;
+    if (app.cur_tab().view_mode == ViewMode::Computer)
+      app.cur_tab().view_mode = app.last_browser_view_mode;
+    reload_dir(app);
+    nav_mark("post_reload");
+    if (!startup_nav)
+      draw(app);
+    return;
+  }
+
+  // Handle remote URIs (sftp:// in slice 1): history + virtual listing.
+  if (is_remote_uri(path)) {
+    std::string uri = remote_normalize(path);
+    if (!app.cur_tab().current_path.empty() && app.cur_tab().current_path != uri) {
+      app.cur_tab().nav_history.push_back(app.cur_tab().current_path);
+      app.cur_tab().nav_forward.clear();
+    }
+    app.cur_tab().current_path = uri;
+    app.cur_tab().selected_idx = -1;
+    app.cur_tab().hover_idx = -1;
+    app.cur_tab().scroll_px = 0;
+    app.cur_tab().scroll_smooth_current = 0;
+    app.cur_tab().scroll_smooth_target = 0;
+    if (app.cur_tab().view_mode == ViewMode::Computer)
+      app.cur_tab().view_mode = app.last_browser_view_mode;
+    reload_dir(app);
+    nav_mark("post_reload");
+    if (!startup_nav)
+      draw(app);
     return;
   }
 
   std::string resolved = fs::absolute(path).lexically_normal().string();
   if (!fs::is_directory(resolved)) return;
+
+  push_recent(app, resolved);
 
   // Push current folder onto the back stack before leaving
   if (!app.cur_tab().current_path.empty() && app.cur_tab().current_path != resolved) {
@@ -573,7 +644,17 @@ void navigate_to(AppState& app, const std::string& path) {
 }
 
 void navigate_up(AppState& app) {
-  if (app.cur_tab().current_path == "computer://") return;
+  if (is_drive_uri(app.cur_tab().current_path)) {
+    std::string up = drive_parent(app.cur_tab().current_path);
+    if (!up.empty()) navigate_to(app, up);
+    return;
+  }
+  if (is_remote_uri(app.cur_tab().current_path)) {
+    std::string up = remote_parent(app.cur_tab().current_path);
+    if (!up.empty()) navigate_to(app, up);
+    return;
+  }
+  if (is_virtual_nav_path(app.cur_tab().current_path)) return;
   fs::path p(app.cur_tab().current_path);
   auto parent = p.parent_path();
   if (parent != p) {
@@ -583,8 +664,9 @@ void navigate_up(AppState& app) {
 
 bool can_navigate_up(AppState& app) {
   const auto& path = app.cur_tab().current_path;
-  if (path.empty() || path == "computer://" || path == "trash://" ||
-      path.rfind("recent://", 0) == 0)
+  if (is_drive_uri(path)) return !drive_parent(path).empty();
+  if (is_remote_uri(path)) return !remote_parent(path).empty();
+  if (is_virtual_nav_path(path))
     return false;
   fs::path p(path);
   auto parent = p.parent_path();
@@ -620,12 +702,16 @@ void navigate_forward(AppState& app) {
 }
 
 
-// ── mount drive ──────────────────────────────────────────────────
 
 void mount_drive(AppState& app, int sb_idx) {
   auto& loc = app.sidebar_locations[sb_idx];
   if (loc.kind != SidebarLocation::Kind::Drive || loc.is_mounted) return;
   if (loc.drive_id.empty()) return; // no UDisks2 object path — can't mount
+  if (loc.drive_id.rfind("drive:", 0) == 0) return; // native Drive: no mount
+  if (loc.drive_id.rfind("gio:", 0) == 0) {
+    gio_mount_volume(app, loc.drive_id);
+    return;
+  }
 
   auto& udisks = drives::UDisks2DriveService::instance();
   {
@@ -643,12 +729,16 @@ void mount_drive(AppState& app, int sb_idx) {
   });
 }
 
-// ── unmount drive ────────────────────────────────────────────────
 
 void unmount_drive(AppState& app, int sb_idx) {
   auto& loc = app.sidebar_locations[sb_idx];
   if (loc.kind != SidebarLocation::Kind::Drive || !loc.is_mounted) return;
   if (loc.drive_id.empty()) return;
+  if (loc.drive_id.rfind("drive:", 0) == 0) return; // native Drive: no unmount
+  if (loc.drive_id.rfind("gio:", 0) == 0) {
+    gio_unmount_volume(app, loc.drive_id);
+    return;
+  }
 
   auto& udisks = drives::UDisks2DriveService::instance();
   {
@@ -666,7 +756,6 @@ void unmount_drive(AppState& app, int sb_idx) {
   });
 }
 
-// ── open files ───────────────────────────────────────────────────
 
 void open_selected(AppState& app) {
   auto& tab = app.cur_tab();
@@ -678,6 +767,7 @@ void open_selected(AppState& app) {
     if (fs::is_directory(te.path, ec)) {
       navigate_to(app, te.path);
     } else {
+      push_recent(app, te.path);
       xdg::open_path_in_default_application(te.path);
     }
     return;
@@ -690,7 +780,18 @@ void open_selected(AppState& app) {
   if (real_idx < 0 || real_idx >= static_cast<int>(tab.entries.size())) return;
 
   auto& entry = app.cur_tab().entries[real_idx];
+  // Native Drive entries never touch local open/exec paths: folders
+  // navigate, files download-to-temp first (slice 1: read-only).
+  if (is_drive_uri(entry.path)) {
+    if (entry.is_dir) {
+      navigate_to(app, entry.path);
+    } else {
+      drive_open_file(app, entry);
+    }
+    return;
+  }
   if (entry.type == FileType::Archive) {
+    push_recent(app, entry.path);
     pid_t pid = fork();
     if (pid == 0) {
       execlp("horizon-archive", "horizon-archive", entry.path.c_str(), nullptr);
@@ -701,6 +802,7 @@ void open_selected(AppState& app) {
   if (entry.is_dir) {
     navigate_to(app, entry.path);
   } else if (entry.type == FileType::Executable) {
+    push_recent(app, entry.path);
     pid_t pid = fork();
     if (pid == 0) {
       setsid();
@@ -708,11 +810,11 @@ void open_selected(AppState& app) {
       _exit(1);
     }
   } else {
+    push_recent(app, entry.path);
     xdg::open_path_in_default_application(entry.path);
   }
 }
 
-// ── Tab management ───────────────────────────────────────────────
 
 void new_tab(AppState& app) {
   int idx = static_cast<int>(app.tabs.size());
@@ -742,7 +844,6 @@ void close_tab(AppState& app) {
   reload_dir(app);
 }
 
-// ── split pane ───────────────────────────────────────────────────
 
 // Copy path + persistent view settings from `src` into `dst`, resetting all
 // transient state (history, scroll, selection): same folder as the source

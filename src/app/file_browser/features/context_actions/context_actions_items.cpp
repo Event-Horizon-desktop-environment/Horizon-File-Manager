@@ -39,11 +39,24 @@
 #include "services/udisks2/udisks2_drive_service.hpp"
 
 namespace fs = std::filesystem;
+
+
 namespace xdg = eh::shell::desktop::xdg;
 using menu_clock = std::chrono::steady_clock;
 
 
 namespace eh::file_browser {
+
+// Local-only actions refuse remote targets with a toast (slice 1 has no
+// remote compress/extract/run/admin/metadata support yet).
+static bool remote_refused(AppState& app, const std::string& path) {
+  if (is_remote_uri(path)) {
+    app.operation_status = "Not available for remote files yet";
+    app.operation_status_expires_ms = menu_expiry_3s();
+    return true;
+  }
+  return false;
+}
 
 // Per-item action dispatch: the switch from execute_context_menu_action. Runs
 // AFTER the dispatcher resolved `entry`; a case that `return`s exits without
@@ -65,6 +78,7 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
       return;
 
     case AppState::ContextMenuAction::RunProgram: {
+      if (remote_refused(app, entry.path)) { draw(app); return; }
       pid_t pid = fork();
       if (pid == 0) {
         setsid();
@@ -135,6 +149,7 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
         int r = app.cur_tab().visible_entries[app.context_menu_file_idx];
         if (r >= 0 && r < static_cast<int>(app.cur_tab().entries.size())) {
           const std::string& name = app.cur_tab().entries[r].name;
+          if (remote_refused(app, app.cur_tab().current_path)) { draw(app); return; }
           std::string hidden_path = app.cur_tab().current_path + "/.hidden";
           std::vector<std::string> lines;
           {
@@ -174,6 +189,68 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
       compare_selected_files(app);
       return;
 
+    case AppState::ContextMenuAction::Checksums: {
+      std::string target;
+      if (app.context_menu_file_idx == -9) {
+        target = app.context_menu_tree_entry.path;
+      } else {
+        auto paths = selected_entry_paths(app);
+        if (!paths.empty()) target = paths.front();
+      }
+      if (!target.empty()) {
+        if (remote_refused(app, target)) { draw(app); return; }
+        std::error_code ec;
+        if (fs::is_directory(target, ec)) {
+          app.operation_status = "Checksums are for files, not folders";
+          app.operation_status_expires_ms =
+              std::chrono::duration_cast<std::chrono::milliseconds>(
+                  std::chrono::steady_clock::now().time_since_epoch())
+                  .count() +
+              3000;
+        } else {
+          open_checksums(app, target);
+        }
+        draw(app);
+      }
+      return;
+    }
+
+    case AppState::ContextMenuAction::AddStar:
+    case AppState::ContextMenuAction::RemoveStar: {
+      std::string target;
+      if (app.context_menu_file_idx == -9) {
+        target = app.context_menu_tree_entry.path;
+      } else {
+        auto paths = selected_entry_paths(app);
+        if (!paths.empty()) target = paths.front();
+      }
+      if (!target.empty()) {
+        if (remote_refused(app, target)) { draw(app); return; }
+        auto it = std::find(app.starred.begin(), app.starred.end(), target);
+        if (action == AppState::ContextMenuAction::AddStar) {
+          if (it == app.starred.end()) {
+            app.starred.push_back(target);
+            save_file_browser_settings(app);
+          }
+          app.operation_status = "Starred";
+        } else {
+          if (it != app.starred.end()) {
+            app.starred.erase(it);
+            save_file_browser_settings(app);
+          }
+          app.operation_status = "Star removed";
+          if (app.cur_tab().current_path == "starred://") reload_dir(app);
+        }
+        app.operation_status_expires_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch())
+                .count() +
+            3000;
+        draw(app);
+      }
+      return;
+    }
+
     case AppState::ContextMenuAction::ApplyPropsToSubfolders: {
       // Snapshot the current pane's view properties, then write them into
       // every subfolder of the selected directory (background thread).
@@ -182,6 +259,7 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
       int ri2 = app.cur_tab().visible_entries[vi];
       if (ri2 < 0 || ri2 >= static_cast<int>(app.cur_tab().entries.size())) return;
       std::string root_dir = app.cur_tab().entries[ri2].path;
+      if (remote_refused(app, root_dir)) { draw(app); return; }
 
       DirProps p;
       p.has_mode = true;
@@ -300,6 +378,19 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
         // Batch rename via right-click
         app.batch_rename_entries.clear();
         auto all = app.cur_tab().multi_selected;
+        // Refuse remote targets up front (batch engine is local-only).
+        for (int vis_idx : all) {
+          if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
+          int r = app.cur_tab().visible_entries[vis_idx];
+          if (r < 0 || r >= static_cast<int>(app.cur_tab().entries.size())) continue;
+          if (is_remote_uri(app.cur_tab().entries[r].path) ||
+              is_drive_uri(app.cur_tab().entries[r].path)) {
+            app.operation_status = "Batch rename unavailable for remote files";
+            app.operation_status_expires_ms = menu_expiry_3s();
+            draw(app);
+            return;
+          }
+        }
         // Ensure the right-clicked entry is included
         bool has_clicked = false;
         for (int vis_idx : all) {
@@ -397,9 +488,24 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
         }
         app.confirm_callback = [&app, paths = std::move(trash_paths)](bool ok) {
           if (!ok) return;
-          for (const auto& p : paths) (void)xdg::trash_file(p);
+          size_t trashed = 0;
+          for (const auto& p : paths) {
+            if (is_drive_uri(p)) {
+              std::string err;
+              if (drive_trash_path(p, err)) ++trashed;
+            } else if (xdg::trash_file(p)) {
+              ++trashed;
+            }
+          }
           reload_dir(app);
-          app.operation_status = "Moved to trash";
+          if (trashed > 0) schedule_trash_maintain(app);
+          if (trashed == paths.size()) {
+            app.operation_status = "Moved to trash";
+          } else if (trashed > 0) {
+            app.operation_status = "Moved some items to trash";
+          } else {
+            app.operation_status = "Trash not supported here";
+          }
           app.operation_status_expires_ms = menu_expiry_3s();
         };
       }
@@ -436,7 +542,15 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
           if (!ok) return;
           std::error_code ec;
           for (const auto& [p, is_dir] : paths) {
-            if (is_dir) fs::remove_all(p, ec); else fs::remove(p, ec);
+            if (is_drive_uri(p.string())) {
+              vfs_remove_all(p.string());
+            } else if (is_remote_uri(p.string())) {
+              vfs_remove_all(p.string());
+            } else if (is_dir) {
+              fs::remove_all(p, ec);
+            } else {
+              fs::remove(p, ec);
+            }
           }
           reload_dir(app);
           app.operation_status = "Permanently deleted";
@@ -450,6 +564,7 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
     }
 
     case AppState::ContextMenuAction::BrowseArchive: {
+      if (remote_refused(app, entry.path)) { draw(app); return; }
       pid_t pid = fork();
       if (pid == 0) {
         execlp("horizon-archive", "horizon-archive", entry.path.c_str(), nullptr);
@@ -460,6 +575,14 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
     }
 
     case AppState::ContextMenuAction::Extract: {
+      if (remote_refused(app, entry.path)) { draw(app); return; }
+      for (int vis_idx : app.cur_tab().multi_selected) {
+        if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
+        int rr = app.cur_tab().visible_entries[vis_idx];
+        if (rr < 0 || rr >= static_cast<int>(app.cur_tab().entries.size())) continue;
+        if (remote_refused(app, app.cur_tab().entries[rr].path)) { draw(app); return; }
+      }
+
       for (int vis_idx : app.cur_tab().multi_selected) {
         if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
         int r = app.cur_tab().visible_entries[vis_idx];
@@ -472,6 +595,14 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
     }
 
     case AppState::ContextMenuAction::ExtractTo: {
+      if (remote_refused(app, entry.path)) { draw(app); return; }
+      for (int vis_idx : app.cur_tab().multi_selected) {
+        if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
+        int rr = app.cur_tab().visible_entries[vis_idx];
+        if (rr < 0 || rr >= static_cast<int>(app.cur_tab().entries.size())) continue;
+        if (remote_refused(app, app.cur_tab().entries[rr].path)) { draw(app); return; }
+      }
+
       std::string dest;
       if (!eh::dialog::show_native_folder_picker(&dest)) { draw(app); return; }
       if (!dest.empty()) {
@@ -487,6 +618,7 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
     }
 
     case AppState::ContextMenuAction::MountIso: {
+      if (remote_refused(app, entry.path)) { draw(app); return; }
       std::string iso = entry.path;
       app.operation_status = "Mounting disk image...";
       app.operation_status_expires_ms = menu_expiry_3s();
@@ -512,6 +644,7 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
     }
 
     case AppState::ContextMenuAction::UnmountIso: {
+      if (remote_refused(app, entry.path)) { draw(app); return; }
       std::string iso = entry.path;
       app.operation_status = "Unmounting disk image...";
       app.operation_status_expires_ms = menu_expiry_3s();
@@ -532,6 +665,12 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
     }
 
     case AppState::ContextMenuAction::Compress: {
+      for (int vis_idx : app.cur_tab().multi_selected) {
+        if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
+        int rr = app.cur_tab().visible_entries[vis_idx];
+        if (rr < 0 || rr >= static_cast<int>(app.cur_tab().entries.size())) continue;
+        if (remote_refused(app, app.cur_tab().entries[rr].path)) { draw(app); return; }
+      }
       std::vector<std::string> paths;
       if (app.cur_tab().multi_selected.size() > 1) {
         for (int vis_idx : app.cur_tab().multi_selected) {
@@ -576,6 +715,22 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
           int r = app.cur_tab().visible_entries[vis_idx];
           if (r < 0 || r >= static_cast<int>(app.cur_tab().entries.size())) continue;
           auto& e = app.cur_tab().entries[r];
+          if (is_remote_uri(e.path)) {
+            // Remote duplicate: uniquified same-dir copy through the planner.
+            fs::path spp(e.path);
+            std::string stem = spp.stem().string();
+            std::string ext = spp.extension().string();
+            std::string parent = remote_parent(e.path);
+            if (parent.empty()) continue;
+            if (parent.back() != '/') parent += '/';
+            std::string unique = parent + stem + " (copy)" + ext;
+            int n = 2;
+            while (vfs_exists(unique))
+              unique = parent + stem + " (" + std::to_string(n++) + ")" + ext;
+            launch_remote_copy_as(app, e.path, parent, fs::path(unique).filename().string(),
+                                  "Duplicated");
+            continue;
+          }
           fs::path src(e.path);
           fs::path parent = src.parent_path();
           fs::path target = parent / (src.stem().string() + " (copy)" + src.extension().string());
@@ -647,7 +802,60 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
       app.operation_status_expires_ms = menu_expiry_3s();
       break;
     }
+    case AppState::ContextMenuAction::ShareEmail: {
+      // Collect selected files (folders can't be email attachments).
+      std::vector<std::string> files;
+      for (int vis_idx : app.cur_tab().multi_selected) {
+        if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
+        int r = app.cur_tab().visible_entries[vis_idx];
+        if (r < 0 || r >= static_cast<int>(app.cur_tab().entries.size())) continue;
+        const auto& p = app.cur_tab().entries[r].path;
+        if (!app.cur_tab().entries[r].is_dir) files.push_back(p);
+      }
+      if (files.empty() && !entry.is_dir) files.push_back(entry.path);
+      if (files.empty()) {
+        app.operation_status = "Only files can be emailed";
+        app.operation_status_expires_ms = menu_expiry_3s();
+        break;
+      }
+      bool have_mailer = false;
+      if (const char* pe = std::getenv("PATH")) {
+        std::string paths(pe);
+        size_t start = 0;
+        while (start <= paths.size()) {
+          size_t end = paths.find(':', start);
+          std::string dir = end == std::string::npos ? paths.substr(start)
+                                                     : paths.substr(start, end - start);
+          if (!dir.empty() && ::access((dir + "/xdg-email").c_str(), X_OK) == 0) {
+            have_mailer = true;
+            break;
+          }
+          if (end == std::string::npos) break;
+          start = end + 1;
+        }
+      }
+      if (!have_mailer) {
+        app.operation_status = "No email client found (xdg-email)";
+        app.operation_status_expires_ms = menu_expiry_3s();
+        break;
+      }
+      pid_t pid = ::fork();
+      if (pid == 0) {
+        std::vector<const char*> argv = {"xdg-email"};
+        for (auto& f : files) {
+          argv.push_back("--attach");
+          argv.push_back(f.c_str());
+        }
+        argv.push_back(nullptr);
+        execvp(argv[0], const_cast<char* const*>(argv.data()));
+        _exit(127);
+      }
+      app.operation_status = "Opening email composer…";
+      app.operation_status_expires_ms = menu_expiry_3s();
+      break;
+    }
     case AppState::ContextMenuAction::Properties: {
+      if (remote_refused(app, entry.path)) { draw(app); break; }
       bool is_multi = app.cur_tab().multi_selected.size() > 1;
       if (is_multi) {
         std::vector<std::string> paths;

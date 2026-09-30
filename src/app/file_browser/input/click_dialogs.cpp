@@ -36,7 +36,6 @@ namespace fs = std::filesystem;
 namespace eh::file_browser {
 
 bool click_drop_chooser(AppState& app, int x, int y, int button) {
-  // ── Drop action chooser (Copy/Move prompt) ──
   // A click on a row picks that action; any other click (either button)
   // dismisses the prompt without acting.
   if (app.drop_chooser_open) {
@@ -56,7 +55,6 @@ bool click_drop_chooser(AppState& app, int x, int y, int button) {
 }
 
 bool click_context_menu(AppState& app, int x, int y, int button) {
-  // ── Context menu clicks ──
   // Dispatched before the region handlers below: the menu is drawn above
   // the status bar / scrollbar, so its rows must win over those handlers,
   // which otherwise swallow any click in their band (e.g. the status-bar
@@ -109,7 +107,6 @@ bool click_context_menu(AppState& app, int x, int y, int button) {
 }
 
 bool click_properties(AppState& app, int x, int y, int button) {
-  // ── Properties dialog clicks ──
   if (app.properties.open) {
     if (button == 0x110) {
       int hit = properties_hit_test(app, x, y);
@@ -231,7 +228,6 @@ bool click_properties(AppState& app, int x, int y, int button) {
 }
 
 bool click_conflict(AppState& app, int x, int y, int button) {
-  // ── Overwrite/merge conflict dialog clicks ──
   // Resolved through the retained hit registry (rects stored during paint);
   // no geometry is re-derived here.
   if (!app.conflict_open) return false;
@@ -261,7 +257,6 @@ bool click_conflict(AppState& app, int x, int y, int button) {
 }
 
 bool click_confirm(AppState& app, int x, int y, int button) {
-  // ── Confirm dialog clicks ──
   // Resolved through the retained hit registry (rects stored during paint
   // from hui layout nodes); no geometry is re-derived here.
   if (!app.confirm_open) return false;
@@ -291,7 +286,6 @@ bool click_confirm(AppState& app, int x, int y, int button) {
 }
 
 bool click_password(AppState& app, int x, int y, int button) {
-  // ── Password dialog clicks ──
   // Resolved through the retained hit registry (rects stored during paint
   // from hui layout nodes); no geometry is re-derived here.
   if (!app.password_dialog_open) return false;
@@ -370,7 +364,6 @@ bool click_password(AppState& app, int x, int y, int button) {
 }
 
 bool click_compress(AppState& app, int x, int y, int button) {
-  // ── Compress dialog clicks ──
   // Resolved through the retained hit registry (rects stored during paint
   // from hui layout nodes); no geometry is re-derived here.
   if (!app.compress_dialog_open) return false;
@@ -434,7 +427,6 @@ bool click_compress(AppState& app, int x, int y, int button) {
 }
 
 bool click_select_pattern(AppState& app, int x, int y, int button) {
-  // ── Select-by-pattern dialog clicks ──
   if (app.select_pattern_open) {
     if (handle_select_pattern_click(app, button, x, y)) {
       draw(app);
@@ -445,7 +437,6 @@ bool click_select_pattern(AppState& app, int x, int y, int button) {
 }
 
 bool click_create(AppState& app, int x, int y, int button) {
-  // ── Create dialog clicks ──
   // Resolved through the retained hit registry (rects stored during paint
   // from hui layout nodes); no geometry is re-derived here.
   if (!app.create_dialog_open) return false;
@@ -482,25 +473,47 @@ bool click_create(AppState& app, int x, int y, int button) {
 
   if (hid == dialog(kDlgCreate, kCreateOk)) {
     if (!app.create_buf.empty()) {
-      fs::path dir(app.cur_tab().current_path);
-      fs::path new_path = dir / app.create_buf;
-      std::error_code ec;
-      if (!app.create_template_src.empty()) {
-        std::error_code eq;
-        int n = 2;
-        while (fs::exists(new_path, eq))
-          new_path = dir / (new_path.stem().string() + " (" +
-                            std::to_string(n++) + ")" +
-                            new_path.extension().string());
-        fs::copy_file(app.create_template_src, new_path,
-                      fs::copy_options::none, ec);
-      } else if (app.create_is_folder) {
-        fs::create_directory(new_path, ec);
+      if (is_remote_uri(app.cur_tab().current_path)) {
+        std::string dir = app.cur_tab().current_path;
+        while (dir.size() > 1 && dir.back() == '/') dir.pop_back();
+        std::string target = dir + "/" + app.create_buf;
+        bool ok = false;
+        if (!app.create_template_src.empty()) {
+          app.operation_status = "Templates not supported on remote locations yet";
+          app.operation_status_expires_ms = menu_expiry_3s();
+        } else if (app.create_is_folder) {
+          ok = vfs_mkdir(target);
+        } else {
+          ok = vfs_create_empty(target);
+        }
+        if (ok) {
+          app.operation_status = "Created";
+          app.operation_status_expires_ms = menu_expiry_3s();
+        } else if (app.create_template_src.empty()) {
+          app.operation_status = "Create failed";
+          app.operation_status_expires_ms = menu_expiry_3s();
+        }
       } else {
-        FILE* f = std::fopen(new_path.c_str(), "w");
-        if (f) std::fclose(f);
+        fs::path dir(app.cur_tab().current_path);
+        fs::path new_path = dir / app.create_buf;
+        std::error_code ec;
+        if (!app.create_template_src.empty()) {
+          std::error_code eq;
+          int n = 2;
+          while (fs::exists(new_path, eq))
+            new_path = dir / (new_path.stem().string() + " (" +
+                              std::to_string(n++) + ")" +
+                              new_path.extension().string());
+          fs::copy_file(app.create_template_src, new_path,
+                        fs::copy_options::none, ec);
+        } else if (app.create_is_folder) {
+          fs::create_directory(new_path, ec);
+        } else {
+          FILE* f = std::fopen(new_path.c_str(), "w");
+          if (f) std::fclose(f);
+        }
+        reload_dir(app);
       }
-      reload_dir(app);
     }
     app.create_dialog_open = false;
     app.create_template_src.clear();
@@ -549,7 +562,6 @@ bool click_create(AppState& app, int x, int y, int button) {
 }
 
 bool click_rename_ui(AppState& app, int x, int y, int button) {
-  // ── Rename UI dialog clicks ──
   // Resolved through the retained hit registry (rects stored during paint
   // from hui layout nodes); no geometry is re-derived here.
   if (!app.rename_ui_open) return false;
@@ -610,11 +622,25 @@ bool click_rename_ui(AppState& app, int x, int y, int button) {
 
     if (hid == dialog(kDlgRename, kRenameOk)) {
       if (!app.rename_ui_buf.empty() && app.rename_ui_buf != app.rename_ui_old_name) {
-        fs::path src(app.rename_ui_entry_path);
-        fs::path dest = src.parent_path() / app.rename_ui_buf;
-        std::error_code ec;
-        fs::rename(src, dest, ec);
-        if (!ec) {
+        if (is_drive_uri(app.rename_ui_entry_path) ||
+            is_remote_uri(app.rename_ui_entry_path)) {
+          std::string dest = vfs_rename_entry(app.rename_ui_entry_path, app.rename_ui_buf);
+          if (!dest.empty()) {
+            app.operation_status = "Renamed";
+            app.operation_status_expires_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+              (std::chrono::steady_clock::now() + std::chrono::milliseconds(3000)).time_since_epoch()).count();
+            reload_dir(app);
+          } else {
+            app.operation_status = "Rename failed";
+            app.operation_status_expires_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+              (std::chrono::steady_clock::now() + std::chrono::milliseconds(3000)).time_since_epoch()).count();
+          }
+        } else {
+          fs::path src(app.rename_ui_entry_path);
+          fs::path dest = src.parent_path() / app.rename_ui_buf;
+          std::error_code ec;
+          fs::rename(src, dest, ec);
+          if (!ec) {
           AppState::UndoRecord rec{AppState::UndoRecord::Type::Rename, {}, {}};
           rec.paths_a.push_back(src.string());
           rec.paths_b.push_back(dest.string());
@@ -627,6 +653,7 @@ bool click_rename_ui(AppState& app, int x, int y, int button) {
             (std::chrono::steady_clock::now() + std::chrono::milliseconds(3000)).time_since_epoch()).count();
           reload_dir(app);
         }
+        } // else (local rename)
       }
       app.rename_ui_open = false;
       draw(app);
@@ -647,7 +674,6 @@ bool click_rename_ui(AppState& app, int x, int y, int button) {
 }
 
 bool click_batch_rename(AppState& app, int x, int y, int button) {
-  // ── Batch rename click handling ──
   // Resolved through the retained hit registry (rects stored during paint);
   // no geometry is re-derived here.
   if (!app.batch_rename_open) return false;
@@ -666,7 +692,6 @@ bool click_batch_rename(AppState& app, int x, int y, int button) {
   const uint32_t hid = app.hit_main.query(x, y);
   bool is_template = (app.batch_rename_mode == 0);
 
-  // ── Mode tab clicks ──
   if (hid == dialog(kDlgBatch, kBatchTab0)) {
     if (app.batch_rename_mode != 0) {
       app.batch_rename_mode = 0;
@@ -686,7 +711,6 @@ bool click_batch_rename(AppState& app, int x, int y, int button) {
   }
 
   if (is_template) {
-    // ── Template field click ──
     if (hid == dialog(kDlgBatch, kBatchTemplate)) {
       app.batch_rename_edit_focus = 0;
       app.batch_rename_show_add = false;
@@ -696,7 +720,6 @@ bool click_batch_rename(AppState& app, int x, int y, int button) {
       return true;
     }
 
-    // ── [+ Add] button click ──
     if (hid == dialog(kDlgBatch, kBatchAdd)) {
       app.batch_rename_show_add = !app.batch_rename_show_add;
       app.batch_rename_add_hover = -1;
@@ -704,7 +727,6 @@ bool click_batch_rename(AppState& app, int x, int y, int button) {
       return true;
     }
 
-    // ── [+ Add] dropdown option click ──
     if (app.batch_rename_show_add) {
       int ctrl = hui::Hit::dialog_ctrl(hid);
       int option = ctrl - kBatchAddItemBase;
@@ -723,7 +745,6 @@ bool click_batch_rename(AppState& app, int x, int y, int button) {
       }
     }
   } else {
-    // ── Find mode field clicks ──
     if (hid == dialog(kDlgBatch, kBatchFind)) {
       app.batch_rename_edit_focus = 0;
       app.batch_rename_find_cursor = static_cast<int>(app.batch_rename_find.size());
@@ -738,7 +759,6 @@ bool click_batch_rename(AppState& app, int x, int y, int button) {
     }
   }
 
-  // ── Rename button ──
   if (hid == dialog(kDlgBatch, kBatchOk)) {
     if (!app.batch_rename_entries.empty()) {
       AppState::UndoRecord rec{AppState::UndoRecord::Type::Rename, {}, {}};
@@ -771,7 +791,6 @@ bool click_batch_rename(AppState& app, int x, int y, int button) {
     return true;
   }
 
-  // ── Cancel button or click outside ──
   if (hid == dialog(kDlgBatch, kBatchCancel) || hid != dialog(kDlgBatch, 0)) {
     app.batch_rename_open = false;
     draw(app);
@@ -781,7 +800,6 @@ bool click_batch_rename(AppState& app, int x, int y, int button) {
 }
 
 bool click_open_with(AppState& app, int x, int y, int button) {
-  // ── Open With dialog helper: write MIME default association ──
   auto set_mime_default_app = [](const std::string& mime_type, const std::string& desktop_id) {
     if (mime_type.empty() || desktop_id.empty()) return;
     const char* home = std::getenv("HOME");
@@ -839,7 +857,6 @@ bool click_open_with(AppState& app, int x, int y, int button) {
     }
   };
 
-  // ── Open With dialog clicks ──
   if (app.open_with_open) {
     if (button == 0x110) {
       double dx = static_cast<double>(x), dy = static_cast<double>(y);
@@ -927,7 +944,6 @@ bool click_open_with(AppState& app, int x, int y, int button) {
 }
 
 bool click_term_chooser(AppState& app, int x, int y, int button) {
-  // ── Terminal chooser clicks ──
   // Resolved through the retained hit registry (rects stored during paint);
   // no geometry is re-derived here.
   if (!app.term_chooser_open) return false;
@@ -961,6 +977,135 @@ bool click_term_chooser(AppState& app, int x, int y, int button) {
     eh::config::shell_config_apply_from_memory(std::move(sc));
     app.term_chooser_open = false;
     open_terminal_at(app, app.term_chooser_target_dir);
+    draw(app);
+    return true;
+  }
+  return true;
+}
+
+bool click_checksum(AppState& app, int x, int y, int button) {
+  if (!app.checksum_open) return false;
+  if (button != 0x110) return true; // modal: swallow other buttons
+  using hui::Hit::dialog;
+  using hui::Hit::kDlgChecksum;
+  using hui::Hit::kChecksumClose;
+  using hui::Hit::kChecksumCopyBase;
+  const uint32_t hid = app.hit_main.query(x, y);
+  if (hid == dialog(kDlgChecksum, kChecksumClose)) {
+    app.checksum_open = false;
+    ++app.checksum_generation; // cancel in-flight worker
+    app.checksum_hover_btn = -1;
+    draw(app);
+    return true;
+  }
+  int ctrl = hui::Hit::dialog_ctrl(hid);
+  int copy_idx = ctrl - kChecksumCopyBase;
+  if (copy_idx >= 0 && copy_idx < 3 &&
+      (hid & 0xFFFFC00) == dialog(kDlgChecksum, 0)) {
+    const std::string* src = nullptr;
+    if (copy_idx == 0) src = &app.checksum_md5;
+    else if (copy_idx == 1) src = &app.checksum_sha1;
+    else src = &app.checksum_sha256;
+    if (src && !src->empty()) {
+      app.clipboard.copy_text(*src);
+      app.operation_status = "Checksum copied to clipboard";
+      app.operation_status_expires_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now().time_since_epoch())
+              .count() +
+          3000;
+      draw(app);
+    }
+    return true;
+  }
+  if (hid != dialog(kDlgChecksum, 0)) {
+    app.checksum_open = false;
+    ++app.checksum_generation;
+    app.checksum_hover_btn = -1;
+    draw(app);
+    return true;
+  }
+  return true;
+}
+
+static void connect_close(AppState& app) {
+  app.connect_open = false;
+  app.connect_pass.clear(); // session-only: never kept past the dialog
+  app.connect_hover_btn = -1;
+}
+
+bool click_connect(AppState& app, int x, int y, int button) {
+  if (!app.connect_open) return false;
+  if (button != 0x110) return true; // modal: swallow other buttons
+  using hui::Hit::dialog;
+  using hui::Hit::kDlgConnect;
+  using hui::Hit::kConnectFieldBase;
+  using hui::Hit::kConnectCancel;
+  using hui::Hit::kConnectOk;
+  const uint32_t hid = app.hit_main.query(x, y);
+  if (hid == dialog(kDlgConnect, kConnectCancel)) {
+    connect_close(app);
+    draw(app);
+    return true;
+  }
+  if (hid == dialog(kDlgConnect, kConnectOk)) {
+    connect_submit(app);
+    draw(app);
+    return true;
+  }
+  int ctrl = hui::Hit::dialog_ctrl(hid);
+  int field = ctrl - kConnectFieldBase;
+  if (field >= 0 && field < 5 &&
+      (hid & 0xFFFFC00) == dialog(kDlgConnect, 0)) {
+    app.connect_focus = field;
+    draw(app);
+    return true;
+  }
+  if (hid != dialog(kDlgConnect, 0)) {
+    connect_close(app);
+    draw(app);
+    return true;
+  }
+  return true;
+}
+
+bool click_remote_auth(AppState& app, int x, int y, int button) {
+  if (!app.remote_auth_open) return false;
+  if (button != 0x110) return true; // modal: swallow other buttons
+  using hui::Hit::dialog;
+  using hui::Hit::kDlgRemoteAuth;
+  using hui::Hit::kRemoteAuthFieldBase;
+  using hui::Hit::kRemoteAuthChoiceBase;
+  using hui::Hit::kRemoteAuthCancel;
+  using hui::Hit::kRemoteAuthOk;
+  const uint32_t hid = app.hit_main.query(x, y);
+  if (hid == dialog(kDlgRemoteAuth, kRemoteAuthCancel)) {
+    remote_auth_cancel(app);
+    draw(app);
+    return true;
+  }
+  if (hid == dialog(kDlgRemoteAuth, kRemoteAuthOk)) {
+    remote_auth_submit(app, -1);
+    draw(app);
+    return true;
+  }
+  int ctrl = hui::Hit::dialog_ctrl(hid);
+  int choice = ctrl - kRemoteAuthChoiceBase;
+  if (choice >= 0 &&
+      (hid & 0xFFFFC00) == dialog(kDlgRemoteAuth, 0)) {
+    remote_auth_submit(app, choice);
+    draw(app);
+    return true;
+  }
+  int field = ctrl - kRemoteAuthFieldBase;
+  if (field >= 0 && field < 2 &&
+      (hid & 0xFFFFC00) == dialog(kDlgRemoteAuth, 0)) {
+    app.remote_auth_focus = field;
+    draw(app);
+    return true;
+  }
+  if (hid != dialog(kDlgRemoteAuth, 0)) {
+    remote_auth_cancel(app);
     draw(app);
     return true;
   }

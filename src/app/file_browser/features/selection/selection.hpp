@@ -9,7 +9,6 @@ namespace eh::file_browser {
 // Toggle every visible entry's membership in the multi-selection.
 void invert_selection(AppState& app);
 
-// ── Select-by-pattern dialog (glob match against visible entries) ──
 
 void open_select_pattern(AppState& app);
 void close_select_pattern(AppState& app);

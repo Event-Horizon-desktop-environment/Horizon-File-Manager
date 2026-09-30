@@ -88,6 +88,9 @@ bool click_sidebar_hit(AppState& app, int x, int y, int button) {
       } else {
         mount_drive(app, sb_idx);
       }
+    } else if (loc.kind == SidebarLocation::Kind::Network) {
+      open_connect_dialog(app);
+      app.sidebar_folded_revealed = false;
     } else {
       navigate_to(app, loc.path);
       // Keep the flap open for favorites so reorder drags still work
@@ -100,6 +103,8 @@ bool click_sidebar_hit(AppState& app, int x, int y, int button) {
       int places_end = 0;
       while (places_end < static_cast<int>(app.sidebar_locations.size()) &&
              app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Favorite &&
+             app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Network &&
+             app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Remote &&
              app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Root &&
              app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Drive)
         ++places_end;
@@ -118,7 +123,6 @@ bool click_sidebar_hit(AppState& app, int x, int y, int button) {
 }
 
 bool click_content_hit(AppState& app, int x, int y, int button, uint64_t now_ns) {
-  // ── Content-area hit-test ──
   int idx = -1;
   if (app.cur_tab().view_mode == ViewMode::List) {
     idx = hit_test_list(app, x, y);
@@ -416,12 +420,42 @@ bool click_rsidebar(AppState& app, int x, int y, int button) {
 
     if (loc.kind == SidebarLocation::Kind::Favorite) {
       app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::RemoveFromFavorites, "Remove from Favorites"));
+    } else if (loc.kind == SidebarLocation::Kind::Recent) {
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Open, "Open"));
+      app.context_menu_items.push_back(AppState::menu_separator());
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::ClearRecent, "Clear Recent"));
+      app.context_menu_items.push_back(AppState::menu_separator());
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::OpenInNewTab, "Open in new tab"));
+      draw(app);
+      return true;
     } else if (loc.kind == SidebarLocation::Kind::Drive) {
-      if (loc.is_mounted && !loc.drive_id.empty()) {
+      // Native Drive rows ("drive:") have no mount step; un/mount menu
+      // items would be dead ends there.
+      bool native_drive = loc.drive_id.rfind("drive:", 0) == 0;
+      if (native_drive) {
+        app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Open, "Open"));
+        app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::OpenInNewTab, "Open in new tab"));
+      }
+      // Local disks: WinDirStat-style usage analyzer. Only when mounted —
+      // an unmounted row's path is a /dev node, not a scannable dir.
+      bool local_disk = !native_drive && loc.drive_id.rfind("gio:", 0) != 0 &&
+                        loc.is_mounted && !loc.path.empty() &&
+                        loc.path[0] == '/';
+      if (local_disk) {
+        app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::DiskUsage, "Disk Usage"));
+      }
+      if (loc.is_mounted && !loc.drive_id.empty() && !native_drive) {
         app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::UnmountDrive, "Unmount"));
       }
-      if (!loc.is_mounted && !loc.drive_id.empty()) {
+      if (!loc.is_mounted && !loc.drive_id.empty() && !native_drive) {
         app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::MountDrive, "Mount"));
+      }
+    } else if (loc.kind == SidebarLocation::Kind::Root) {
+      // The root filesystem ("File System", "/") is a separate row kind,
+      // not Kind::Drive — but it is always a local disk. (Open in new
+      // tab/window is appended by the shared trailer below.)
+      if (!loc.path.empty() && loc.path[0] == '/') {
+        app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::DiskUsage, "Disk Usage"));
       }
     } else if (loc.kind == SidebarLocation::Kind::Trash) {
       app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Open, "Open"));
@@ -431,9 +465,24 @@ bool click_rsidebar(AppState& app, int x, int y, int button) {
       app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::OpenInNewTab, "Open in new tab"));
     } else if (loc.kind == SidebarLocation::Kind::Computer) {
       // No context menu actions for computer view virtual path
+    } else if (loc.kind == SidebarLocation::Kind::Network) {
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::ConnectServer, "Connect to Server…"));
+    } else if (loc.kind == SidebarLocation::Kind::Remote) {
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::Open, "Open"));
+      app.context_menu_items.push_back(AppState::menu_separator());
+      app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::RemoveServer, "Remove Server"));
     }
 
-    if (!loc.path.empty() && loc.kind != SidebarLocation::Kind::Trash) {
+    if (!loc.path.empty() && loc.kind != SidebarLocation::Kind::Trash &&
+        loc.kind != SidebarLocation::Kind::Network) {
+      // Default startup folder toggle (anything startup_folder_ok
+      // accepts: local paths plus My Computer / Recent / Starred).
+      if (startup_folder_ok(loc.path)) {
+        if (app.startup_folder == loc.path)
+          app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::ClearStartupFolder, "Unset Default Folder"));
+        else
+          app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::SetStartupFolder, "Set as Default Folder"));
+      }
       if (!app.context_menu_items.empty())
         app.context_menu_items.push_back(AppState::menu_separator());
       app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::OpenInNewTab, "Open in new tab"));
@@ -444,6 +493,112 @@ bool click_rsidebar(AppState& app, int x, int y, int button) {
     return true;
   }
   return false;
+}
+
+bool click_rcrumb(AppState& app, int x, int y, int button) {
+  (void)button;
+  if (app.active_pane ? app.r_path_editing : app.path_editing) return false;
+  int bar_y = y;
+  if (app.split_view) {
+    int content_y = app.top_bar_height + app.tab_bar_height;
+    if (y >= content_y && y < content_y + app.top_bar_height)
+      bar_y = y - content_y;
+    else
+      return false;
+  }
+  if (bar_y < 0 || bar_y >= app.top_bar_height) return false;
+  auto& crumbs = app.active_pane ? app.r_breadcrumbs : app.breadcrumbs;
+  auto& hidden = app.active_pane ? app.r_breadcrumbs_hidden : app.breadcrumbs_hidden;
+  int hit = -1;
+  for (size_t i = 0; i < crumbs.size(); ++i) {
+    if (x >= crumbs[i].x && x < crumbs[i].x + crumbs[i].w) {
+      hit = static_cast<int>(i);
+      break;
+    }
+  }
+  if (hit < 0) return false;
+  const auto& seg = crumbs[static_cast<size_t>(hit)];
+  // Virtual / non-filesystem crumbs have no siblings to list.
+  if (seg.path.empty() || seg.path[0] != '/') return false;
+
+  app.context_menu_items = {};
+  if (seg.label == "…" && !hidden.empty()) {
+    // Collapsed prefix: offer the hidden leading segments.
+    for (auto& h : hidden)
+      app.context_menu_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::BreadcrumbNav, h.label, h.path));
+  } else {
+    // Sibling directories of the segment (Dolphin-style dropdown).
+    std::string parent = seg.path;
+    auto slash = parent.rfind('/');
+    if (slash == std::string::npos) return false;
+    parent = (slash == 0) ? "/" : parent.substr(0, slash);
+    std::error_code ec;
+    std::vector<std::pair<std::string, std::string>> dirs; // (label, path)
+    for (auto it = fs::directory_iterator(parent, ec);
+         !ec && it != fs::directory_iterator(); it.increment(ec)) {
+      std::error_code ec2;
+      if (!it->is_directory(ec2) || ec2) continue;
+      std::string p = it->path().string();
+      std::string name = it->path().filename().string();
+      if (name.empty()) continue;
+      if (!app.show_hidden && name[0] == '.') continue;
+      dirs.emplace_back(name, p);
+    }
+    if (ec || dirs.empty()) return false;
+    std::sort(dirs.begin(), dirs.end(),
+              [](const auto& a, const auto& b) { return a.first < b.first; });
+    static constexpr size_t kMaxCrumbItems = 40;
+    for (size_t i = 0; i < dirs.size() && i < kMaxCrumbItems; ++i) {
+      std::string label = dirs[i].first;
+      if (dirs[i].second == seg.path) label = "● " + label;
+      app.context_menu_items.push_back(AppState::menu_item(
+          AppState::ContextMenuAction::BreadcrumbNav, label, dirs[i].second));
+    }
+  }
+  if (app.context_menu_items.empty()) return false;
+  app.context_menu_open = true;
+  app.context_menu_x = x;
+  app.context_menu_y = y;
+  app.context_menu_hover = -1; app.context_menu_hover_prev = -1; app.context_menu_sub_hover = -1;
+  app.context_menu_file_idx = -10; // breadcrumb dropdown (no entry target)
+  app.context_menu_sidebar_idx = -1;
+  draw(app);
+  return true;
+}
+
+bool click_mcrumb(AppState& app, int x, int y, int button) {
+  (void)button;
+  // Middle-click a breadcrumb segment: open that folder in a new tab.
+  if (app.active_pane ? app.r_path_editing : app.path_editing) return false;
+  if (app.split_view && app.active_pane == 1) return false; // tabs belong to the left pane
+  int bar_y = y;
+  if (app.split_view) {
+    int content_y = app.top_bar_height + app.tab_bar_height;
+    if (y >= content_y && y < content_y + app.top_bar_height)
+      bar_y = y - content_y;
+    else
+      return false;
+  }
+  if (bar_y < 0 || bar_y >= app.top_bar_height) return false;
+  auto& crumbs = app.active_pane ? app.r_breadcrumbs : app.breadcrumbs;
+  const BreadcrumbSegment* seg = nullptr;
+  for (auto& s : crumbs) {
+    if (x >= s.x && x < s.x + s.w) {
+      seg = &s;
+      break;
+    }
+  }
+  if (!seg || seg->path.empty() || seg->path[0] != '/') return false;
+  std::error_code ec;
+  if (!fs::is_directory(seg->path, ec) || ec) return false;
+  int idx = static_cast<int>(app.tabs.size());
+  app.tabs.emplace_back();
+  app.tabs[idx].current_path = seg->path;
+  app.active_tab = idx;
+  navigate_to(app, seg->path);
+  draw(app);
+  return true;
 }
 
 bool click_rcontent(AppState& app, int x, int y, int button) {

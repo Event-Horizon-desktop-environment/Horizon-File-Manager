@@ -114,7 +114,6 @@ struct ArchiveState {
   int open_dest_btn_x = 0, open_dest_btn_y = 0;
   int open_dest_btn_w = 0, open_dest_btn_h = 0;
 
-  // ── Create mode ──
   bool create_mode = false;
   bool creating = false;
   std::vector<std::string> create_files;
@@ -126,7 +125,6 @@ struct ArchiveState {
   bool create_editing = false;     // keyboard focus on name field
   int create_cursor = 0;
 
-  // ── Embedded file browser panel ──
   FbPanel fb_panel;
   enum class FbAction {
     None,

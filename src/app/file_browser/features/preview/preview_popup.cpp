@@ -80,7 +80,6 @@ namespace xdg = eh::shell::desktop::xdg;
 
 namespace eh::file_browser {
 void preview_log(const char* fmt, ...);  // defined in draw.cpp
-// ── hover preview helper ─────────────────────────────────────────
 
 // Forward declarations for preview popup helpers (defined below)
 static void destroy_preview_popup(AppState& app);
@@ -95,8 +94,8 @@ static void hover_anchor_point(AppState& app, int vi, int& mx, int& my);
 // with nothing cropped — a cover-fit would otherwise clip wide frames.
 static void size_hover_popup_to_frame(int& popup_w, int& popup_h,
                                       int tw, int th) {
-  int max_w = 700;
-  int max_h = 800;
+  int max_w = 1920;
+  int max_h = 1080;
   const int footer = 26;     // filename/info band at the bottom
   double scale = std::min({static_cast<double>(max_w) / tw,
                           static_cast<double>(max_h - footer) / th, 1.0});
@@ -351,9 +350,9 @@ void check_hover_preview(AppState& app) {
           // it lands (see retry section below). Videos already use their own
           // async worker.
           if (entry.type == FileType::Image) {
-            app.preview_req_px = 500;
+            app.preview_req_px = 1920;
             app.preview_req_path = entry.path;
-            if (preview_dbg()) fprintf(stderr, "[preview] open req='%s' px=500\n", entry.path.c_str());
+            if (preview_dbg()) fprintf(stderr, "[preview] open req='%s' px=1920\n", entry.path.c_str());
             thumb_pool_enqueue(app, entry.path, app.preview_req_px);
           } else if (entry.type == FileType::Video) {
             video_worker().enqueue_preview(entry.path, kVideoPreviewFrameMaxPx);
@@ -362,11 +361,11 @@ void check_hover_preview(AppState& app) {
             app.preview_req_path = entry.path;
             thumb_pool_enqueue(app, entry.path, app.preview_req_px);
           } else if (entry.type == FileType::Document && is_pdf_extension(entry.path)) {
-            app.preview_req_px = 256;
+            app.preview_req_px = 1920;
             app.preview_req_path = entry.path;
             thumb_pool_enqueue(app, entry.path, app.preview_req_px);
           } else if (entry.type == FileType::Document && is_epub_extension(entry.path)) {
-            app.preview_req_px = 256;
+            app.preview_req_px = 1920;
             app.preview_req_path = entry.path;
             thumb_pool_enqueue(app, entry.path, app.preview_req_px);
           }
@@ -505,7 +504,6 @@ void check_hover_preview(AppState& app) {
   }
 }
 
-// ── Rich tooltip popup subsurface helpers ─────────────────────
 
 static void destroy_tooltip_popup(AppState& app) {
   app.tooltipPopupBuf.destroy();
@@ -745,7 +743,6 @@ void check_hover_tooltip(AppState& app) {
   app.pendingRedraw = true;
 }
 
-// ── Preview popup subsurface helpers ──────────────────────────
 
 static void destroy_preview_popup(AppState& app) {
   app.previewPopupBuf.destroy();
@@ -823,7 +820,6 @@ static void commit_preview_popup(AppState& app) {
   wl_display_flush(app.wl.display());
 }
 
-// ── Space/Enter preview ─────────────────────────────────────────
 
 void activate_space_preview(AppState& app) {
   int si = app.cur_tab().selected_idx;
@@ -842,33 +838,21 @@ void activate_space_preview(AppState& app) {
 
   reset_preview(app);
 
-  int thumb_px = 512;
+  int thumb_px = 1920;
   bool has_thumb = false;
-  if (entry.type == FileType::Image) {
-    if (is_svg_extension(entry.path))
-      app.preview_thumb = load_svg_thumbnail(entry.path, thumb_px);
-    else
-      app.preview_thumb = load_image_thumbnail(entry.path, thumb_px);
+  // Image and Document previews decode out-of-process (thumb_via_helper):
+  // poppler/librsvg/libjpeg/libwebp are not linked into horizon-files.
+  if (entry.type == FileType::Image || entry.type == FileType::Document) {
+    app.preview_thumb = thumb_via_helper(entry.path, thumb_px);
     has_thumb = app.preview_thumb != nullptr;
     if (!has_thumb)
-      preview_log("space_preview: IMAGE thumb FAIL path=%s", entry.path.c_str());
+      preview_log("space_preview: helper thumb FAIL path=%s",
+                  entry.path.c_str());
   } else if (entry.type == FileType::Video || entry.type == FileType::Audio) {
     app.preview_thumb = get_thumbnail(app, entry.path, thumb_px);
     has_thumb = app.preview_thumb != nullptr;
     if (!has_thumb)
       preview_log("space_preview: VIDEO/AUDIO thumb FAIL path=%s", entry.path.c_str());
-  } else if (entry.type == FileType::Document) {
-    if (is_pdf_extension(entry.path)) {
-      app.preview_thumb = load_pdf_thumbnail(entry.path, thumb_px);
-      has_thumb = app.preview_thumb != nullptr;
-      if (!has_thumb)
-        preview_log("space_preview: PDF thumb FAIL path=%s", entry.path.c_str());
-    } else if (is_epub_extension(entry.path)) {
-      app.preview_thumb = load_epub_thumbnail(entry.path, thumb_px);
-      has_thumb = app.preview_thumb != nullptr;
-      if (!has_thumb)
-        preview_log("space_preview: EPUB thumb FAIL path=%s", entry.path.c_str());
-    }
   }
 
   if (has_thumb)
@@ -890,8 +874,8 @@ void activate_space_preview(AppState& app) {
   int viewport_w = app.width;
   int viewport_h = app.height - app.status_bar_height;
 
-  int max_w = std::clamp(viewport_w - 80, 300, 1000);
-  int max_h = std::clamp(viewport_h - 80, 200, 900);
+  int max_w = std::clamp(viewport_w - 80, 300, 1920);
+  int max_h = std::clamp(viewport_h - 80, 200, 1080);
   int popup_w = max_w;
   int popup_h = max_h;
 
@@ -940,7 +924,6 @@ void toggle_space_preview(AppState& app) {
   }
 }
 
-// ── lazy thumbnail processing + async search polling ────────────
 
 bool process_pending_thumbnails(AppState& app) {
   // Drain completed async video thumbnails into the cache
@@ -962,6 +945,7 @@ bool process_pending_thumbnails(AppState& app) {
       entry.name = (slash != std::string::npos) ? filename.substr(slash + 1) : filename;
       entry.path = sr.path;
       entry.is_dir = sr.is_dir;
+      entry.tags_csv = sr.tags_csv;
       entry.size = 0;
       if (!sr.is_dir) {
         entry.mime_type = mime_by_ext(entry.name);

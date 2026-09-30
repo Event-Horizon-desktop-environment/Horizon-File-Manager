@@ -32,6 +32,18 @@ dep_jpeg       = dependency('libjpeg')
 dep_openssl    = dependency('libcrypto')
 dep_sdbus      = dependency('sdbus-c++')
 dep_fontconfig = dependency('fontconfig')
+dep_soup       = dependency('libsoup-3.0', required: false)
+dep_json       = dependency('json-glib-1.0', required: false)
+dep_secret     = dependency('libsecret-1', required: false)
+drive_deps = []
+if dep_soup.found() and dep_json.found()
+  cpp_args += ['-DEH_HAVE_DRIVE']
+  drive_deps = [dep_soup, dep_json]
+  if dep_secret.found()
+    cpp_args += ['-DEH_HAVE_KEYRING']
+    drive_deps += dep_secret
+  endif
+endif
 
 # Optional: poppler (PDF preview), libarchive, librsvg, io_uring, zlib (own compress engine)
 dep_poppler   = dependency('poppler-glib', required: false)
@@ -145,12 +157,11 @@ sources = files(
   'src/app/file_browser/features/compare/compare.cpp',
   'src/app/file_browser/features/desktop_icon_parser/desktop_icon_parser.cpp',
   'src/app/file_browser/features/drag/drag.cpp',
-  'src/app/file_browser/features/preview/epub_preview.cpp',
+  'src/app/file_browser/features/preview/preview_types.cpp',
   'src/app/file_browser/features/filetype/filetype.cpp',
   'src/app/file_browser/features/scan/scan.cpp',
   'src/app/file_browser/features/sidebar/sidebar.cpp',
   'src/app/file_browser/features/preview/preview_popup.cpp',
-  'src/app/file_browser/features/preview/image_preview.cpp',
   'src/app/file_browser/features/menu/menu.cpp',
   'src/app/file_browser/features/context_actions/context_actions.cpp',
   'src/app/file_browser/features/context_actions/context_actions_items.cpp',
@@ -159,13 +170,20 @@ sources = files(
   'src/app/file_browser/features/properties/properties.cpp',
   'src/app/file_browser/features/open_with/open_with.cpp',
   'src/app/file_browser/features/nav/nav.cpp',
-  'src/app/file_browser/features/preview/pdf_preview.cpp',
   'src/app/file_browser/features/progress/progress.cpp',
   'src/app/file_browser/features/query_match/query_match.cpp',
   'src/app/file_browser/features/dirprops/dirprops.cpp',
   'src/app/file_browser/features/recursive_search_worker/recursive_search_worker.cpp',
+  'src/tools/hgrep/search.cpp',
+  'src/tools/hgrep/ignore.cpp',
+  'src/app/file_browser/features/remote/remote.cpp',
+  'src/app/file_browser/features/drive/drive.cpp',
+  'src/app/file_browser/features/diskusage/scan.cpp',
+  'src/app/file_browser/features/diskusage/treemap.cpp',
+  'src/app/file_browser/features/diskusage/duplicates.cpp',
+  'src/app/file_browser/features/diskusage/window.cpp',
+  'src/app/file_browser/features/accounts/accounts.cpp',
   'src/app/file_browser/features/selection/selection.cpp',
-  'src/app/file_browser/features/preview/svg_preview.cpp',
   'src/app/file_browser/features/tab_history/tab_history.cpp',
   'src/app/file_browser/features/tags/tags.cpp',
   'src/app/file_browser/features/view_zoom/view_zoom.cpp',
@@ -289,6 +307,21 @@ endif
 # ── Archive viewer sub-directory ──────────────────────────────────────
 subdir('src/archive_viewer')
 
+# ── GOA sign-in helper (genuine GNOME add-dialog) ───────────────────────
+subdir('src/tools/goa-signin')
+
+# ── horizon-grep (parallel literal search core) ──────────────────────
+subdir('src/tools/hgrep')
+
+# ── horizon-thumbnailer (out-of-process thumbnail decoders) ──────────
+subdir('src/tools/horizon-thumbnailer')
+
+# ── horizon-du-scan (out-of-process disk-usage enumerator) ───────────
+subdir('src/tools/horizon-du-scan')
+
+# ── horizon-vfs (out-of-process GIO listing helper) ──────────────────
+subdir('src/tools/horizon-vfs')
+
 # ── Executable ────────────────────────────────────────────────────────
 executable(
   'horizon-files',
@@ -313,7 +346,7 @@ executable(
     dep_zlib,
     dep_lzma,
     eh_material_colors_dep,
-  ],
+  ] + drive_deps,
   install: true,
 )
 
@@ -430,7 +463,7 @@ bench_paint_exe = executable(
     dep_zlib,
     dep_lzma,
     eh_material_colors_dep,
-  ],
+  ] + drive_deps,
   install: false,
   build_by_default: false,
 )

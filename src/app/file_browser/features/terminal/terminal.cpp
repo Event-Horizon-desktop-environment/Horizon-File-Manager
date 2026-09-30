@@ -22,7 +22,6 @@ static std::string sh_quote(const std::string& s) {
   return q;
 }
 
-// ── terminal helpers ─────────────────────────────────────────────
 
 void scan_terminal_apps(AppState& app) {
   app.term_chooser_apps.clear();
@@ -48,7 +47,6 @@ void scan_terminal_apps(AppState& app) {
   }
 }
 
-// ── terminal workdir flags ───────────────────────────────────────
 //
 // Many terminals ignore the inherited working directory and always
 // start in $HOME, so an explicit flag is passed. This table records the

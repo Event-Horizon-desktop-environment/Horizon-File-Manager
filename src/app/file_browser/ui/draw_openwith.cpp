@@ -47,7 +47,6 @@ namespace fs = std::filesystem;
 
 namespace eh::file_browser {
 
-// ── Open With dialog ──────────────────────────────────────────────
 
 void draw_open_with(AppState& app, cairo_t* cr) {
   int w = app.width;

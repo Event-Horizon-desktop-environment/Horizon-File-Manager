@@ -50,10 +50,8 @@ public:
   void mount_async(const std::string& object_path, std::function<void(bool)> cb,
                    const std::string& options = "rw");
 
-  // Async unmount.
   void unmount_async(const std::string& object_path, std::function<void(bool)> cb);
 
-  // ── ISO loop mount (right-click > Mount ISO) ─────────────────────
   // Native UDisks2 flow: LoopSetup(fd, read-only) + Mount.
   // Returns mount point on success, empty on failure.
   std::string mount_iso(const std::string& iso_path);

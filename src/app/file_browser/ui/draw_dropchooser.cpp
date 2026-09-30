@@ -47,7 +47,6 @@ namespace fs = std::filesystem;
 
 namespace eh::file_browser {
 
-// ── Drop action chooser (Copy/Move prompt) ──────────────────────
 
 namespace {
 

@@ -1,6 +1,7 @@
 #include "app/file_browser/app.hpp"
 #include "app/file_browser/features/sidebar/sidebar.hpp"
 #include "app/file_browser/features/selection/selection.hpp"
+#include "app/file_browser/features/tab_history/tab_history.hpp"
 #include "app/file_browser/trace.hpp"
 
 #include <cairo/cairo.h>
@@ -25,7 +26,6 @@
 
 namespace eh::file_browser {
 
-// ── paint (extracted draw logic, no buffer/surface dependency) ────
 
 namespace {
 struct PaintPhase {
@@ -47,7 +47,6 @@ struct PaintPhase {
 };
 }  // namespace
 
-// ── content scroll-delta reuse (partial repaint) ─────────────────
 
 // Content column geometry (bench identity probe). The real geometry lives
 // in features/sidebar.cpp (sidebar_content_geometry) so paint(), the reuse
@@ -237,7 +236,6 @@ void advance_scroll_render(AppState& app) {
   }
 }
 
-// ── main draw ────────────────────────────────────────────────────
 
 void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
   std::vector<std::pair<const char*, double>> slow_phases;
@@ -300,7 +298,7 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
   app.thumb_pending_queue.clear();
 
   // Rebuilt below by every draw site: input reads these rects instead of
-  // re-deriving geometry (ui/hit_registry.hpp).
+  // re-deriving geometry (ui/hit.hpp).
   app.hit_main.clear();
 
   // Scrollbar hit rects are rebuilt by draw_scrollbar() during this frame
@@ -308,7 +306,6 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
 
   if (!reuse) advance_scroll_render(app);
 
-  // ── Operations panel slide animation ──
   {
     double target = app.ops_panel_open ? 1.0 : 0.0;
     double diff = target - app.ops_panel_slide;
@@ -717,6 +714,9 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
   if (app.compress_dialog_open) draw_compress_dialog(app, cr);
   if (app.term_chooser_open) draw_terminal_chooser(app, cr);
   if (app.open_with_open) draw_open_with(app, cr);
+  if (app.checksum_open) draw_checksum_dialog(app, cr);
+  if (app.connect_open) draw_connect_dialog(app, cr);
+  if (app.remote_auth_open) draw_remote_auth_dialog(app, cr);
 
   // Sort menu
   if (app.r_sort_menu_open || app.sort_menu_open) {
@@ -745,7 +745,6 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
   if (app.preview_active && !app.previewPopupSurface && !app.context_menu_open)
     draw_hover_preview(app, cr);
 
-  // Info panel (F11)
   { auto ph = phase("infopanel"); draw_info_panel(app, cr); }
 
   // Operations panel (right sidebar)
@@ -788,10 +787,12 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
   }
 }
 
-// ── main draw ────────────────────────────────────────────────────
 
 void draw(AppState& app) {
   if (!app.surface) return;
+  // Session autosave (throttled, change-detected): restoring tabs on the
+  // next launch costs one tiny toml write per 5 s at most.
+  session_save_maybe(app);
   auto draw_t0 = std::chrono::steady_clock::now();
   struct DrawTimer {
     std::chrono::steady_clock::time_point t0;
@@ -872,7 +873,6 @@ void draw(AppState& app) {
   if (app.wl.display()) wl_display_flush(app.wl.display());
 }
 
-// ── frame scheduling ─────────────────────────────────────────────
 
 void schedule_frame(AppState& app) {
   if (!app.surface) return;

@@ -2,6 +2,10 @@
 #include "../trace.hpp"
 #include "../app.hpp"
 #include "app/file_browser/features/view_zoom/view_zoom.hpp"
+#include "app/file_browser/features/tab_history/tab_history.hpp"
+#include "app/file_browser/features/tags/tags.hpp"
+#include "app/file_browser/features/accounts/accounts.hpp"
+#include "app/file_browser/features/drive/drive.hpp"
 
 #include <algorithm>
 #include <array>
@@ -39,18 +43,15 @@
 
 namespace eh::file_browser {
 
-// ── globals ──────────────────────────────────────────────────────
 
 static std::unique_ptr<AppState> g_app;
 
-// ── signal handling ──────────────────────────────────────────────
 
 namespace {
 volatile sig_atomic_t g_signal{0};
 void signal_handler(int) { g_signal = 1; }
 }
 
-// ── early blank frame ────────────────────────────────────────────
 
 // Paint a flat background into the first free buffer and map it. Used only
 // during cold start so the compositor shows the window before fonts/assets/
@@ -75,7 +76,6 @@ static void paint_blank_frame(AppState& app) {
   }
 }
 
-// ── Wayland listeners ────────────────────────────────────────────
 
 static void xdg_wm_base_ping(void*, xdg_wm_base* wm, uint32_t serial) {
   xdg_wm_base_pong(wm, serial);
@@ -168,7 +168,6 @@ static constexpr xdg_toplevel_listener kToplevelListener{
   .wm_capabilities = [](void*, xdg_toplevel*, wl_array*) {},
 };
 
-// ── buffer release hook ──────────────────────────────────────────
 
 static void on_buf_release_hook(void* user) {
   auto& app = *static_cast<AppState*>(user);
@@ -177,7 +176,6 @@ static void on_buf_release_hook(void* user) {
   draw(app);
 }
 
-// ── properties window forward declarations ───────────────────────
 static void destroy_props_window_impl(AppState& app);
 static void draw_props_window_impl(AppState& app);
 
@@ -190,7 +188,6 @@ static void on_props_buf_release_hook(void* user) {
   }
 }
 
-// ── properties window listeners ──────────────────────────────────
 
 static void props_xdg_surface_configure(void* data, xdg_surface* surface,
                                          uint32_t serial) {
@@ -238,7 +235,6 @@ static constexpr xdg_toplevel_listener kPropsToplevelListener{
   .wm_capabilities = [](void*, xdg_toplevel*, wl_array*) {},
 };
 
-// ── properties window create / destroy / draw ────────────────────
 
 static void destroy_props_window_impl(AppState& app) {
   if (!app.props_surface) return;
@@ -293,7 +289,6 @@ static void draw_props_window_impl(AppState& app) {
   app.pointerX = saved_px;
   app.pointerY = saved_py;
 
-  // ── Auto-fit: size once at open so the first tab shows fully (with
   // breathing room, keeping 24px of screen space top and bottom). After
   // that the height stays put across tab switches — resizing per tab is
   // visually jarring. Taller tabs scroll; scroll is also the fallback
@@ -431,8 +426,11 @@ void handle_props_click(AppState& app, int x, int y, int button) {
     mode |= (app.properties.current_mode & ~(S_IRWXU | S_IRWXG | S_IRWXO));
 
     if (app.properties.multi) {
-      for (const auto& t : app.properties.paths) chmod(t.c_str(), mode);
-    } else {
+      for (const auto& t : app.properties.paths) {
+        if (is_drive_uri(t)) continue; // Drive has no POSIX modes
+        chmod(t.c_str(), mode);
+      }
+    } else if (!is_drive_uri(app.properties.path)) {
       chmod(app.properties.path.c_str(), mode);
     }
     app.properties.current_mode = mode;
@@ -452,6 +450,7 @@ void handle_props_click(AppState& app, int x, int y, int button) {
     if (app.properties.multi) {
       // Flip only the exec bits on each item, preserving individual modes
       for (const auto& t : app.properties.paths) {
+        if (is_drive_uri(t)) continue;
         struct stat st;
         if (stat(t.c_str(), &st) != 0) continue;
         mode_t m = st.st_mode;
@@ -459,7 +458,7 @@ void handle_props_click(AppState& app, int x, int y, int button) {
         else m &= ~(S_IXUSR | S_IXGRP | S_IXOTH);
         chmod(t.c_str(), m);
       }
-    } else {
+    } else if (!is_drive_uri(app.properties.path)) {
       chmod(app.properties.path.c_str(), mode);
     }
     app.properties.current_mode = mode;
@@ -471,6 +470,7 @@ void handle_props_click(AppState& app, int x, int y, int button) {
   if (hit == 16) {
     app.properties.combo_open = -1;
     app.properties.tags_edit = false;
+    app.properties.comment_edit = false;
     app.properties.octal_edit = true;
     if (app.properties.octal_buf.empty()) {
       char ob[16];
@@ -486,6 +486,7 @@ void handle_props_click(AppState& app, int x, int y, int button) {
   if (hit == 17 && !app.properties.tags_edit) {
     app.properties.combo_open = -1;
     app.properties.octal_edit = false;
+    app.properties.comment_edit = false;
     app.properties.tags_edit = true;
     app.properties.tags_buf = app.properties.tags_value;
     app.props_pendingRedraw = true;
@@ -496,18 +497,51 @@ void handle_props_click(AppState& app, int x, int y, int button) {
     return;
   }
 
-  // Clicked elsewhere inside dialog — close any open combo / cancel edits
-  if (app.properties.combo_open >= 0 || app.properties.octal_edit ||
-      app.properties.tags_edit) {
+  // Rating stars — click star N sets N (clicking the current value clears).
+  if (hit == 18 && !app.properties.multi &&
+      !is_drive_uri(app.properties.path)) {
+    const auto& hr = app.properties.hit_rating_row;
+    int rel = static_cast<int>(app.props_pointerX - hr[0]);
+    int cell = static_cast<int>(hr[2]) / 5;
+    if (cell < 1) cell = 1;
+    int want = rel / cell + 1;
+    want = std::clamp(want, 1, 5);
+    if (want == app.properties.rating_value) want = 0;
+    if (write_xdg_rating(app.properties.path, want))
+      app.properties.rating_value = want;
+    else
+      app.properties.rating_value = read_xdg_rating(app.properties.path);
+    app.props_pendingRedraw = true;
+    return;
+  }
+
+  // Comment row — begin editing
+  if (hit == 19 && !app.properties.comment_edit && !app.properties.multi) {
     app.properties.combo_open = -1;
     app.properties.octal_edit = false;
     app.properties.tags_edit = false;
+    app.properties.comment_edit = true;
+    app.properties.comment_buf = app.properties.comment_value;
+    app.props_pendingRedraw = true;
+    return;
+  }
+  if (hit == 19) {
+    app.props_pendingRedraw = true;
+    return;
+  }
+
+  // Clicked elsewhere inside dialog — close any open combo / cancel edits
+  if (app.properties.combo_open >= 0 || app.properties.octal_edit ||
+      app.properties.tags_edit || app.properties.comment_edit) {
+    app.properties.combo_open = -1;
+    app.properties.octal_edit = false;
+    app.properties.tags_edit = false;
+    app.properties.comment_edit = false;
     app.props_pendingRedraw = true;
     return;
   }
 }
 
-// ── settings window forward declarations ─────────────────────────
 static void destroy_settings_window_impl(AppState& app);
 static void draw_settings_window_impl(AppState& app);
 
@@ -557,7 +591,6 @@ static constexpr xdg_toplevel_listener kSettingsToplevelListener{
   .wm_capabilities = [](void*, xdg_toplevel*, wl_array*) {},
 };
 
-// ── settings window create / destroy / draw ──────────────────────
 
 static void destroy_settings_window_impl(AppState& app) {
   if (!app.settings_surface) return;
@@ -725,7 +758,6 @@ static void settings_apply_slider(AppState& app, int hit, int x) {
   }
 }
 
-// ── Settings dialog layout (single source of truth) ──────────────
 //
 // Vertical model (offsets from card top):
 //   title bar 44 + 4 gap + tabs 36 + 12 gap  => content top at 96
@@ -743,8 +775,10 @@ static int settings_content_height(const AppState& app) {
   switch (app.settings_tab) {
     case 0: {
       // zoom @0..26, folders toggle @40..62, terminal box @76..106,
-      // independent-views toggle @118..140, memory readout @158..190
-      int h = 180;
+      // independent-views toggle @118..140, recent toggle @158..180,
+      // restore-session toggle @198..220,
+      // trash auto/two steppers @238..352, memory readout @358..390
+      int h = 380;
       if (app.settings_dropdown_open) {
         const int visible = std::min<int>(app.settings_term_opts.size(), 6);
         h = std::max(h, 108 + visible * 28);
@@ -755,6 +789,17 @@ static int settings_content_height(const AppState& app) {
       // seven opacity slider rows + matugen + color engine toggles;
       // last row top at content_top + 8*52 = 512 from card top
       return 438;
+    case 3:
+      // Accounts tab: Drive section (title, status, client-ID field, hint,
+      // secret field, note, connect, one row per account) + gap + Online
+      // Accounts (title, note, 2 provider rows) + optional WebDAV form.
+      return 366 +
+             40 * static_cast<int>(
+                      std::min(app.drive_accounts.size(), size_t{8})) +
+             (app.settings_davs_supported ? 160 : 0);
+    case 4:
+      // Tags tab: note + 7 registry rows + 2 swatch rows.
+      return 48 + 7 * 40 + 8 + 84;
     default:
       return 56;  // preview scale slider
   }
@@ -778,7 +823,7 @@ void update_settings_window_size(AppState& app) {
 }
 
 void handle_settings_click(AppState& app, int x, int y, int button) {
-  if (button != 0x110) return;
+  if (button != 0x110 && button != 0x111 && button != 0x112) return;
 
   int saved_w = app.width;
   int saved_h = app.height;
@@ -789,6 +834,37 @@ void handle_settings_click(AppState& app, int x, int y, int button) {
   app.height = saved_h;
 
   if (hit != -16) app.settings_zoom_editing = false;
+  if (hit != -29 && hit != -30) app.settings_nc_editing = 0;
+  if (hit != -32) app.settings_drive_editing = false;
+  if (hit != -37) app.settings_drive_secret_editing = false;
+
+  // Right/middle-click on a text field pastes (no context-menu surface
+  // exists on the settings window, so this is direct). Clipboard gunk
+  // like trailing newlines is stripped for these single-line fields.
+  if (button == 0x111 || button == 0x112) {
+    std::string* buf = nullptr;
+    if (hit == -32) buf = &app.settings_drive_client_id;
+    else if (hit == -37) buf = &app.settings_drive_client_secret;
+    else if (hit == -29) buf = &app.settings_nextcloud_server;
+    else if (hit == -30) buf = &app.settings_nextcloud_user;
+    if (buf) {
+      std::string clip = app.clipboard.read_selection_text(app.wl.display());
+      std::string clean;
+      for (unsigned char c : clip)
+        if (c > 0x20 && c != 0x7f) clean += static_cast<char>(c);
+      if (!clean.empty()) {
+        if (buf->size() < 256)
+          buf->append(clean.substr(0, 256 - buf->size()));
+        if (button == 0x111) {
+          app.operation_status = "Pasted";
+          app.operation_status_expires_ms = menu_expiry_3s();
+          app.pendingRedraw = true;
+        }
+        app.settings_pendingRedraw = true;
+      }
+    }
+    return;
+  }
 
   if (hit == -1) return;
   if (hit == -16) {
@@ -821,6 +897,177 @@ void handle_settings_click(AppState& app, int x, int y, int button) {
     app.settings_tab = 2;
     update_settings_window_size(app);
     app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -26) {
+    app.settings_tab = 3;
+    app.settings_accounts_stale = true;
+    update_settings_window_size(app);
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -48) {
+    app.settings_tab = 4;
+    update_settings_window_size(app);
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit <= -50 && hit >= -57) {
+    // Tag row select (recolor target).
+    size_t idx = static_cast<size_t>(-50 - hit);
+    auto tags = tag_registry(app.settings_tag_colors);
+    if (idx < tags.size() && idx < 8) {
+      app.settings_tag_selected = static_cast<int>(idx);
+      app.settings_pendingRedraw = true;
+    }
+    return;
+  }
+  if (hit <= -60 && hit >= -69) {
+    // Swatch: apply to the selected tag (live + staging + disk).
+    int idx = app.settings_tag_selected;
+    auto tags = tag_registry(app.settings_tag_colors);
+    int j = -60 - hit;
+    static const char* kSwatches[10] = {
+        "#e5484d", "#f76b15", "#f5a524", "#ffd60a", "#46a758",
+        "#12a594", "#3e8ef7", "#8e4ec6", "#e93d82", "#8b8d98"};
+    if (idx >= 0 && idx < static_cast<int>(tags.size()) && j >= 0 && j < 10) {
+      const std::string& name = tags[idx].name;
+      app.settings_tag_colors[name] = kSwatches[j];
+      app.tag_colors[name] = kSwatches[j];
+      save_file_browser_settings(app);
+      app.pendingRedraw = true;
+      app.settings_pendingRedraw = true;
+    }
+    return;
+  }
+  if (hit == -27 || hit == -31) {
+    // Google / Nextcloud GOA connect/disconnect toggle. The daemon is
+    // headless, so Connect launches the real GNOME sign-in UI instead of
+    // calling AddAccount (which would only strand a credential-less shell).
+    const char* provider = (hit == -27) ? "google" : "owncloud";
+    const GoaAccount* acc = nullptr;
+    for (auto& a : app.settings_accounts) {
+      if (a.provider_type == provider) {
+        acc = &a;
+        break;
+      }
+    }
+    if (acc) {
+      std::string path = acc->object_path;
+      goa_remove_account_async(app, path);
+      app.operation_status = "Removing account…";
+    } else if (goa_open_login_ui(provider)) {
+      app.operation_status = "Opening Google sign-in…";
+      app.settings_accounts_stale = true;
+    } else {
+      app.operation_status = "Sign-in unavailable (install horizon-goa-signin)";
+    }
+    app.operation_status_expires_ms = menu_expiry_3s();
+    app.pendingRedraw = true;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -28) {
+    // Manual Nextcloud over WebDAV (no GOA needed; password on demand).
+    std::string server = app.settings_nextcloud_server;
+    while (!server.empty() && (server.back() == ' ' || server.back() == '/'))
+      server.pop_back();
+    if (server.empty()) {
+      app.operation_status = "Enter a Nextcloud server";
+      app.operation_status_expires_ms = menu_expiry_3s();
+      app.pendingRedraw = true;
+      app.settings_pendingRedraw = true;
+      return;
+    }
+    // Persist the server/user now (never any password) so a later Apply
+    // cannot clobber what Connect just used.
+    app.nextcloud_server = server;
+    app.nextcloud_user = app.settings_nextcloud_user;
+    save_file_browser_settings(app);
+    std::string uri = "davs://";
+    if (!app.nextcloud_user.empty()) {
+      uri += app.nextcloud_user;
+      uri += '@';
+    }
+    uri += server + "/remote.php/dav/files/";
+    uri += app.nextcloud_user.empty() ? "" : app.nextcloud_user + "/";
+    destroy_settings_window_impl(app);
+    navigate_to(app, uri);
+    draw(app);
+    return;
+  }
+  if (hit == -29) {
+    app.settings_nc_editing = 1;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -30) {
+    app.settings_nc_editing = 2;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -32) {
+    app.settings_drive_editing = true;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -37) {
+    app.settings_drive_secret_editing = true;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -38) {
+    app.settings_drive_client_secret.clear();
+    app.settings_drive_secret_editing = false;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -34 || hit == -35 || hit == -36) {
+    // ✕ clear buttons on the settings text fields.
+    if (hit == -34) {
+      app.settings_drive_client_id.clear();
+      app.settings_drive_editing = false;
+    } else if (hit == -35) {
+      app.settings_nextcloud_server.clear();
+      if (app.settings_nc_editing == 1) app.settings_nc_editing = 0;
+    } else {
+      app.settings_nextcloud_user.clear();
+      if (app.settings_nc_editing == 2) app.settings_nc_editing = 0;
+    }
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -33) {
+    // Native Drive connect: browser + loopback OAuth (worker thread).
+    std::string id = app.settings_drive_client_id;
+    while (!id.empty() && (id.front() == ' ' || id.front() == '\t'))
+      id.erase(id.begin());
+    while (!id.empty() && (id.back() == ' ' || id.back() == '\t'))
+      id.pop_back();
+    if (id.empty()) {
+      app.operation_status = "Enter a Google OAuth client ID first";
+      app.operation_status_expires_ms = menu_expiry_3s();
+      app.pendingRedraw = true;
+      app.settings_pendingRedraw = true;
+      return;
+    }
+    app.drive_client_id = id;
+    app.drive_client_secret = app.settings_drive_client_secret; // memory only
+    save_file_browser_settings(app);
+    drive_connect_account(app, id, app.settings_drive_client_secret);
+    app.operation_status = "Opening browser for Google sign-in…";
+    app.operation_status_expires_ms = menu_expiry_3s();
+    app.pendingRedraw = true;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit <= -40 && hit >= -47) {
+    size_t idx = static_cast<size_t>(-40 - hit);
+    if (idx < app.drive_accounts.size()) {
+      std::string email = app.drive_accounts[idx].email;
+      drive_disconnect(app, email);
+      app.settings_pendingRedraw = true;
+    }
     return;
   }
   if (hit == -8) {
@@ -868,6 +1115,45 @@ void handle_settings_click(AppState& app, int x, int y, int button) {
     app.settings_pendingRedraw = true;
     return;
   }
+  if (hit == -25) {
+    app.settings_recent_enabled = !app.settings_recent_enabled;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -75) {
+    app.settings_restore_session = !app.settings_restore_session;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -70) {
+    app.settings_trash_auto_purge = !app.settings_trash_auto_purge;
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -71) {
+    app.settings_trash_max_days =
+        std::clamp(app.settings_trash_max_days - 1, 1, 365);
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -72) {
+    app.settings_trash_max_days =
+        std::clamp(app.settings_trash_max_days + 1, 1, 365);
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -73) {
+    app.settings_trash_max_mb =
+        std::clamp(app.settings_trash_max_mb - 100, 0, 100000);
+    app.settings_pendingRedraw = true;
+    return;
+  }
+  if (hit == -74) {
+    app.settings_trash_max_mb =
+        std::clamp(app.settings_trash_max_mb + 100, 0, 100000);
+    app.settings_pendingRedraw = true;
+    return;
+  }
   if (hit >= 0) {
     app.settings_default_term_idx = hit + app.settings_dropdown_scroll;
     app.settings_dropdown_open = false;
@@ -887,7 +1173,6 @@ void handle_settings_click(AppState& app, int x, int y, int button) {
   }
 }
 
-// ── connect globals ──────────────────────────────────────────────
 
 static bool connect_globals(AppState& app) {
   auto* display = app.wl.display();
@@ -941,7 +1226,6 @@ static bool connect_globals(AppState& app) {
   return true;
 }
 
-// ── create window ────────────────────────────────────────────────
 
 static bool create_window(AppState& app) {
   auto* display = app.wl.display();
@@ -1007,7 +1291,6 @@ static bool create_window(AppState& app) {
   return true;
 }
 
-// ── run standalone ───────────────────────────────────────────────
 
 [[nodiscard]] int run_standalone(const std::string& initial_path) {
   const auto startup_t0 = std::chrono::steady_clock::now();
@@ -1143,11 +1426,14 @@ static bool create_window(AppState& app) {
   // Initialize icon theme from shell config (e.g., MacTahoe-dark)
   {
     const auto& sc = eh::config::shell_config_snapshot_skip_matugen();
+    startup_mark("icons_snapshot");
     if (!sc.dock.iconTheme.empty()) {
       app.icons.set_icon_theme(sc.dock.iconTheme);
       app.last_icon_theme = sc.dock.iconTheme;
     }
+    startup_mark("icons_set_theme");
     app.icons.prewarm_search_dirs();
+    startup_mark("icons_prewarm");
   }
 
   startup_mark("icon_theme");
@@ -1156,6 +1442,8 @@ static bool create_window(AppState& app) {
   // Load file browser settings from config
   reload_settings_from_config(app);
   startup_mark("settings");
+  // Trash auto-maintenance (worker; no-op unless enabled in settings).
+  schedule_trash_maintain(app);
 
   // Start UDisks2 drive service (background D-Bus event loop) — needs
   // to be running before refresh_sidebar() so query_drives() succeeds.
@@ -1169,11 +1457,25 @@ static bool create_window(AppState& app) {
   // Initialize
   refresh_sidebar(app);
   startup_mark("sidebar");
+  // Drive backend: bound AppState for vfs glue, then silent re-login.
+  drive_bind_app(app);
+  // Silent Drive re-login for keyring-remembered accounts (worker thread;
+  // the sidebar refreshes itself if any land).
+  drive_restore_accounts(app);
   app.startup_loading = true;
   if (!app.initial_navigate_path.empty()) {
     navigate_to(app, app.initial_navigate_path);
-  } else {
-    reload_dir(app);
+  } else if (!app.restore_session || !session_restore(app)) {
+    // Default startup folder (right-click any folder to set): validated
+    // here so a deleted folder falls back to home instead of stranding
+    // the first tab on a dead path. CLI arg and session win over it.
+    bool startup_ok = false;
+    if (startup_folder_ok(app.startup_folder)) {
+      app.tabs[0].current_path = app.startup_folder;
+      navigate_to(app, app.startup_folder);
+      startup_ok = true;
+    }
+    if (!startup_ok) reload_dir(app);
   }
   startup_mark("reload_dir");
 
@@ -1193,6 +1495,17 @@ static bool create_window(AppState& app) {
             } else {
               app.settings_pendingRedraw = true;
             }
+          } else if (surface == app.du_surface) {
+            app.du_pointerX = static_cast<int>(x);
+            app.du_pointerY = static_cast<int>(y);
+            if (app.diskusage.slider_drag != 0) {
+              du_apply_slider_at(app, app.diskusage.slider_drag,
+                                 static_cast<int>(x));
+            }
+            if (app.diskusage.scroll_drag != 0) {
+              du_apply_scroll_drag(app, static_cast<int>(y));
+            }
+            app.du_pendingRedraw = true;
           } else if (surface == app.props_surface) {
             app.props_pointerX = static_cast<int>(x);
             app.props_pointerY = static_cast<int>(y);
@@ -1212,6 +1525,20 @@ static bool create_window(AppState& app) {
                                     static_cast<int>(button));
             } else {
               app.settings_slider_dragging = 0;
+            }
+            return;
+          }
+          if (app.focused_surface == app.du_surface) {
+            if (state == 1) {
+              handle_du_click(app, app.du_pointerX, app.du_pointerY,
+                              static_cast<int>(button));
+            } else if (app.diskusage.slider_drag != 0) {
+              // Slider drag release: persist the DU-local settings.
+              du_end_slider_drag(app);
+              app.du_pendingRedraw = true;
+            } else if (app.diskusage.scroll_drag != 0) {
+              app.diskusage.scroll_drag = 0;
+              app.du_pendingRedraw = true;
             }
             return;
           }
@@ -1236,6 +1563,10 @@ static bool create_window(AppState& app) {
     app.seat.set_pointer_axis_vertical_cb(
         [&app](double delta_px) {
           if (app.focused_surface == app.settings_surface) {
+            return;
+          }
+          if (app.focused_surface == app.du_surface) {
+            handle_du_axis(app, app.du_pointerX, app.du_pointerY, delta_px);
             return;
           }
           if (app.focused_surface == app.props_surface) {
@@ -1302,10 +1633,9 @@ static bool create_window(AppState& app) {
   app.dir_watch_fd = eh::file_browser::dir_watch_init();
   dir_watch_sync(app);
   while (app.running && g_signal == 0) {
-    // ── check for external file changes on every iteration ────────
     if (!app.confirm_open && !app.create_dialog_open &&
-        !app.settings_open && !app.open_with_open &&
-        !app.term_chooser_open && !app.context_menu_open) {
+        !app.settings_open && !app.open_with_open && !app.connect_open &&
+        !app.remote_auth_open && !app.term_chooser_open && !app.context_menu_open) {
       bool need_redraw = false;
 
       // Settings sync — stat the config files and reload when they change
@@ -1488,7 +1818,6 @@ static bool create_window(AppState& app) {
       if (need_redraw) draw(app);
     }
 
-    // ── deferred sidebar refresh (avoids synchronous D-Bus inside event dispatch) ──
     if (app.sidebar_needs_refresh) {
       app.sidebar_needs_refresh = false;
       refresh_sidebar(app);
@@ -1505,7 +1834,6 @@ static bool create_window(AppState& app) {
       app.pendingRedraw = true;
     }
 
-    // ── poll Wayland display fd ───────────────────────────────────
     // The inotify fd is polled alongside so a filesystem change (e.g. a
     // download finishing) wakes the loop immediately instead of on the next
     // 200 ms timeout — the listing then updates within a frame. It is left
@@ -1517,7 +1845,7 @@ static bool create_window(AppState& app) {
     unsigned nfds = 1;
     if (app.dir_watch_fd >= 0 && !app.confirm_open && !app.create_dialog_open &&
         !app.settings_open && !app.open_with_open && !app.term_chooser_open &&
-        !app.context_menu_open) {
+        !app.remote_auth_open && !app.connect_open && !app.context_menu_open) {
       pfds[1].fd = app.dir_watch_fd;
       pfds[1].events = POLLIN | POLLERR | POLLHUP;
       nfds = 2;
@@ -1585,7 +1913,6 @@ static bool create_window(AppState& app) {
       }
     } work_timer{work_t0, &app};
 
-    // ── process pending drive mount results ──────────────────────
     {
       std::string result_id;
       bool ok = false;
@@ -1607,7 +1934,6 @@ static bool create_window(AppState& app) {
       }
     }
 
-    // ── process pending drive unmount results ────────────────────
     {
       std::string result_id;
       bool ok = false;
@@ -1642,18 +1968,14 @@ static bool create_window(AppState& app) {
       }
     }
 
-    // ── process pending thumbnail decodes ─────────────────────────
     if (process_pending_thumbnails(app)) {
       app.pendingRedraw = true;
     }
 
-    // ── hover preview timer check ─────────────────────────────────
     check_hover_preview(app);
 
-    // ── rich tooltip timer check ──────────────────────────────────
     check_hover_tooltip(app);
 
-    // ── folder hover-to-open during drag ──────────────────────────
     if (app.drop_hover_open_start_ms > 0 && !app.drop_hover_open_path.empty()) {
       auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
           std::chrono::steady_clock::now().time_since_epoch()).count();
@@ -1666,7 +1988,6 @@ static bool create_window(AppState& app) {
       }
     }
 
-    // ── tab hover-to-switch during drag ───────────────────────────
     if (app.drop_target_tab_idx >= 0 && app.drop_tab_switch_start_ms > 0 &&
         app.tabs.size() > 1) {
       auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1683,7 +2004,6 @@ static bool create_window(AppState& app) {
       }
     }
 
-    // ── application-level key repeat ───────────────────────────────
     if (app.key_repeat_sym != 0) {
       auto now = std::chrono::steady_clock::now();
       uint64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count();
@@ -1900,6 +2220,11 @@ static bool create_window(AppState& app) {
       if (app.settings_surface) draw_settings_window(app);
     }
 
+    if (app.du_pendingRedraw) {
+      app.du_pendingRedraw = false;
+      if (app.du_surface) draw_diskusage_window(app);
+    }
+
     // Resize session wound down: dump the perf map once things settle.
     if (app.resize_session_active &&
         std::chrono::steady_clock::now() - app.resize_last_size_change >
@@ -1932,7 +2257,6 @@ static bool create_window(AppState& app) {
   return 0;
 }
 
-// ── run select directory ─────────────────────────────────────────
 
 [[nodiscard]] int run_select_directory(std::string& out_path) {
   g_app = std::make_unique<AppState>();
@@ -2047,6 +2371,17 @@ static bool create_window(AppState& app) {
             } else {
               app.settings_pendingRedraw = true;
             }
+          } else if (surface == app.du_surface) {
+            app.du_pointerX = static_cast<int>(x);
+            app.du_pointerY = static_cast<int>(y);
+            if (app.diskusage.slider_drag != 0) {
+              du_apply_slider_at(app, app.diskusage.slider_drag,
+                                 static_cast<int>(x));
+            }
+            if (app.diskusage.scroll_drag != 0) {
+              du_apply_scroll_drag(app, static_cast<int>(y));
+            }
+            app.du_pendingRedraw = true;
           } else if (surface == app.props_surface) {
             app.props_pointerX = static_cast<int>(x);
             app.props_pointerY = static_cast<int>(y);
@@ -2066,6 +2401,20 @@ static bool create_window(AppState& app) {
                                     static_cast<int>(button));
             } else {
               app.settings_slider_dragging = 0;
+            }
+            return;
+          }
+          if (app.focused_surface == app.du_surface) {
+            if (state == 1) {
+              handle_du_click(app, app.du_pointerX, app.du_pointerY,
+                              static_cast<int>(button));
+            } else if (app.diskusage.slider_drag != 0) {
+              // Slider drag release: persist the DU-local settings.
+              du_end_slider_drag(app);
+              app.du_pendingRedraw = true;
+            } else if (app.diskusage.scroll_drag != 0) {
+              app.diskusage.scroll_drag = 0;
+              app.du_pendingRedraw = true;
             }
             return;
           }
@@ -2090,6 +2439,10 @@ static bool create_window(AppState& app) {
     app.seat.set_pointer_axis_vertical_cb(
         [&app](double delta_px) {
           if (app.focused_surface == app.settings_surface) {
+            return;
+          }
+          if (app.focused_surface == app.du_surface) {
+            handle_du_axis(app, app.du_pointerX, app.du_pointerY, delta_px);
             return;
           }
           if (app.focused_surface == app.props_surface) {
@@ -2308,6 +2661,17 @@ static bool create_window(AppState& app) {
             } else {
               app.settings_pendingRedraw = true;
             }
+          } else if (surface == app.du_surface) {
+            app.du_pointerX = static_cast<int>(x);
+            app.du_pointerY = static_cast<int>(y);
+            if (app.diskusage.slider_drag != 0) {
+              du_apply_slider_at(app, app.diskusage.slider_drag,
+                                 static_cast<int>(x));
+            }
+            if (app.diskusage.scroll_drag != 0) {
+              du_apply_scroll_drag(app, static_cast<int>(y));
+            }
+            app.du_pendingRedraw = true;
           } else if (surface == app.props_surface) {
             app.props_pointerX = static_cast<int>(x);
             app.props_pointerY = static_cast<int>(y);
@@ -2327,6 +2691,20 @@ static bool create_window(AppState& app) {
                                     static_cast<int>(button));
             } else {
               app.settings_slider_dragging = 0;
+            }
+            return;
+          }
+          if (app.focused_surface == app.du_surface) {
+            if (state == 1) {
+              handle_du_click(app, app.du_pointerX, app.du_pointerY,
+                              static_cast<int>(button));
+            } else if (app.diskusage.slider_drag != 0) {
+              // Slider drag release: persist the DU-local settings.
+              du_end_slider_drag(app);
+              app.du_pendingRedraw = true;
+            } else if (app.diskusage.scroll_drag != 0) {
+              app.diskusage.scroll_drag = 0;
+              app.du_pendingRedraw = true;
             }
             return;
           }
@@ -2351,6 +2729,10 @@ static bool create_window(AppState& app) {
     app.seat.set_pointer_axis_vertical_cb(
         [&app](double delta_px) {
           if (app.focused_surface == app.settings_surface) {
+            return;
+          }
+          if (app.focused_surface == app.du_surface) {
+            handle_du_axis(app, app.du_pointerX, app.du_pointerY, delta_px);
             return;
           }
           if (app.focused_surface == app.props_surface) {

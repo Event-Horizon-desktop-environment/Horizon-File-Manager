@@ -50,7 +50,6 @@ namespace fs = std::filesystem;
 namespace eh::file_browser {
 
 
-// ── filter label arrays ──────────────────────────────────────────
 
 static constexpr const char* kFilterTypeLabels[] = {
   "All", "Folder", "Image", "Audio", "Video", "Text", "Document",
@@ -79,7 +78,6 @@ static constexpr const char* kFilterDateShort[] = {
 };
 
 
-// ── filter dropdown with expandable sections ─────────────────────
 
 static constexpr int kFilterHdrH = 28;
 static constexpr int kFilterItemH = 24;
@@ -189,7 +187,6 @@ void draw_filter_dropdown(AppState& app, cairo_t* cr, int section) {
   }
 }
 
-// ── hover preview popup ──────────────────────────────────────────
 
 static bool is_pdf_preview(const AppState& app) {
   return is_pdf_extension(app.preview_path);
@@ -397,7 +394,6 @@ void draw_hover_preview(AppState& app, cairo_t* cr) {
     }
   }
 
-  // ── Text preview: bespoke opaque card ────────────────────────────
   // Structured header/body/footer bands, every surface and glyph drawn at
   // full opacity — no translucency, no shadows. Renders completely and
   // returns so the generic translucent pipeline never touches text files.
@@ -689,7 +685,6 @@ void draw_hover_preview(AppState& app, cairo_t* cr) {
     return;
   }
 
-  // ── Media preview (image / video): opaque framed card ────────────
   // The image is the hero: it backs the whole body (cover-fit, darkened)
   // so letterboxing shows a dimmed extension of itself instead of empty
   // chrome; the full frame sits centered on top. Videos get a play badge.
@@ -776,10 +771,12 @@ void draw_hover_preview(AppState& app, cairo_t* cr) {
           const double cx = dx + dw / 2.0, cy = dy + dh / 2.0;
           const double r = std::min(dw, dh) * 0.16 + 10.0;
           cairo_set_source_rgba(cr, 0, 0, 0, 0.72);
+          cairo_new_path(cr); // standalone disc
           cairo_arc(cr, cx, cy, r, 0, 2 * M_PI);
           cairo_fill(cr);
           cairo_set_source_rgba(cr, 1, 1, 1, 0.95);
           cairo_set_line_width(cr, 1.5);
+          cairo_new_path(cr); // standalone disc
           cairo_arc(cr, cx, cy, r, 0, 2 * M_PI);
           cairo_stroke(cr);
           const double tr = r * 0.52;
@@ -869,7 +866,6 @@ void draw_hover_preview(AppState& app, cairo_t* cr) {
   bool fill_preview = ((type == FileType::Image || type == FileType::Video) &&
                        app.preview_thumb);
 
-  // ── Context‑menu style popup (solid fill + outline) ──
   double frame_alpha = app.preview_opacity_pct / 100.0;
   for (int s = 3; s >= 0; --s) {
     double a = 0.08 * (1.0 - s / 4.0) * frame_alpha;
@@ -1075,7 +1071,6 @@ void draw_hover_preview(AppState& app, cairo_t* cr) {
   cairo_show_text(cr, info.c_str());
 }
 
-// ── search results banner ────────────────────────────────────────
 
 void draw_search_banner(AppState& app, cairo_t* cr, int x, int y, int w) {
   constexpr int kBannerH = 28;
@@ -1133,7 +1128,6 @@ void draw_search_banner(AppState& app, cairo_t* cr, int x, int y, int w) {
   cairo_show_text(cr, clear_label);
 }
 
-// ── sort menu dropdown ───────────────────────────────────────────
 
 static const std::vector<SortMenuRow>& sort_menu_rows() {
   using K = SortMenuRow::Kind;
@@ -1384,7 +1378,6 @@ void draw_sort_menu(AppState& app, cairo_t* cr) {
   }
 }
 
-// ── column chooser popup ─────────────────────────────────────────
 
 void draw_columns_menu(AppState& app, cairo_t* cr) {
   auto& cm_x = app.active_pane ? app.r_columns_menu_x : app.columns_menu_x;

@@ -1,4 +1,4 @@
-// Split from compress_engine.cpp: one format per translation unit.
+// One format per translation unit (split out of the old single engine).
 #include "app/file_browser/features/compress/compress_engine.hpp"
 #include "app/file_browser/features/compress/engine/engine_internal.hpp"
 #include "app/file_browser/features/compress/compress.hpp"
@@ -360,7 +360,6 @@ bool engine_compress_7z(const EnginePlan& plan, const std::string& archive_path,
     return false;
   }
 
-  // ── Assemble: signature + packed blocks + end header ──
   std::ofstream out(archive_path, std::ios::binary | std::ios::trunc);
   if (!out) {
     cleanup_tmps();
@@ -416,7 +415,6 @@ bool engine_compress_7z(const EnginePlan& plan, const std::string& archive_path,
   cleanup_tmps();
   if (!write_ok || prog->cancel.load()) return false;
 
-  // ── End header ──
   // Folders exist only for blocks that produced a packed stream (7-Zip
   // drops empties-only groups entirely); substreams count stream files.
   std::string hdr;

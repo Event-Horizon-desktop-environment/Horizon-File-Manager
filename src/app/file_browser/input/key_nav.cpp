@@ -37,9 +37,7 @@ namespace fs = std::filesystem;
 namespace xdg = eh::shell::desktop::xdg;
 
 namespace eh::file_browser {
-// ── key region handlers, in original flow order ─────────────────────────────
 
-// ── grouped-header row helpers (moved from keyboard.cpp; consumed only by
 // key_navigate) ───────────────────────────────────────────────────────────
 static int headers_before(AppState const& app, int vi) {
   if (!app.cur_tab().group_by_type) return 0;
@@ -288,8 +286,13 @@ bool key_navigate(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
       auto targets = app.cur_tab().multi_selected.empty()
         ? std::vector<int>{}
         : app.cur_tab().multi_selected;
+      if (targets.size() == 1) {
+        // Exactly one item selected: plain rename dialog, not batch.
+        app.cur_tab().selected_idx = targets[0];
+        app.cur_tab().multi_selected.clear();
+        targets.clear();
+      }
       if (!targets.empty()) {
-        // Batch rename
         app.batch_rename_entries.clear();
         for (int vis_idx : targets) {
           if (vis_idx < 0 || vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size())) continue;
@@ -368,6 +371,10 @@ bool key_navigate(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
           if (!ok) return;
           std::error_code ec;
           for (const auto& p : paths) {
+            if (is_drive_uri(p)) {
+              vfs_remove_all(p);
+              continue;
+            }
             bool is_dir = fs::is_directory(p, ec);
             if (is_dir) fs::remove_all(p, ec); else fs::remove(p, ec);
           }
@@ -382,7 +389,15 @@ bool key_navigate(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
         app.confirm_item_count = static_cast<int>(del_paths.size());
         app.confirm_callback = [&app, paths = std::move(del_paths)](bool ok) {
           if (!ok) return;
-          for (const auto& p : paths) (void)xdg::trash_file(p);
+          for (const auto& p : paths) {
+            if (is_drive_uri(p)) {
+              std::string err;
+              drive_trash_path(p, err);
+              continue;
+            }
+            (void)xdg::trash_file(p);
+          }
+          schedule_trash_maintain(app);
           reload_dir(app);
         };
       }

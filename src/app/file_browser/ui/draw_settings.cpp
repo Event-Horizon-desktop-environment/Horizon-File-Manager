@@ -3,9 +3,11 @@
 #include "../app.hpp"
 #include "../trace.hpp"
 #include "../features/sidebar/sidebar.hpp"
+#include "../features/tags/tags.hpp"
 #include "../features/view_zoom/view_zoom.hpp"
 #include "app/file_browser/features/thumbnails/thumb_pool.hpp"
 #include "app/file_browser/features/dir_stats/dir_stats.hpp"
+#include "platform/common/bench/memory_usage.hpp"
 
 #include <cairo/cairo.h>
 #include <pango/pangocairo.h>
@@ -97,12 +99,18 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
 
   // Tabs
   int tab_y = cy + top_bar_h + 4;
-  int tab_w = (card_w - 2 * pad) / 3;
-  const char* tab_names[] = {"General", "Appearance", "Preview"};
+  int tab_w = (card_w - 2 * pad) / 5;
+  const char* tab_names[] = {"General", "Appearance", "Preview", "Accounts",
+                             "Tags"};
   hui::design::card_fill(cr, app, 0.45);
   draw_rounded_rect(cr, cx + pad, tab_y, card_w - 2 * pad, tab_h, 10);
   cairo_fill(cr);
-  for (int t = 0; t < 3; ++t) {
+  const int tab_ctrls[5] = {hui::Hit::kSettingsTabBase + 0,
+                            hui::Hit::kSettingsTabBase + 1,
+                            hui::Hit::kSettingsTabBase + 2,
+                            hui::Hit::kSettingsTabAccounts,
+                            hui::Hit::kSettingsTabTags};
+  for (int t = 0; t < 5; ++t) {
     int tx = cx + pad + t * tab_w;
     bool active = (t == app.settings_tab);
     bool tab_hov = (app.pointerX >= tx && app.pointerX < tx + tab_w &&
@@ -111,7 +119,7 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     app.settings_tab_hit[t][1] = tab_y;
     app.settings_tab_hit[t][2] = tab_w;
     app.settings_tab_hit[t][3] = tab_h;
-    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsTabBase + t),
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, tab_ctrls[t]),
                          tx, tab_y, tab_w, tab_h);
 
     if (active) {
@@ -144,15 +152,16 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     hui::design::bar(cr, app, sx, sy, sw, frac, 6);
     double kx = sx + sw * std::clamp(frac, 0.0, 1.0);
     cairo_set_source_rgba(cr, 1, 1, 1, 0.95);
+    cairo_new_path(cr); // standalone disc
     cairo_arc(cr, kx, sy + 3, 7, 0, 2 * M_PI);
     cairo_fill(cr);
     cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.4);
     cairo_set_line_width(cr, 1);
+    cairo_new_path(cr); // standalone disc
     cairo_arc(cr, kx, sy + 3, 7, 0, 2 * M_PI);
     cairo_stroke(cr);
   };
 
-  // ── General tab ──
   if (app.settings_tab == 0) {
     int ly = content_y;
     int left_x = cx + pad + 8;
@@ -255,7 +264,6 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     bool drop_hov = (app.pointerX >= drop_x && app.pointerX < drop_x + drop_w &&
                      app.pointerY >= drop_y && app.pointerY < drop_y + drop_h);
 
-    // Dropdown box
     hui::design::card_fill(cr, app, drop_hov ? 0.8 : 0.55);
     draw_rounded_rect(cr, drop_x, drop_y, drop_w, drop_h, 8);
     cairo_fill(cr);
@@ -346,6 +354,136 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
 
     ly += 40;
 
+    // Track recent files toggle
+    // (skipped while the terminal dropdown is open so the list stays on top)
+    if (!app.settings_dropdown_open) {
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_set_font_size(cr, 13);
+    cairo_move_to(cr, left_x, ly + 14);
+    cairo_show_text(cr, "Track recent files");
+
+    {
+      double rc_toggle_x = left_x + 220;
+      double rc_toggle_y = ly - 2;
+      double rc_toggle_w = 40;
+      double rc_toggle_h = 22;
+      app.settings_hit_recent_toggle[0] = rc_toggle_x;
+      app.settings_hit_recent_toggle[1] = rc_toggle_y;
+      app.settings_hit_recent_toggle[2] = rc_toggle_w;
+      app.settings_hit_recent_toggle[3] = rc_toggle_h;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsRecentToggle), static_cast<int>(app.settings_hit_recent_toggle[0]), static_cast<int>(app.settings_hit_recent_toggle[1]), static_cast<int>(app.settings_hit_recent_toggle[2]), static_cast<int>(app.settings_hit_recent_toggle[3]));
+
+      hui::design::draw_switch(cr, app, rc_toggle_x, rc_toggle_y, app.settings_recent_enabled);
+    }
+
+    ly += 40;
+
+    // Restore last open folders on startup (off by default)
+    // (skipped while the terminal dropdown is open so the list stays on top)
+    if (!app.settings_dropdown_open) {
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_set_font_size(cr, 13);
+    cairo_move_to(cr, left_x, ly + 14);
+    cairo_show_text(cr, "Restore last open folders");
+
+    {
+      double rs_toggle_x = left_x + 220;
+      double rs_toggle_y = ly - 2;
+      double rs_toggle_w = 40;
+      double rs_toggle_h = 22;
+      app.settings_hit_restore_toggle[0] = rs_toggle_x;
+      app.settings_hit_restore_toggle[1] = rs_toggle_y;
+      app.settings_hit_restore_toggle[2] = rs_toggle_w;
+      app.settings_hit_restore_toggle[3] = rs_toggle_h;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsRestoreSessionToggle), static_cast<int>(app.settings_hit_restore_toggle[0]), static_cast<int>(app.settings_hit_restore_toggle[1]), static_cast<int>(app.settings_hit_restore_toggle[2]), static_cast<int>(app.settings_hit_restore_toggle[3]));
+
+      hui::design::draw_switch(cr, app, rs_toggle_x, rs_toggle_y, app.settings_restore_session);
+    }
+
+    ly += 40;
+    }
+    } else {
+      // Dropdown open: keep spacing consistent (toggles hidden, memory below).
+      ly += 120;
+    }
+
+    // Trash auto-maintenance: toggle + age stepper + size-quota stepper.
+    // Undated trash entries are never auto-purged (see trash_maintain).
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_set_font_size(cr, 13);
+    cairo_move_to(cr, left_x, ly + 14);
+    cairo_show_text(cr, "Auto-delete trash items");
+    {
+      double tg_x = left_x + 220;
+      double tg_y = ly - 2;
+      app.settings_hit_trash_toggle[0] = tg_x;
+      app.settings_hit_trash_toggle[1] = tg_y;
+      app.settings_hit_trash_toggle[2] = 40;
+      app.settings_hit_trash_toggle[3] = 22;
+      app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsTrashAutoToggle), static_cast<int>(tg_x), static_cast<int>(tg_y), 40, 22);
+      hui::design::draw_switch(cr, app, tg_x, tg_y, app.settings_trash_auto_purge);
+    }
+    ly += 40;
+    auto trash_stepper = [&](const char* label, const char* value,
+                             double* down_r, double* up_r, int down_ctrl,
+                             int up_ctrl) {
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+      cairo_set_font_size(cr, 13);
+      cairo_move_to(cr, left_x, ly + 14);
+      cairo_show_text(cr, label);
+      double bx = left_x + 180;
+      double by = ly - 4;
+      double bs = 28;
+      bool dim = !app.settings_trash_auto_purge;
+      auto btn = [&](double x, const char* glyph, double* r, int ctrl) {
+        bool hov = !dim && (app.pointerX >= x && app.pointerX < x + bs &&
+                            app.pointerY >= by && app.pointerY < by + bs);
+        r[0] = x;
+        r[1] = by;
+        r[2] = bs;
+        r[3] = bs;
+        app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, ctrl),
+                             static_cast<int>(x), static_cast<int>(by),
+                             static_cast<int>(bs), static_cast<int>(bs));
+        hui::design::card_fill(cr, app, hov ? 0.8 : 0.55);
+        draw_rounded_rect(cr, x, by, bs, bs, 8);
+        cairo_fill(cr);
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
+                              dim ? 0.35 : 0.8);
+        cairo_set_font_size(cr, 18);
+        cairo_move_to(cr, x + 8, by + 20);
+        cairo_show_text(cr, glyph);
+      };
+      btn(bx, "-", down_r, down_ctrl);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
+                            dim ? 0.35 : 1.0);
+      cairo_set_font_size(cr, 13);
+      cairo_move_to(cr, bx + bs + 8, ly + 14);
+      cairo_show_text(cr, value);
+      btn(bx + 112, "+", up_r, up_ctrl);
+      ly += 40;
+    };
+    {
+      char days[32];
+      snprintf(days, sizeof(days), "%d days", app.settings_trash_max_days);
+      trash_stepper("Older than", days, app.settings_hit_trash_days_down,
+                    app.settings_hit_trash_days_up,
+                    hui::Hit::kSettingsTrashDaysDown,
+                    hui::Hit::kSettingsTrashDaysUp);
+    }
+    {
+      char quota[32];
+      if (app.settings_trash_max_mb <= 0)
+        snprintf(quota, sizeof(quota), "No limit");
+      else
+        snprintf(quota, sizeof(quota), "%d MB", app.settings_trash_max_mb);
+      trash_stepper("Trash larger than", quota,
+                    app.settings_hit_trash_mb_down,
+                    app.settings_hit_trash_mb_up,
+                    hui::Hit::kSettingsTrashMbDown,
+                    hui::Hit::kSettingsTrashMbUp);
+    }
+
     // Memory readout (refreshed twice a second; read-only diagnostics).
     {
       static auto last_sample = std::chrono::steady_clock::time_point{};
@@ -353,19 +491,12 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
       const auto now_tp = std::chrono::steady_clock::now();
       if (now_tp - last_sample > std::chrono::milliseconds(500)) {
         last_sample = now_tp;
-        long rss_kb = 0, anon_kb = 0, file_kb = 0, shmem_kb = 0;
-        std::ifstream smaps("/proc/self/smaps_rollup");
-        std::string ln;
-        while (std::getline(smaps, ln)) {
-          if (ln.compare(0, 5, "Rss: ") == 0) rss_kb = std::stol(ln.substr(5));
-          else if (ln.compare(0, 9, "RssAnon: ") == 0) anon_kb = std::stol(ln.substr(9));
-          else if (ln.compare(0, 9, "RssFile: ") == 0) file_kb = std::stol(ln.substr(9));
-          else if (ln.compare(0, 10, "RssShmem: ") == 0) shmem_kb = std::stol(ln.substr(10));
-        }
+        const auto pm = eh::shell::mem::read_proc_mem();
         auto mb = [](long kb) { return kb / 1024; };
         std::snprintf(mem_str, sizeof(mem_str),
-                      "Memory  RSS %ld MB (anon %ld, file %ld, shm %ld) · thumbs %ld · icons %ld",
-                      mb(rss_kb), mb(anon_kb), mb(file_kb), mb(shmem_kb),
+                      "Memory  RSS %ld MB (anon %ld, file %ld, shm %ld, mall %ld+%ld) · thumbs %ld · icons %ld",
+                      mb(pm.rss_kb), mb(pm.anon_kb), mb(pm.file_kb), mb(pm.shmem_kb),
+                      mb(pm.mall_uord_kb), mb(pm.mall_ford_kb),
                       mb(static_cast<long>(app.thumb_cache_bytes / 1024)),
                       mb(static_cast<long>(app.icons.cache_bytes() / 1024)));
       }
@@ -383,7 +514,6 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     }
   }
 
-  // ── Appearance tab ──
   if (app.settings_tab == 1) {
     int ly = content_y;
     int left_x = cx + pad + 8;
@@ -625,7 +755,6 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
                  app.pointerY >= btn_y && app.pointerY < btn_y + btn_h);
   hui::design::button(cr, app, app.settings_hit_ok[0], btn_y, btn_w, btn_h, "OK", true, ok_hov);
 
-  // ── Preview tab: hover preview scale (1.0-10.0, real time) ──
   if (app.settings_tab == 2) {
     const int ly = content_y;
     const int left_x = cx + pad + 8;
@@ -662,7 +791,292 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     cairo_move_to(cr, left_x, ly + 86);
     cairo_show_text(cr, "Applies in real time to image previews.");
   }
+  if (app.settings_tab == 3) {
+    if (app.settings_accounts_stale) refresh_settings_accounts(app);
+    int ly = content_y;
+    int left_x = cx + pad + 8;
+    const int btn_w = 104, btn_h = 30;
+    const int btn_x = cx + card_w - pad - btn_w;
+    const int content_right = cx + card_w - pad;
+
+    auto right_button = [&](int ctrl, const char* label, bool lit, int y) {
+      app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, ctrl),
+                           btn_x, y, btn_w, btn_h);
+      bool hov = (app.pointerX >= btn_x && app.pointerX < btn_x + btn_w &&
+                  app.pointerY >= y && app.pointerY < y + btn_h);
+      hui::design::button(cr, app, btn_x, y, btn_w, btn_h, label, lit, hov);
+    };
+    auto note = [&](const std::string& text) {
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                            app.text_secondary_b, 1.0);
+      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                             CAIRO_FONT_WEIGHT_NORMAL);
+      cairo_set_font_size(cr, 12);
+      cairo_move_to(cr, left_x, ly + 14);
+      int avail = content_right - left_x;
+      std::string t =
+          avail > 40 ? hui::design::clip_end(cr, text, avail) : text;
+      cairo_show_text(cr, t.c_str());
+      ly += 22;
+    };
+    auto section_title = [&](const char* text) {
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+      cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                             CAIRO_FONT_WEIGHT_NORMAL);
+      cairo_set_font_size(cr, 13);
+      cairo_move_to(cr, left_x, ly + 14);
+      cairo_show_text(cr, text);
+      ly += 26;
+    };
+    // Single-line text field with a label; full card width. When the
+    // buffer is non-empty a small ✕ clear button sits at the field's
+    // right end (clear_ctrl hit id, 0 = none).
+    auto text_field = [&](int ctrl, const char* label, const std::string& buf,
+                          bool focused, int clear_ctrl) {
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                            app.text_secondary_b, 1.0);
+      cairo_set_font_size(cr, 12);
+      cairo_move_to(cr, left_x, ly + 14);
+      cairo_show_text(cr, label);
+      int ix = left_x + 130;
+      int iy = ly - 4;
+      int iw = content_right - 8 - ix;
+      if (iw < 80) iw = 80;
+      int ih = 30;
+      hui::design::card_fill(cr, app, focused ? 0.8 : 0.55);
+      draw_rounded_rect(cr, ix, iy, iw, ih, 8);
+      cairo_fill(cr);
+      if (focused) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.5);
+        cairo_set_line_width(cr, 1.2);
+        draw_rounded_rect(cr, ix + 0.5, iy + 0.5, iw - 1, ih - 1, 7.5);
+        cairo_stroke(cr);
+      }
+      app.hit_settings.add(
+          hui::Hit::dialog(hui::Hit::kDlgSettings, ctrl), ix, iy, iw, ih);
+      bool show_clear = clear_ctrl != 0 && !buf.empty();
+      int clip_w = show_clear ? iw - 30 : iw - 4;
+      if (clip_w < 20) clip_w = 20;
+      cairo_save(cr);
+      draw_rounded_rect(cr, ix + 2, iy + 2, clip_w, ih - 4, 6);
+      cairo_clip(cr);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
+                            buf.empty() ? 0.30 : 0.95);
+      cairo_set_font_size(cr, 13);
+      cairo_move_to(cr, ix + 8, iy + ih / 2 + 5);
+      cairo_show_text(cr, buf.empty() ? "—" : buf.c_str());
+      if (focused && !buf.empty()) {
+        cairo_text_extents_t te;
+        cairo_text_extents(cr, buf.c_str(), &te);
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.6);
+        cairo_rectangle(cr, ix + 8 + te.width, iy + 6, 1, ih - 12);
+        cairo_fill(cr);
+      }
+      cairo_restore(cr);
+      if (show_clear) {
+        int cx0 = ix + iw - 15, cy0 = iy + ih / 2;
+        bool hov = (app.pointerX >= cx0 - 12 && app.pointerX < cx0 + 12 &&
+                    app.pointerY >= cy0 - 12 && app.pointerY < cy0 + 12);
+        app.hit_settings.add(
+            hui::Hit::dialog(hui::Hit::kDlgSettings, clear_ctrl),
+            cx0 - 12, cy0 - 12, 24, 24);
+        cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                              app.text_secondary_b, hov ? 1.0 : 0.7);
+        cairo_set_font_size(cr, 14);
+        cairo_text_extents_t te;
+        cairo_text_extents(cr, "×", &te);
+        cairo_move_to(cr, cx0 - te.width / 2 - te.x_bearing,
+                      cy0 + te.height / 2);
+        cairo_show_text(cr, "×");
+      }
+      ly += 44;
+    };
+
+    section_title("Google Drive");
+    {
+      std::string stat =
+          app.drive_accounts.empty()
+              ? "Not connected"
+              : std::to_string(app.drive_accounts.size()) +
+                    (app.drive_accounts.size() == 1 ? " account connected"
+                                                    : " accounts connected");
+      note(stat);
+    }
+    text_field(hui::Hit::kSettingsDriveClientId, "Client ID",
+               app.settings_drive_client_id, app.settings_drive_editing,
+               hui::Hit::kSettingsDriveClear);
+    text_field(hui::Hit::kSettingsDriveSecret, "Client secret",
+               app.settings_drive_client_secret,
+               app.settings_drive_secret_editing,
+               hui::Hit::kSettingsDriveSecretClear);
+    note("Optional — needed by some clients. Kept in your login keyring.");
+    note("Desktop OAuth client ID from Google Cloud Console (ID only).");
+    {
+      bool can = !app.settings_drive_client_id.empty();
+      right_button(hui::Hit::kSettingsDriveConnect, "Connect", can, ly);
+      ly += btn_h + 8;
+    }
+    {
+      size_t n = std::min(app.drive_accounts.size(), size_t{8});
+      for (size_t i = 0; i < n; ++i) {
+        const auto& da = app.drive_accounts[i];
+        int avail = btn_x - 8 - left_x;
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+        cairo_set_font_size(cr, 13);
+        cairo_move_to(cr, left_x, ly + 14);
+        std::string shown =
+            avail > 40 ? hui::design::clip_end(cr, da.email, avail) : da.email;
+        cairo_show_text(cr, shown.c_str());
+        right_button(hui::Hit::kSettingsDriveDiscBase + static_cast<int>(i),
+                     "Disconnect", true, ly - 6);
+        ly += 40;
+      }
+    }
+    ly += 12;
+
+    bool goa = app.settings_goa_available;
+    auto account_for = [&](const char* provider) -> const GoaAccount* {
+      for (auto& a : app.settings_accounts) {
+        if (a.provider_type == provider) return &a;
+      }
+      return nullptr;
+    };
+    section_title("Online Accounts");
+    note(goa ? "GNOME Online Accounts service: available"
+             : "Service unavailable (install gnome-online-accounts)");
+    struct ProvRow {
+      const char* title;
+      const char* provider;
+      int btn_ctrl;
+    };
+    const ProvRow rows[] = {{"Google", "google", hui::Hit::kSettingsAcctGoogle},
+                            {"Nextcloud", "owncloud",
+                             hui::Hit::kSettingsAcctOwncloud}};
+    for (int r = 0; r < 2; ++r) {
+      const GoaAccount* acc = goa ? account_for(rows[r].provider) : nullptr;
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+      cairo_set_font_size(cr, 13);
+      cairo_move_to(cr, left_x, ly + 14);
+      cairo_show_text(cr, rows[r].title);
+      std::string sub =
+          acc ? acc->identity +
+                    (acc->attention_needed ? " — attention needed" : "")
+              : "Not connected";
+      int sub_x = left_x + 130;
+      int avail = btn_x - 8 - sub_x;
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                            app.text_secondary_b, 1.0);
+      cairo_set_font_size(cr, 12);
+      cairo_move_to(cr, sub_x, ly + 14);
+      std::string shown =
+          avail > 40 ? hui::design::clip_end(cr, sub, avail) : sub;
+      cairo_show_text(cr, shown.c_str());
+      if (goa) {
+        bool connected = acc != nullptr;
+        right_button(rows[r].btn_ctrl, connected ? "Disconnect" : "Connect",
+                     connected, ly - 6);
+      }
+      ly += 40;
+    }
+
+    // The password is asked at connect time and never stored.
+    if (app.settings_davs_supported) {
+      ly += 6;
+      section_title("Nextcloud server (WebDAV)");
+      text_field(hui::Hit::kSettingsAcctNcServer, "Server",
+                 app.settings_nextcloud_server, app.settings_nc_editing == 1,
+                 hui::Hit::kSettingsNcServerClear);
+      text_field(hui::Hit::kSettingsAcctNcUser, "User",
+                 app.settings_nextcloud_user, app.settings_nc_editing == 2,
+                 hui::Hit::kSettingsNcUserClear);
+      right_button(hui::Hit::kSettingsAcctNcConnect, "Connect", true, ly);
+      ly += btn_h + 8;
+    }
+  }
+  if (app.settings_tab == 4) {
+    int ly = content_y;
+    int left_x = cx + pad + 8;
+    auto tags = tag_registry(app.settings_tag_colors);
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                          app.text_secondary_b, 1.0);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                           CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 12);
+    cairo_move_to(cr, left_x, ly + 14);
+    cairo_show_text(cr, "Pick a tag, then a color. Files wearing it show");
+    cairo_move_to(cr, left_x, ly + 30);
+    cairo_show_text(cr, "a matching badge on their icon.");
+    ly += 48;
+    size_t n = std::min(tags.size(), size_t{8});
+    for (size_t i = 0; i < n; ++i) {
+      const auto& t = tags[i];
+      bool sel = (app.settings_tag_selected == static_cast<int>(i));
+      int rh = 36;
+      if (sel) {
+        hui::design::card_fill(cr, app, 0.8);
+        draw_rounded_rect(cr, left_x - 4, ly - 2,
+                          card_w - 2 * pad, rh, 8);
+        cairo_fill(cr);
+      }
+      app.hit_settings.add(
+          hui::Hit::dialog(hui::Hit::kDlgSettings,
+                           hui::Hit::kSettingsTagRowBase +
+                               static_cast<int>(i)),
+          left_x - 4, ly - 2, card_w - 2 * pad, rh);
+      // Color dot.
+      cairo_set_source_rgba(cr, t.r, t.g, t.b, 1.0);
+      cairo_new_path(cr); // standalone disc
+      cairo_arc(cr, left_x + 12, ly + rh / 2 - 2, 8, 0, 2 * M_PI);
+      cairo_fill(cr);
+      cairo_set_source_rgba(cr, 1, 1, 1, 0.55);
+      cairo_set_line_width(cr, 1.0);
+      cairo_new_path(cr); // standalone disc
+      cairo_arc(cr, left_x + 12, ly + rh / 2 - 2, 8, 0, 2 * M_PI);
+      cairo_stroke(cr);
+      // Name.
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+      cairo_set_font_size(cr, 13);
+      cairo_move_to(cr, left_x + 30, ly + 14);
+      cairo_show_text(cr, t.name.c_str());
+      // Current hex.
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                            app.text_secondary_b, 1.0);
+      cairo_set_font_size(cr, 12);
+      cairo_move_to(cr, left_x + 150, ly + 14);
+      cairo_show_text(cr, hex_color(t.r, t.g, t.b).c_str());
+      ly += 40;
+    }
+    ly += 8;
+    // Swatch palette (two rows of five) for the selected tag.
+    static const char* kSwatches[10] = {
+        "#e5484d", "#f76b15", "#f5a524", "#ffd60a", "#46a758",
+        "#12a594", "#3e8ef7", "#8e4ec6", "#e93d82", "#8b8d98"};
+    for (int j = 0; j < 10; ++j) {
+      int col = j % 5, row = j / 5;
+      int sx = left_x + col * 44;
+      int sy = ly + row * 40;
+      app.hit_settings.add(
+          hui::Hit::dialog(hui::Hit::kDlgSettings,
+                           hui::Hit::kSettingsTagSwatchBase + j),
+          sx, sy, 36, 32);
+      double r = 0.5, g = 0.5, b = 0.5;
+      parse_hex_color(kSwatches[j], r, g, b);
+      bool hov = (app.pointerX >= sx && app.pointerX < sx + 36 &&
+                  app.pointerY >= sy && app.pointerY < sy + 32);
+      cairo_set_source_rgba(cr, r, g, b, 1.0);
+      draw_rounded_rect(cr, sx + 4, sy + 4, 28, 24, 6);
+      cairo_fill(cr);
+      if (hov) {
+        cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.5);
+        cairo_set_line_width(cr, 1.2);
+        draw_rounded_rect(cr, sx + 4, sy + 4, 28, 24, 6);
+        cairo_stroke(cr);
+      }
+    }
+    ly += 84;
+  }
 }
 
 } // namespace eh::file_browser
+
 

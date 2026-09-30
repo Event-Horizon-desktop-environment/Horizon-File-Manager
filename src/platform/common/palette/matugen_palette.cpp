@@ -62,7 +62,6 @@ void refresh_wallpaper_derived_palette(eh::config::ShellAppearance& appearance,
     return;
   }
 
-  // ── Native color engine (preferred when available) ────────────────────────
   if (appearance.horizonColorsNative) {
     const bool is_dark = (appearance.matugenMode != "light");
     const auto variant = eh::color::scheme_variant_from_name(appearance.matugenScheme);
@@ -112,7 +111,6 @@ void refresh_wallpaper_derived_palette(eh::config::ShellAppearance& appearance,
     // Native engine failed — fall through to matugen CLI
   }
 
-  // ── Legacy matugen CLI fallback ───────────────────────────────────────────
 
   std::string cmd = "matugen image \"" + normalized_wallpaper_image_path +
                     "\" --mode " + appearance.matugenMode +
@@ -163,7 +161,6 @@ void refresh_wallpaper_derived_palette(eh::config::ShellAppearance& appearance,
   appearance.matugenPaletteOk = true;
 }
 
-// ── Read Event Horizon Shell color engine output ────────────────────────────
 // Parses ~/.config/event-horizon/horizon-files-matugen.conf written by the
 // shell's native color engine template system.  Returns true when colors
 // were successfully loaded.

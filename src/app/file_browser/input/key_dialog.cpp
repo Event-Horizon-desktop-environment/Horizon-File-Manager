@@ -38,7 +38,6 @@ namespace fs = std::filesystem;
 namespace xdg = eh::shell::desktop::xdg;
 
 namespace eh::file_browser {
-// ── UTF-8 cursor helpers (byte offset ↔ codepoint boundary) ────────────────
 // Buffers are UTF-8 std::string with cursor stored as a byte offset. Moving or
 // erasing by a single byte splits multi-byte codepoints and leaves invalid
 // UTF-8 behind (renders as a tofu box). These step by whole codepoints.
@@ -102,7 +101,6 @@ static void clamp_cursor(const std::string& s, int& cursor) {
          (static_cast<unsigned char>(s[static_cast<std::size_t>(cursor)]) & 0xC0) == 0x80)
     --cursor;
 }
-// ── key region handlers, in original flow order ─────────────────────────────
 
 bool key_properties(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
                     const char* utf8, int utf8_len) {
@@ -122,8 +120,11 @@ bool key_properties(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt
         if (end && *end == '\0' && !pr.octal_buf.empty() && parsed <= 07777ul) {
           const mode_t mode = static_cast<mode_t>(parsed);
           if (pr.multi) {
-            for (const auto& t : pr.paths) ::chmod(t.c_str(), mode);
-          } else {
+            for (const auto& t : pr.paths) {
+              if (is_drive_uri(t)) continue; // Drive has no POSIX modes
+              ::chmod(t.c_str(), mode);
+            }
+          } else if (!is_drive_uri(pr.path)) {
             ::chmod(pr.path.c_str(), mode);
           }
           pr.current_mode = mode;
@@ -170,8 +171,10 @@ bool key_properties(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt
         return true;
       }
       if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
-        write_xdg_tags(pr.path, pr.tags_buf);
-        pr.tags_value = read_xdg_tags(pr.path);
+        if (!is_drive_uri(pr.path)) {
+          write_xdg_tags(pr.path, pr.tags_buf);
+          pr.tags_value = read_xdg_tags(pr.path);
+        }
         pr.tags_edit = false;
         app.props_pendingRedraw = true;
         draw(app);
@@ -191,6 +194,44 @@ bool key_properties(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt
         const unsigned char c0 = static_cast<unsigned char>(utf8[0]);
         if (c0 >= 0x20 && c0 != 0x7f && pr.tags_buf.size() + static_cast<size_t>(utf8_len) < 1024) {
           pr.tags_buf.append(utf8, static_cast<size_t>(utf8_len));
+          app.props_pendingRedraw = true;
+          draw(app);
+        }
+        return true;
+      }
+      return true; // swallow everything else while editing
+    }
+    if (pr.comment_edit) {
+      if (sym == XKB_KEY_Escape) {
+        pr.comment_edit = false;
+        app.props_pendingRedraw = true;
+        draw(app);
+        return true;
+      }
+      if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+        if (!is_drive_uri(pr.path)) {
+          write_xdg_comment(pr.path, pr.comment_buf);
+          pr.comment_value = read_xdg_comment(pr.path);
+        }
+        pr.comment_edit = false;
+        app.props_pendingRedraw = true;
+        draw(app);
+        return true;
+      }
+      if (sym == XKB_KEY_BackSpace) {
+        // UTF-8 aware: pop continuation bytes then the lead byte
+        while (!pr.comment_buf.empty() &&
+               (static_cast<unsigned char>(pr.comment_buf.back()) & 0xC0) == 0x80)
+          pr.comment_buf.pop_back();
+        if (!pr.comment_buf.empty()) pr.comment_buf.pop_back();
+        app.props_pendingRedraw = true;
+        draw(app);
+        return true;
+      }
+      if (utf8_len > 0 && utf8_len <= 4) {
+        const unsigned char c0 = static_cast<unsigned char>(utf8[0]);
+        if (c0 >= 0x20 && c0 != 0x7f && pr.comment_buf.size() + static_cast<size_t>(utf8_len) < 1024) {
+          pr.comment_buf.append(utf8, static_cast<size_t>(utf8_len));
           app.props_pendingRedraw = true;
           draw(app);
         }
@@ -235,6 +276,142 @@ bool key_confirm(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
 bool key_settings(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
                     const char* utf8, int utf8_len) {
   if (app.settings_open && app.focused_surface == app.settings_surface) {
+    if (app.settings_drive_editing) {
+      // Client-ID field: ASCII printable, no spaces (Google IDs are
+      // dot/dash alphanumerics). Mirrors the Nextcloud editing block.
+      std::string* buf = &app.settings_drive_client_id;
+      if (ctrl && (sym == XKB_KEY_V || sym == XKB_KEY_v)) {
+        std::string clip = app.clipboard.read_selection_text(app.wl.display());
+        std::string clean;
+        for (unsigned char c : clip)
+          if (c > 0x20 && c != 0x7f) clean += static_cast<char>(c);
+        if (!clean.empty() && buf->size() < 256) {
+          buf->append(clean.substr(0, 256 - buf->size()));
+          app.settings_pendingRedraw = true;
+        }
+        return true;
+      }
+      if (ctrl && (sym == XKB_KEY_C || sym == XKB_KEY_c)) {
+        if (!buf->empty()) app.clipboard.copy_text(*buf);
+        return true;
+      }
+      if (sym == XKB_KEY_Escape) {
+        app.settings_drive_editing = false;
+        app.settings_pendingRedraw = true;
+        return true;
+      }
+      if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+        app.settings_drive_editing = false;
+        app.settings_pendingRedraw = true;
+        return true;
+      }
+      if (sym == XKB_KEY_BackSpace) {
+        if (!buf->empty()) buf->pop_back();
+        app.settings_pendingRedraw = true;
+        return true;
+      }
+      if (utf8_len == 1) {
+        const unsigned char c0 = static_cast<unsigned char>(utf8[0]);
+        if (c0 > 0x20 && c0 < 0x7f &&
+            buf->size() < 256) {
+          buf->push_back(utf8[0]);
+          app.settings_pendingRedraw = true;
+        }
+        return true;
+      }
+      return true;
+    }
+    if (app.settings_drive_secret_editing) {
+      // Client-secret field: same single-line ASCII rules, session-only.
+      std::string* buf = &app.settings_drive_client_secret;
+      if (ctrl && (sym == XKB_KEY_V || sym == XKB_KEY_v)) {
+        std::string clip = app.clipboard.read_selection_text(app.wl.display());
+        std::string clean;
+        for (unsigned char c : clip)
+          if (c > 0x20 && c != 0x7f) clean += static_cast<char>(c);
+        if (!clean.empty() && buf->size() < 256) {
+          buf->append(clean.substr(0, 256 - buf->size()));
+          app.settings_pendingRedraw = true;
+        }
+        return true;
+      }
+      if (ctrl && (sym == XKB_KEY_C || sym == XKB_KEY_c)) {
+        if (!buf->empty()) app.clipboard.copy_text(*buf);
+        return true;
+      }
+      if (sym == XKB_KEY_Escape) {
+        app.settings_drive_secret_editing = false;
+        app.settings_pendingRedraw = true;
+        return true;
+      }
+      if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+        app.settings_drive_secret_editing = false;
+        app.settings_pendingRedraw = true;
+        return true;
+      }
+      if (sym == XKB_KEY_BackSpace) {
+        if (!buf->empty()) buf->pop_back();
+        app.settings_pendingRedraw = true;
+        return true;
+      }
+      if (utf8_len == 1) {
+        const unsigned char c0 = static_cast<unsigned char>(utf8[0]);
+        if (c0 > 0x20 && c0 < 0x7f &&
+            buf->size() < 256) {
+          buf->push_back(utf8[0]);
+          app.settings_pendingRedraw = true;
+        }
+        return true;
+      }
+      return true;
+    }
+    if (app.settings_nc_editing == 1 || app.settings_nc_editing == 2) {
+      std::string* buf = app.settings_nc_editing == 1
+                             ? &app.settings_nextcloud_server
+                             : &app.settings_nextcloud_user;
+      if (ctrl && (sym == XKB_KEY_V || sym == XKB_KEY_v)) {
+        std::string clip = app.clipboard.read_selection_text(app.wl.display());
+        std::string clean;
+        for (unsigned char c : clip)
+          if (c > 0x20 && c != 0x7f) clean += static_cast<char>(c);
+        if (!clean.empty() && buf->size() < 256) {
+          buf->append(clean.substr(0, 256 - buf->size()));
+          app.settings_pendingRedraw = true;
+        }
+        return true;
+      }
+      if (ctrl && (sym == XKB_KEY_C || sym == XKB_KEY_c)) {
+        if (!buf->empty()) app.clipboard.copy_text(*buf);
+        return true;
+      }
+      if (sym == XKB_KEY_Escape) {
+        app.settings_nc_editing = 0;
+        app.settings_pendingRedraw = true;
+        return true;
+      }
+      if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+        app.settings_nc_editing = 0;
+        app.settings_pendingRedraw = true;
+        return true;
+      }
+      if (sym == XKB_KEY_BackSpace) {
+        while (!buf->empty() &&
+               (static_cast<unsigned char>(buf->back()) & 0xC0) == 0x80)
+          buf->pop_back();
+        if (!buf->empty()) buf->pop_back();
+        app.settings_pendingRedraw = true;
+        return true;
+      }
+      if (utf8_len > 0 && utf8_len <= 4) {
+        const unsigned char c0 = static_cast<unsigned char>(utf8[0]);
+        if (c0 >= 0x20 && c0 != 0x7f && buf->size() + static_cast<size_t>(utf8_len) < 256) {
+          buf->append(utf8, static_cast<size_t>(utf8_len));
+          app.settings_pendingRedraw = true;
+        }
+        return true;
+      }
+      return true;
+    }
     if (app.settings_zoom_editing) {
       if (sym == XKB_KEY_Escape) {
         app.settings_zoom_editing = false;
@@ -330,8 +507,55 @@ bool key_create(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
   if (app.create_dialog_open) {
     if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
       if (!app.create_buf.empty()) {
-        fs::path dir(app.cur_tab().current_path);
-        fs::path new_path = dir / app.create_buf;
+        if (is_drive_uri(app.cur_tab().current_path)) {
+          // Drive create: mkdir / empty file over the Drive API.
+          std::string dir = drive_normalize(app.cur_tab().current_path);
+          while (dir.size() > 1 && dir.back() == '/') dir.pop_back();
+          gchar* esc = g_uri_escape_string(app.create_buf.c_str(), "", TRUE);
+          std::string target = dir + "/" + (esc ? esc : app.create_buf);
+          g_free(esc);
+          bool ok = false;
+          if (!app.create_template_src.empty()) {
+            app.operation_status = "Templates not supported on Drive yet";
+            app.operation_status_expires_ms = menu_expiry_3s();
+          } else if (app.create_is_folder) {
+            ok = vfs_mkdir(target);
+          } else {
+            ok = vfs_create_empty(target);
+          }
+          if (ok) {
+            app.operation_status = "Created";
+            app.operation_status_expires_ms = menu_expiry_3s();
+            reload_dir(app);
+          } else if (app.create_template_src.empty()) {
+            app.operation_status = "Create failed";
+            app.operation_status_expires_ms = menu_expiry_3s();
+          }
+        } else if (is_remote_uri(app.cur_tab().current_path)) {
+          // Remote create: mkdir / empty file over GIO (no undo record).
+          std::string dir = app.cur_tab().current_path;
+          while (dir.size() > 1 && dir.back() == '/') dir.pop_back();
+          std::string target = dir + "/" + app.create_buf;
+          bool ok = false;
+          if (!app.create_template_src.empty()) {
+            app.operation_status = "Templates not supported on remote locations yet";
+            app.operation_status_expires_ms = menu_expiry_3s();
+          } else if (app.create_is_folder) {
+            ok = vfs_mkdir(target);
+          } else {
+            ok = vfs_create_empty(target);
+          }
+          if (ok) {
+            app.operation_status = "Created";
+            app.operation_status_expires_ms = menu_expiry_3s();
+            reload_dir(app);
+          } else if (app.create_template_src.empty()) {
+            app.operation_status = "Create failed";
+            app.operation_status_expires_ms = menu_expiry_3s();
+          }
+        } else {
+          fs::path dir(app.cur_tab().current_path);
+          fs::path new_path = dir / app.create_buf;
         std::error_code ec;
         bool ok = false;
         if (!app.create_template_src.empty()) {
@@ -361,7 +585,8 @@ bool key_create(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
             app.undo_stack.erase(app.undo_stack.begin());
         }
         reload_dir(app);
-      }
+        } // else (local create)
+      } // !create_buf.empty
       app.create_dialog_open = false;
       app.create_template_src.clear();
       draw(app);
@@ -718,23 +943,38 @@ bool key_rename_ui(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
   if (app.rename_ui_open) {
     if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
       if (!app.rename_ui_buf.empty() && app.rename_ui_buf != app.rename_ui_old_name) {
-        fs::path src(app.rename_ui_entry_path);
-        fs::path dest = src.parent_path() / app.rename_ui_buf;
-        std::error_code ec;
-        fs::rename(src, dest, ec);
-        if (!ec) {
-          AppState::UndoRecord rec{AppState::UndoRecord::Type::Rename, {}, {}};
-          rec.paths_a.push_back(src.string());
-          rec.paths_b.push_back(dest.string());
-          app.redo_stack.clear();
-          app.undo_stack.push_back(std::move(rec));
-          if (app.undo_stack.size() > app.kMaxUndo)
-            app.undo_stack.erase(app.undo_stack.begin());
-          app.operation_status = "Renamed";
-          app.operation_status_expires_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            (std::chrono::steady_clock::now() + std::chrono::milliseconds(3000)).time_since_epoch()).count();
-          reload_dir(app);
-        }
+        if (is_drive_uri(app.rename_ui_entry_path) ||
+            is_remote_uri(app.rename_ui_entry_path)) {
+          std::string dest = vfs_rename_entry(app.rename_ui_entry_path, app.rename_ui_buf);
+          if (!dest.empty()) {
+            app.operation_status = "Renamed";
+            app.operation_status_expires_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+              (std::chrono::steady_clock::now() + std::chrono::milliseconds(3000)).time_since_epoch()).count();
+            reload_dir(app);
+          } else {
+            app.operation_status = "Rename failed";
+            app.operation_status_expires_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+              (std::chrono::steady_clock::now() + std::chrono::milliseconds(3000)).time_since_epoch()).count();
+          }
+        } else {
+          fs::path src(app.rename_ui_entry_path);
+          fs::path dest = src.parent_path() / app.rename_ui_buf;
+          std::error_code ec;
+          fs::rename(src, dest, ec);
+          if (!ec) {
+            AppState::UndoRecord rec{AppState::UndoRecord::Type::Rename, {}, {}};
+            rec.paths_a.push_back(src.string());
+            rec.paths_b.push_back(dest.string());
+            app.redo_stack.clear();
+            app.undo_stack.push_back(std::move(rec));
+            if (app.undo_stack.size() > app.kMaxUndo)
+              app.undo_stack.erase(app.undo_stack.begin());
+            app.operation_status = "Renamed";
+            app.operation_status_expires_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+              (std::chrono::steady_clock::now() + std::chrono::milliseconds(3000)).time_since_epoch()).count();
+            reload_dir(app);
+          }
+        } // else (local rename)
       }
       app.rename_ui_open = false;
       draw(app);
@@ -1138,6 +1378,82 @@ bool key_term_chooser(AppState& app, uint32_t sym, bool ctrl, bool shift, bool a
 }
 
 
+bool key_checksum(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
+                    const char* utf8, int utf8_len) {
+  (void)ctrl; (void)shift; (void)alt; (void)utf8; (void)utf8_len;
+  if (app.checksum_open) {
+    if (sym == XKB_KEY_Escape || sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+      app.checksum_open = false;
+      ++app.checksum_generation;
+      app.checksum_hover_btn = -1;
+      draw(app);
+      return true;
+    }
+    return true; // modal: swallow keys
+  }
+  return false;
+}
+
+bool key_connect(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
+                    const char* utf8, int utf8_len) {
+  if (!app.connect_open) return false;
+  auto field_buf = [&](int i) -> std::string* {
+    switch (i) {
+      case 0: return &app.connect_host;
+      case 1: return &app.connect_user;
+      case 2: return &app.connect_pass;
+      case 3: return &app.connect_port_buf;
+      default: return &app.connect_path;
+    }
+  };
+  if (sym == XKB_KEY_Escape) {
+    app.connect_open = false;
+    app.connect_pass.clear();
+    app.connect_hover_btn = -1;
+    draw(app);
+    return true;
+  }
+  if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+    connect_submit(app);
+    draw(app);
+    return true;
+  }
+  if (sym == XKB_KEY_Tab || sym == XKB_KEY_ISO_Left_Tab) {
+    app.connect_focus = (app.connect_focus + (shift ? 4 : 1)) % 5;
+    draw(app);
+    return true;
+  }
+  if (ctrl && (sym == XKB_KEY_U || sym == XKB_KEY_u)) {
+    field_buf(app.connect_focus)->clear();
+    draw(app);
+    return true;
+  }
+  if (sym == XKB_KEY_BackSpace) {
+    std::string* buf = field_buf(app.connect_focus);
+    while (!buf->empty() &&
+           (static_cast<unsigned char>(buf->back()) & 0xC0) == 0x80)
+      buf->pop_back();
+    if (!buf->empty()) buf->pop_back();
+    draw(app);
+    return true;
+  }
+  if (utf8 && utf8_len > 0 && utf8_len <= 4 && !ctrl && !alt) {
+    const unsigned char c0 = static_cast<unsigned char>(utf8[0]);
+    if (c0 < 0x20 || c0 == 0x7f) return true;
+    std::string* buf = field_buf(app.connect_focus);
+    if (app.connect_focus == 3) {
+      // Port: digits only.
+      if (utf8_len != 1 || c0 < '0' || c0 > '9' || buf->size() >= 5) return true;
+    }
+    if (buf->size() + static_cast<size_t>(utf8_len) >= 256) return true;
+    buf->append(utf8, static_cast<size_t>(utf8_len));
+    draw(app);
+    return true;
+  }
+  return true; // modal: swallow the rest
+}
+
+
 bool key_text_fallback(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
                     const char* utf8, int utf8_len) {
   if (app.create_dialog_open && utf8 && utf8_len > 0 && utf8_len <= 4) {
@@ -1187,5 +1503,74 @@ bool key_text_fallback(AppState& app, uint32_t sym, bool ctrl, bool shift, bool 
   return false;
 }
 
+
+static std::string* rauth_field(AppState& app, int i) {
+  const auto& rq = app.remote_auth;
+  int idx = 0;
+  if (rq.need_user) {
+    if (i == idx) return &app.remote_auth_user_buf;
+    ++idx;
+  }
+  if (rq.need_password) {
+    if (i == idx) return &app.remote_auth_pass_buf;
+    ++idx;
+  }
+  return nullptr;
+}
+
+static int rauth_field_count(AppState& app) {
+  const auto& rq = app.remote_auth;
+  return (rq.need_user ? 1 : 0) + (rq.need_password ? 1 : 0);
+}
+
+bool key_remote_auth(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
+                    const char* utf8, int utf8_len) {
+  if (!app.remote_auth_open) return false;
+  if (sym == XKB_KEY_Escape) {
+    remote_auth_cancel(app);
+    draw(app);
+    return true;
+  }
+  if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+    if (!app.remote_auth.choices.empty()) return true; // approval: pick a button
+    remote_auth_submit(app, -1);
+    draw(app);
+    return true;
+  }
+  if (!app.remote_auth.choices.empty()) return true; // approval: buttons only
+  if (sym == XKB_KEY_Tab || sym == XKB_KEY_ISO_Left_Tab) {
+    int n = rauth_field_count(app);
+    if (n > 1)
+      app.remote_auth_focus = (app.remote_auth_focus + (shift ? n - 1 : 1)) % n;
+    draw(app);
+    return true;
+  }
+  if (ctrl && (sym == XKB_KEY_U || sym == XKB_KEY_u)) {
+    if (auto* buf = rauth_field(app, app.remote_auth_focus)) buf->clear();
+    draw(app);
+    return true;
+  }
+  if (sym == XKB_KEY_BackSpace) {
+    if (auto* buf = rauth_field(app, app.remote_auth_focus)) {
+      while (!buf->empty() &&
+             (static_cast<unsigned char>(buf->back()) & 0xC0) == 0x80)
+        buf->pop_back();
+      if (!buf->empty()) buf->pop_back();
+    }
+    draw(app);
+    return true;
+  }
+  if (utf8 && utf8_len > 0 && utf8_len <= 4 && !ctrl && !alt) {
+    const unsigned char c0 = static_cast<unsigned char>(utf8[0]);
+    if (c0 < 0x20 || c0 == 0x7f) return true;
+    if (auto* buf = rauth_field(app, app.remote_auth_focus)) {
+      if (buf->size() + static_cast<size_t>(utf8_len) >= 256) return true;
+      buf->append(utf8, static_cast<size_t>(utf8_len));
+    }
+    draw(app);
+    return true;
+  }
+  return true; // modal: swallow the rest
+}
 
 } // namespace eh::file_browser

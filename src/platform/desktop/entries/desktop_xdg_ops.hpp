@@ -36,6 +36,14 @@ void clipboard_files_cut_copy_multi(bool cut, const std::vector<std::string>& ab
 [[nodiscard]] bool trash_file(const std::string& abs_path);
 [[nodiscard]] bool restore_from_trash(const std::string& trash_file_path);
 
+// Auto-maintenance for the home trash: permanently delete items older
+// than max_age_days (0 = keep age out of it) and, when max_bytes > 0,
+// oldest first until under quota. Entries without a parseable
+// DeletionDate are NEVER touched (conservative: Empty Trash still clears
+// everything). Synchronous; callers run it on a worker. HOME-isolated,
+// so probes can point it at a fake tree.
+void trash_maintain(int max_age_days, uint64_t max_bytes);
+
 void launch_expanded_exec_line(const std::string& expanded_exec, bool wrap_terminal);
 
 void launch_pkexec_exec_raw(const std::string& exec_raw, const std::string& desktop_abs_path, const std::string& display_name,

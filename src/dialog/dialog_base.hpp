@@ -43,7 +43,6 @@ protected:
   DialogBase(int default_w, int default_h,
              const char* title);
 
-  // ── subclass overrides ──────────────────────────────────────
 
   /// Draw the dialog content. Called once per frame.
   virtual void draw(cairo_t* cr, int w, int h) = 0;
@@ -66,7 +65,6 @@ protected:
     (void)sym; (void)state; (void)utf8; (void)utf8_len;
   }
 
-  // ── helpers ─────────────────────────────────────────────────
 
   /// Close the dialog with a result.
   void finish(Result res);

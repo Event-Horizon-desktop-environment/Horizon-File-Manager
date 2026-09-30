@@ -3,6 +3,7 @@
 #include <filesystem>
 #include <algorithm>
 #include <system_error>
+#include <thread>
 #include <vector>
 
 #include "base/thread/thread_dispatch.hpp"
@@ -44,16 +45,25 @@ static void copy_file_with_parents(const fs::path& src, const fs::path& dest,
   fs::copy_file(src, dest, opts, ec);
 }
 
+static void wait_if_paused(const std::shared_ptr<OperationProgress>& prog) {
+  while (prog->paused.load(std::memory_order_relaxed) &&
+         !prog->cancel.load(std::memory_order_relaxed)) {
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+}
+
 static void copy_recursive(const fs::path& src, const fs::path& dest,
                            std::atomic<int>& done, int total,
                            std::shared_ptr<OperationProgress> prog,
                            bool overwrite = false) {
   std::error_code ec;
+  wait_if_paused(prog);
   if (fs::is_directory(src, ec)) {
     fs::create_directories(dest, ec);
     if (ec) return;
     for (auto& de : fs::directory_iterator(src, ec)) {
       if (prog->cancel.load()) return;
+      wait_if_paused(prog);
       auto child_dest = dest / de.path().filename();
       copy_recursive(de.path(), child_dest, done, total, prog, overwrite);
     }
@@ -82,6 +92,7 @@ static void do_operation(std::vector<std::string> src_paths,
   int total = 0;
   uint64_t total_bytes = 0;
   for (auto& src : src_paths) {
+    wait_if_paused(prog);
     total += count_files_recursive(src);
     total_bytes += count_bytes_recursive(src);
     if (prog->cancel.load()) { prog->active = false; goto done; }
@@ -94,6 +105,7 @@ static void do_operation(std::vector<std::string> src_paths,
     auto& done = prog->copied_files;
     for (size_t si = 0; si < src_paths.size(); ++si) {
       const std::string& src = src_paths[si];
+      wait_if_paused(prog);
       if (prog->cancel.load()) break;
 
       bool overwrite = std::find(allow_overwrite.begin(), allow_overwrite.end(), src)
@@ -154,6 +166,7 @@ void start_async_op(const std::vector<std::string>& src_paths,
 
   prog->active.store(true);
   prog->cancel.store(false);
+  prog->paused.store(false);
   prog->progress.store(0.0);
   prog->copied_files.store(0);
   prog->total_files.store(0);

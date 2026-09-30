@@ -21,7 +21,6 @@ namespace fs = std::filesystem;
 
 namespace eh::dialog {
 
-// ── helpers ───────────────────────────────────────────────────────
 
 static std::string home_dir() {
   if (auto* h = std::getenv("HOME")) return h;
@@ -38,7 +37,6 @@ static std::string uri_from_path(const std::string& path) {
   return "file://" + path;
 }
 
-// ── icon theme helpers ────────────────────────────────────────────
 
 static eh::icons::IconCache s_icon_cache;
 
@@ -184,7 +182,6 @@ static void draw_file_icon(cairo_t* cr, int x, int y, int size, FileIcon fi,
   cairo_restore(cr);
 }
 
-// ── constructor ───────────────────────────────────────────────────
 
 FileChooserDialog::FileChooserDialog(Mode mode, const char* title,
                                       const std::string& accept_type,
@@ -208,7 +205,6 @@ FileChooserDialog::~FileChooserDialog() {
   thumb_cache_.clear();
 }
 
-// ── directory listing ─────────────────────────────────────────────
 
 void FileChooserDialog::load_dir(const std::string& path) {
   current_path_ = path;
@@ -263,7 +259,6 @@ void FileChooserDialog::open_selected() {
   }
 }
 
-// ── visible list ──────────────────────────────────────────────────
 
 void FileChooserDialog::rebuild_visible() {
   visible_.clear();
@@ -286,7 +281,6 @@ void FileChooserDialog::toggle_hidden() {
   rebuild_visible();
 }
 
-// ── hit-testing ───────────────────────────────────────────────────
 
 int FileChooserDialog::entry_at(int x, int y) const {
   if (grid_) {
@@ -305,7 +299,6 @@ int FileChooserDialog::entry_at(int x, int y) const {
   return visible_[row + scroll_offset_];
 }
 
-// ── grid helpers ──────────────────────────────────────────────────
 
 void FileChooserDialog::draw_grid(cairo_t* cr, int w, int h) {
   (void)w;
@@ -386,7 +379,6 @@ int FileChooserDialog::grid_cell_h() const {
   return 100;
 }
 
-// ── draw ──────────────────────────────────────────────────────────
 
 void FileChooserDialog::draw(cairo_t* cr, int w, int h) {
   // Background
@@ -500,7 +492,6 @@ void FileChooserDialog::draw(cairo_t* cr, int w, int h) {
   }
 }
 
-// ── input handlers ────────────────────────────────────────────────
 
 void FileChooserDialog::on_click(int x, int y, int button) {
   if (button != 1) return;

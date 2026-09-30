@@ -1,4 +1,4 @@
-// Split from compress_engine.cpp: one format per translation unit.
+// One format per translation unit (split out of the old single engine).
 #include "app/file_browser/features/compress/compress_engine.hpp"
 #include "app/file_browser/features/compress/engine/engine_internal.hpp"
 #include "app/file_browser/features/compress/compress.hpp"

@@ -63,14 +63,12 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
 
   p.x = cx; p.y = cy; p.w = card_w; p.h = card_h;
 
-  // ── Shadow (soft multi-layer) ──
   for (int s = 3; s >= 0; --s) {
     cairo_set_source_rgba(cr, 0, 0, 0, 0.05 * (4 - s));
     draw_rounded_rect(cr, cx + s * 1.5, cy + s * 2.5, card_w, card_h, 16);
     cairo_fill(cr);
   }
 
-  // ── Card background ──
   double prp_bg_alpha = app.properties_opacity_pct / 100.0;
   double tr, tg, tb;
   wallpaper_tint_surface(app, kPopupWallpaperTint, tr, tg, tb);
@@ -80,7 +78,6 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
 
   cairo_text_extents_t te;
 
-  // ── Header: left-aligned icon tile + name + meta ──
   const int hdr_x = cx + pad;
   const int hdr_y = cy + 16;
   const int tile = 52;
@@ -159,13 +156,13 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
   cairo_line_to(cr, close_x + 9, close_y + 19);
   cairo_stroke(cr);
 
-  // ── Segmented tabs ──
   int tab_y = hdr_y + tile + 12;
   const int tab_h = 34;
   int content_of_tab[4];
   int num_tabs = 0;
   content_of_tab[num_tabs++] = 0;
-  content_of_tab[num_tabs++] = 1;
+  // No Permissions tab for Drive items (no POSIX modes/xattrs there).
+  if (!p.drive_item) content_of_tab[num_tabs++] = 1;
   bool has_image = (p.image_w > 0 && p.image_h > 0);
   bool has_media = p.is_media;
   if (has_image) content_of_tab[num_tabs++] = 2;
@@ -212,7 +209,6 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
 
   int content_tab = (p.tab >= 0 && p.tab < num_tabs) ? content_of_tab[p.tab] : 0;
 
-  // ── Content area ──
   int content_y0 = tab_y + tab_h + 10;
   int content_h_max = card_h - (content_y0 - cy) - 52;
   // Clamp stale scroll offsets (e.g. after a tab switch shrank the content).
@@ -287,7 +283,6 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
   struct PendingDD { bool armed = false; int x = 0, y = 0, w = 0, h = 0, pi = 0; };
   PendingDD pending_dd;
 
-  // ── General tab ──
   if (content_tab == 0) {
     if (p.multi) {
       draw_section_title("Selection");
@@ -338,7 +333,7 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
         draw_kv_card(rows);
       }
 
-      // ── Tags (interactive) ──
+      if (!p.drive_item) {
       draw_section_title("Tags");
       {
         bool tags_hover =
@@ -393,11 +388,131 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
         }
         ly += th + 8 + 6;
       }
+      } // (!p.drive_item)
+
+      if (!p.multi && !p.drive_item) {
+        draw_section_title("Rating");
+        const int rth = 34;
+        int ry0 = ly + 2;
+        hui::design::card_fill(cr, app, 0.55);
+        draw_rounded_rect(cr, card_x, ry0, card_w_full, rth + 8, 12);
+        cairo_fill(cr);
+        bool rating_hover =
+            app.pointerX >= p.hit_rating_row[0] &&
+            app.pointerX < p.hit_rating_row[0] + p.hit_rating_row[2] &&
+            app.pointerY >= p.hit_rating_row[1] &&
+            app.pointerY < p.hit_rating_row[1] + p.hit_rating_row[3];
+        if (rating_hover) {
+          cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.3);
+          cairo_set_line_width(cr, 1.2);
+          draw_rounded_rect(cr, card_x, ry0, card_w_full, rth + 8, 12);
+          cairo_stroke(cr);
+        }
+        cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
+        cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+        cairo_set_font_size(cr, 12);
+        cairo_move_to(cr, card_x + 14, ry0 + 24);
+        cairo_show_text(cr, "Rating");
+
+        // Five stars, right-aligned; filled up to the stored rating.
+        // Drawn procedurally (cairo path): the UI font has no U+2605
+        // glyph on minimal systems, which rendered as tofu boxes.
+        const int star_n = 5;
+        const int star_cell = 26;
+        const int stars_w = star_n * star_cell;
+        int sx0 = static_cast<int>(card_x + card_w_full - 14 - stars_w);
+        p.hit_rating_row[0] = sx0; p.hit_rating_row[1] = ry0;
+        p.hit_rating_row[2] = stars_w; p.hit_rating_row[3] = rth + 8;
+        for (int si = 0; si < star_n; ++si) {
+          double scx = sx0 + si * star_cell + star_cell / 2.0;
+          double scy = ry0 + (rth + 8) / 2.0;
+          constexpr double kOuter = 9.0, kInner = 3.8;
+          for (int i = 0; i < 10; ++i) {
+            double r = (i % 2 == 0) ? kOuter : kInner;
+            double a = -M_PI / 2.0 + i * M_PI / 5.0;
+            double x = scx + r * std::cos(a), y = scy + r * std::sin(a);
+            if (i == 0) cairo_move_to(cr, x, y);
+            else cairo_line_to(cr, x, y);
+          }
+          cairo_close_path(cr);
+          if (si < p.rating_value) {
+            cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
+                                  1.0);
+            cairo_fill(cr);
+          } else {
+            cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
+                                  0.10);
+            cairo_fill_preserve(cr);
+            cairo_set_source_rgba(cr, app.text_secondary_r,
+                                  app.text_secondary_g, app.text_secondary_b,
+                                  0.7);
+            cairo_set_line_width(cr, 1.4);
+            cairo_stroke(cr);
+          }
+        }
+        ly += rth + 8 + 6;
+      }
+
+      if (!p.multi && !p.drive_item) {
+        draw_section_title("Comment");
+        bool comment_hover =
+            app.pointerX >= p.hit_comment_row[0] &&
+            app.pointerX < p.hit_comment_row[0] + p.hit_comment_row[2] &&
+            app.pointerY >= p.hit_comment_row[1] &&
+            app.pointerY < p.hit_comment_row[1] + p.hit_comment_row[3];
+        const int cth = p.comment_edit ? 40 : 34;
+        int cy0 = ly + 2;
+        hui::design::card_fill(cr, app, p.comment_edit ? 0.8 : 0.55);
+        draw_rounded_rect(cr, card_x, cy0, card_w_full, cth + 8, 12);
+        cairo_fill(cr);
+        if (comment_hover || p.comment_edit) {
+          cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b,
+                                p.comment_edit ? 0.5 : 0.3);
+          cairo_set_line_width(cr, 1.2);
+          draw_rounded_rect(cr, card_x, cy0, card_w_full, cth + 8, 12);
+          cairo_stroke(cr);
+        }
+        p.hit_comment_row[0] = card_x; p.hit_comment_row[1] = cy0;
+        p.hit_comment_row[2] = card_w_full; p.hit_comment_row[3] = cth + 8;
+
+        cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
+        cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+        cairo_set_font_size(cr, 12);
+        cairo_move_to(cr, card_x + 14, cy0 + 24);
+        cairo_show_text(cr, p.comment_edit ? "Edit comment" : "Comment");
+
+        std::string cdisp = p.comment_edit ? p.comment_buf
+                                           : (p.comment_value.empty() ? "Add a comment…"
+                                                                      : p.comment_value);
+        cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+        cairo_set_font_size(cr, 12.5);
+        if (!p.comment_edit) {
+          bool cempty = p.comment_value.empty();
+          double cmax_vw = card_w_full - 28 - 130;
+          std::string cshown = hui::design::clip_end(cr, cdisp, cmax_vw);
+          cairo_text_extents_t ve2;
+          cairo_text_extents(cr, cshown.c_str(), &ve2);
+          cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, cempty ? 0.45 : 1.0);
+          cairo_move_to(cr, card_x + card_w_full - 14 - ve2.x_advance, cy0 + 24);
+          cairo_show_text(cr, cshown.c_str());
+        } else {
+          cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+          cairo_move_to(cr, card_x + 14, cy0 + 24 + 18);
+          cairo_show_text(cr, cdisp.c_str());
+          cairo_text_extents_t ce2;
+          cairo_text_extents(cr, cdisp.c_str(), &ce2);
+          cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.8);
+          cairo_set_line_width(cr, 1.2);
+          cairo_move_to(cr, card_x + 16 + ce2.x_advance, cy0 + 28);
+          cairo_line_to(cr, card_x + 16 + ce2.x_advance, cy0 + 42);
+          cairo_stroke(cr);
+        }
+        ly += cth + 8 + 6;
+      }
 
       draw_section_title("Ownership");
       draw_kv_card({{"Owner", p.owner_name, false}, {"Group", p.group_name, false}});
 
-      // ── Storage bar (replaces the tiny donut) ──
       if (!p.multi && p.vol_total_bytes > 0) {
         draw_section_title("Storage");
         const uint64_t used = p.vol_total_bytes - std::min(p.vol_free_bytes, p.vol_total_bytes);
@@ -453,7 +568,6 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
       ly += eh + 6;
     }
 
-  // ── Permissions tab ──
   } else if (content_tab == 1) {
     draw_section_title("Access");
     {
@@ -614,7 +728,6 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
       ly += eh + 6;
     }
 
-  // ── Image tab ── hero summary + 2-col spec grid ──
   } else if (content_tab == 2) {
     long long total = static_cast<long long>(p.image_w) * static_cast<long long>(p.image_h);
     char area[64];
@@ -642,7 +755,6 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
     if (p.image_w >= p.image_h) snprintf(ratio_str, sizeof(ratio_str), "%.2f : 1", ratio);
     else snprintf(ratio_str, sizeof(ratio_str), "1 : %.2f", 1.0 / std::max(ratio, 1e-6));
 
-    // ── Hero: aspect box + dimensions + MP + orientation ──
     {
       const int hero_h = 90;
       const int hero_y = ly + 2;
@@ -688,7 +800,6 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
       ly += hero_h + 8;
     }
 
-    // ── Spec grid (2 columns) ──
     {
       std::vector<std::pair<std::string, std::string>> specs;
       std::string comp = p.image_compression;
@@ -770,7 +881,6 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
       ly += rows * cell_h + (rows - 1) * gap + 8;
     }
 
-  // ── Media tab ──
   } else if (content_tab == 3) {
     auto pretty_codec = [](std::string c) {
       if (!c.empty()) c[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(c[0])));
@@ -840,7 +950,6 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
   p.desired_h = (content_y0 - cy) + p.content_h + 52 + 12;
   cairo_restore(cr);
 
-  // ── Permission dropdown overlay (outside the content clip) ──
   if (pending_dd.armed) {
     const char* combo_items[] = {"No access", "View only", "View & edit", "Full control"};
     int dd_item_h = 30;
@@ -885,7 +994,6 @@ void draw_properties_dialog(AppState& app, cairo_t* cr) {
         p.hit_combo_items[pi][ci][2] = 0;
   }
 
-  // ── Footer: primary Close ──
   int btn_w = 96;
   int btn_h = 34;
   int btn_x = cx + card_w - pad - btn_w;

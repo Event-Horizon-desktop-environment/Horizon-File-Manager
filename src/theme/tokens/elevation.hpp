@@ -16,7 +16,6 @@ struct ElevationTokens {
 // Per-component elevation per state:
 //
 //   Component              | Rest | Hover | Focus | Press
-//   -----------------------|------|-------|-------|-------
 //   Filled button          | 0    | 0     | 0     | 0
 //   Elevated button        | 1    | 2     | 2     | 2
 //   FAB                    | 3    | 4     | 5     | 4

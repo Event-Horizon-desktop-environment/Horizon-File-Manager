@@ -21,6 +21,9 @@ enum class OperationType : uint8_t {
 struct OperationProgress {
   std::atomic<bool> active{false};
   std::atomic<bool> cancel{false};
+  // Pause takes effect at file boundaries (a single huge file still
+  // copies atomically); checked alongside cancel everywhere.
+  std::atomic<bool> paused{false};
   std::atomic<bool> success{true};
   std::atomic<double> progress{0.0};
   std::atomic<int> total_files{0};

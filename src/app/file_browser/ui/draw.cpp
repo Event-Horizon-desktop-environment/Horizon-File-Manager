@@ -47,7 +47,6 @@ namespace fs = std::filesystem;
 
 namespace eh::file_browser {
 
-// ── preview/thumbnail debug logger ─────────────────────────────────
 static std::mutex g_preview_log_mtx;
 void preview_log(const char* fmt, ...) {
   static FILE* f = nullptr;
@@ -73,7 +72,6 @@ void preview_log(const char* fmt, ...) {
   fflush(f);
 }
 
-// ── drawing helpers ──────────────────────────────────────────────
 
 void draw_rounded_rect(cairo_t* cr, double x, double y, double w, double h,
                        double r) {
@@ -114,7 +112,6 @@ void draw_scrollbar(AppState& app, cairo_t* cr, int x, int y, int h,
   cairo_fill(cr);
 }
 
-// ── hit testing ──────────────────────────────────────────────────
 
 int hit_test_list(AppState& app, int x, int y) {
   // Resolved through the retained hit registry (row rects stored during
@@ -137,9 +134,7 @@ int hit_test_grid(AppState& app, int x, int y) {
   return vi;
 }
 
-// ── Open With dialog ──────────────────────────────────────────────
 
-// ── Info panel (F11) ────────────────────────────────────────────
 
 void draw_info_panel(AppState& app, cairo_t* cr) {
   if (!app.info_panel_open) return;
@@ -161,7 +156,6 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
   cairo_rectangle(cr, px, py, 1, ph);
   cairo_fill(cr);
 
-  // ── Tab bar ──
   static const char* kTabNames[] = {"Preview", "Properties", "Terminal"};
   int tab_h = static_cast<int>(38 * zf);
   int tab_w = pw / 3;
@@ -211,7 +205,6 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
   int content_y = py + tab_h + 1;
   int content_h = ph - tab_h - 1;
 
-  // ── Preview tab ──
   if (app.info_panel_tab == 0) {
     if (app.info_panel_path.empty() || app.info_panel_is_dir) {
       cairo_set_font_size(cr, 12 * zf);
@@ -261,7 +254,6 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
                     py + ph - 14);
       cairo_show_text(cr, name.c_str());
 
-      // ── Metadata rows beneath the preview ──
       auto meta_font = [&](double px_size) {
         cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                                CAIRO_FONT_WEIGHT_NORMAL);
@@ -291,7 +283,6 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
     }
   }
 
-  // ── Properties tab ──
   else if (app.info_panel_tab == 1) {
     auto fmt_size = [](uint64_t bytes) -> std::string {
       return hui::design::size_human(bytes);
@@ -358,7 +349,6 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
     }
   }
 
-  // ── Terminal tab (stub) ──
   else if (app.info_panel_tab == 2) {
     cairo_set_font_size(cr, 12 * zf);
     cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
@@ -372,7 +362,6 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
   }
 }
 
-// ── Operations panel (right sidebar) ────────────────────────────
 
 void draw_operations_panel(AppState& app, cairo_t* cr) {
   if (app.ops_panel_slide < 0.01) return;
@@ -409,7 +398,6 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
 
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
 
-  // ── Header ──
   {
     const char* hdr = "FILE OPERATIONS";
     if (p.type == OperationType::Extract) hdr = "EXTRACTION";
@@ -423,7 +411,6 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
     y += 28 * static_cast<int>(zf);
   }
 
-  // ── Current file ──
   {
     std::string label;
     if (p.type == OperationType::Extract)
@@ -449,7 +436,6 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
     y += 30 * static_cast<int>(zf);
   }
 
-  // ── Progress bar ──
   // Workers maintain p.progress directly (copy/move/extract mirror done/total;
   // compress blends file completions, 7z overall % and output growth).
   // Compress pre-scan (no totals yet) keeps an animated stripe instead.
@@ -482,7 +468,6 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
     y += bar_h + 12 * static_cast<int>(zf);
   }
 
-  // ── File count ──
   {
     char buf[64];
     double live = p.progress.load();
@@ -504,7 +489,6 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
     y += 22 * static_cast<int>(zf);
   }
 
-  // ── Speed ──
   if (p.total_bytes.load() > 0) {
     double speed = p.speed_mbps();
     char buf[64];
@@ -519,7 +503,6 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
     cairo_show_text(cr, buf);
     y += 22 * static_cast<int>(zf);
 
-    // ── Time remaining ──
     if (p.active) {
       double eta = p.eta_seconds();
       if (eta >= 0) {
@@ -540,7 +523,50 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
     }
   }
 
-  // ── Cancel button ──
+  {
+    bool running =
+        app.op_progress && app.op_progress->active.load(std::memory_order_relaxed);
+    if (running) {
+      int btn_size = static_cast<int>(18 * zf);
+      int btn_x = px + slide_w - btn_size * 2 - 12 - 8;
+      int btn_y = py + 10;
+      app.ops_pause_x = btn_x;
+      app.ops_pause_y = btn_y;
+      app.ops_pause_w = btn_size;
+      app.ops_pause_h = btn_size;
+      bool paused = app.op_progress->paused.load(std::memory_order_relaxed);
+      bool hov = (app.pointerX >= btn_x && app.pointerX < btn_x + btn_size &&
+                  app.pointerY >= btn_y && app.pointerY < btn_y + btn_size);
+      if (hov) {
+        cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.14);
+        draw_rounded_rect(cr, btn_x - 5, btn_y - 5, btn_size + 10, btn_size + 10, 12);
+        cairo_fill(cr);
+      }
+      int pad = static_cast<int>(4 * zf);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, hov ? 0.9 : 0.5);
+      cairo_set_line_width(cr, 1.5);
+      if (paused) {
+        // Resume: right-pointing triangle.
+        cairo_move_to(cr, btn_x + pad, btn_y + pad);
+        cairo_line_to(cr, btn_x + btn_size - pad, btn_y + btn_size / 2);
+        cairo_line_to(cr, btn_x + pad, btn_y + btn_size - pad);
+        cairo_close_path(cr);
+        cairo_fill(cr);
+      } else {
+        // Pause: two bars.
+        double bx1 = btn_x + pad, bx2 = btn_x + btn_size - pad;
+        double mid = (bx1 + bx2) / 2;
+        cairo_move_to(cr, (bx1 + mid) / 2, btn_y + pad);
+        cairo_line_to(cr, (bx1 + mid) / 2, btn_y + btn_size - pad);
+        cairo_move_to(cr, (mid + bx2) / 2, btn_y + pad);
+        cairo_line_to(cr, (mid + bx2) / 2, btn_y + btn_size - pad);
+        cairo_stroke(cr);
+      }
+    } else {
+      app.ops_pause_w = 0;
+    }
+  }
+
   {
     int btn_size = static_cast<int>(18 * zf);
     int btn_x = px + slide_w - btn_size - 12;
@@ -570,7 +596,6 @@ void draw_operations_panel(AppState& app, cairo_t* cr) {
 
 
 
-// ── Icon prewarm ─────────────────────────────────────────────────
 //
 // draw_file_icon_cairo resolves icons through the ASYNC cache path, so on a
 // freshly-scanned folder the first frames paint letter placeholders while
@@ -609,7 +634,6 @@ void prewarm_tab_icons(AppState& app) {
   }
 }
 
-// ── Hit-test: tree view ──────────────────────────────────────────
 int hit_test_tree(AppState& app, int x, int y, bool for_click) {
   Tab& tab = pane_tab_at(app, x);
   if (tab.tree_entries.empty() || tab.tree_entries_dirty) build_tree_entries(app);
@@ -641,7 +665,6 @@ int hit_test_tree(AppState& app, int x, int y, bool for_click) {
   return idx;
 }
 
-// ── Hit-test: compact view ───────────────────────────────────────
 int hit_test_compact(AppState& app, int x, int y) {
   // Same registry path as list view (rows stored during paint).
   const uint32_t hid = app.hit_main.query(x, y);

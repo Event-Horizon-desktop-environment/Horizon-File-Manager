@@ -39,7 +39,6 @@ inline constexpr SpringParams kSpringExpressive  = { 200.0f, 15.0f, 1.0f };
 // Per-component motion:
 //
 //   Interaction              | Duration | Easing                 | Spring?
-//   -------------------------|----------|------------------------|----------
 //   State layer hover        | 100ms    | standard-decelerate    | no
 //   State layer press        | 100ms    | standard-decelerate    | no
 //   Focus ring               | 100ms    | standard               | no

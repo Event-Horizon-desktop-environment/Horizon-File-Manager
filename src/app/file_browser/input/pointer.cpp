@@ -36,12 +36,10 @@ namespace fs = std::filesystem;
 namespace xdg = eh::shell::desktop::xdg;
 
 namespace eh::file_browser {
-// ── pointer-move handler (moved from events.cpp) ──────────────────────────
 void handle_pointer_move(AppState& app, int x, int y) {
   app.pointerX = static_cast<double>(x);
   app.pointerY = static_cast<double>(y);
 
-  // ── Status-bar zoom slider drag (relative: 1 level per ~7px) ──
   if (app.status_zoom_dragging && app.status_zoom_slider_w > 0) {
     double px_per_lvl = std::max(
         1.0, static_cast<double>(app.status_zoom_slider_w) / (kZoomLevelCount - 1));
@@ -58,14 +56,12 @@ void handle_pointer_move(AppState& app, int x, int y) {
     return;
   }
 
-  // ── Main-view scrollbar drag ──
   if (app.scrollbar_dragging) {
     apply_scrollbar_drag(app, y);
     draw(app);
     return;
   }
 
-  // ── Split pane divider drag ──
   if (app.split_view) {
     int s_w = app.sidebar_w();
     int content_w = app.width - s_w - (app.info_panel_open ? app.info_panel_width : 0);
@@ -88,7 +84,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     app.active_pane = (x >= div_x + div_w) ? 1 : 0;
   }
 
-  // ── Marquee drag ──
   if (app.marquee_active) {
     app.marquee_x1 = static_cast<double>(x);
     app.marquee_y1 = static_cast<double>(y);
@@ -97,7 +92,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     return;
   }
 
-  // ── Drag potential: initiate drag if past threshold ──
   if (app.drag_potential && !app.marquee_active) {
     double dx = x - app.drag_start_x;
     double dy = y - app.drag_start_y;
@@ -112,14 +106,18 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
   }
 
-  // ── Sidebar drag ──
   if (app.sidebar_dragging) {
     drag_sidebar_resize(app, x);
     draw(app);
     return;
   }
 
-  // ── Sidebar favorite reorder drag ──
+  if (app.sidebar_scroll_dragging) {
+    drag_sidebar_scroll(app, y);
+    draw(app);
+    return;
+  }
+
   if (app.sidebar_fav_drag_from >= 0 && !app.sidebar_fav_dragging) {
     int dy = y - app.sidebar_fav_drag_start_y;
     if (dy * dy > 64) {
@@ -133,6 +131,8 @@ void handle_pointer_move(AppState& app, int x, int y) {
     int places_end = 0;
     while (places_end < total &&
            app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Favorite &&
+           app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Network &&
+           app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Remote &&
            app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Root &&
            app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Drive)
       ++places_end;
@@ -168,7 +168,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     return;
   }
 
-  // ── Tab reorder drag ──
   if (app.tab_drag_from >= 0 && !app.tab_dragging) {
     int dx = x - app.tab_drag_start_x;
     if (dx * dx > 64) {
@@ -201,12 +200,10 @@ void handle_pointer_move(AppState& app, int x, int y) {
     return;
   }
 
-  // ── Sidebar resize edge hover ──
   if (update_sidebar_resize_hover(app, x)) {
     draw(app);
   }
 
-  // ── Confirm dialog hover ──
   if (app.confirm_open) {
     const uint32_t hid = app.hit_main.query(x, y);
     int new_hover = -1;
@@ -221,7 +218,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     return;
   }
 
-  // ── Compress dialog hover ──
   if (app.compress_dialog_open) {
     const uint32_t hid = app.hit_main.query(x, y);
     int new_hover_fmt = -1;
@@ -261,7 +257,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     return;
   }
 
-  // ── Create dialog button hover ──
   if (app.create_dialog_open) {
     const uint32_t hid = app.hit_main.query(x, y);
     int new_hover_btn = -1;
@@ -276,7 +271,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
   }
 
-  // ── Rename dialog button hover ──
   if (app.rename_ui_open) {
     const uint32_t hid = app.hit_main.query(x, y);
     int new_hover_btn = -1;
@@ -291,7 +285,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
   }
 
-  // ── Batch rename dialog hover ──
   if (app.batch_rename_open) {
     const uint32_t hid = app.hit_main.query(x, y);
     using hui::Hit::dialog;
@@ -339,7 +332,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     return;
   }
 
-  // ── Properties dialog hover ──
   if (app.properties.open) {
     draw(app);
     return;
@@ -394,7 +386,60 @@ void handle_pointer_move(AppState& app, int x, int y) {
     return;
   }
 
-  // ── Per-pane position helpers ──
+  if (app.checksum_open) {
+    const uint32_t hid = app.hit_main.query(x, y);
+    int new_hover = -1;
+    if (hid == hui::Hit::dialog(hui::Hit::kDlgChecksum, hui::Hit::kChecksumClose)) {
+      new_hover = 3;
+    } else {
+      int ctrl = hui::Hit::dialog_ctrl(hid);
+      int idx = ctrl - hui::Hit::kChecksumCopyBase;
+      if (idx >= 0 && idx < 3 &&
+          (hid & 0xFFFFC00) == hui::Hit::dialog(hui::Hit::kDlgChecksum, 0))
+        new_hover = idx;
+    }
+    if (new_hover != app.checksum_hover_btn) {
+      app.checksum_hover_btn = new_hover;
+      draw(app);
+    }
+    return;
+  }
+
+  if (app.connect_open) {
+    const uint32_t hid = app.hit_main.query(x, y);
+    int new_hover = -1;
+    if (hid == hui::Hit::dialog(hui::Hit::kDlgConnect, hui::Hit::kConnectOk))
+      new_hover = 0;
+    else if (hid == hui::Hit::dialog(hui::Hit::kDlgConnect, hui::Hit::kConnectCancel))
+      new_hover = 1;
+    if (new_hover != app.connect_hover_btn) {
+      app.connect_hover_btn = new_hover;
+      draw(app);
+    }
+    return;
+  }
+
+  if (app.remote_auth_open) {
+    const uint32_t hid = app.hit_main.query(x, y);
+    int new_hover = -1;
+    if (hid == hui::Hit::dialog(hui::Hit::kDlgRemoteAuth, hui::Hit::kRemoteAuthOk))
+      new_hover = 0;
+    else if (hid == hui::Hit::dialog(hui::Hit::kDlgRemoteAuth, hui::Hit::kRemoteAuthCancel))
+      new_hover = 1;
+    else {
+      int ctrl = hui::Hit::dialog_ctrl(hid);
+      int idx = ctrl - hui::Hit::kRemoteAuthChoiceBase;
+      if (idx >= 0 &&
+          (hid & 0xFFFFC00) == hui::Hit::dialog(hui::Hit::kDlgRemoteAuth, 0))
+        new_hover = 10 + idx;
+    }
+    if (new_hover != app.remote_auth_hover_btn) {
+      app.remote_auth_hover_btn = new_hover;
+      draw(app);
+    }
+    return;
+  }
+
   auto& pm_search_btn_x = app.active_pane ? app.r_search_btn_x : app.search_btn_x;
   auto& pm_search_btn_w = app.active_pane ? app.r_search_btn_w : app.search_btn_w;
   auto& pm_folder_search_btn_x = app.active_pane ? app.r_folder_search_btn_x : app.folder_search_btn_x;
@@ -420,7 +465,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
   auto& pm_breadcrumbs = app.active_pane ? app.r_breadcrumbs : app.breadcrumbs;
   auto& pm_breadcrumb_hover = app.active_pane ? app.r_breadcrumb_hover : app.breadcrumb_hover;
 
-  // ── Top-bar button hover (arrows + view mode + sort + gear + window controls) ──
   {
     int bar_y = y;
     if (app.split_view) {
@@ -525,7 +569,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
   }
 
-  // ── Directory picker bar hover ──
   if (app.select_dir_mode || app.select_file_mode) {
     bool sh = (y >= app.select_bar_y && y < app.select_bar_y + app.select_bar_h &&
                x >= app.select_btn_x && x < app.select_btn_x + app.select_btn_w);
@@ -539,7 +582,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
   }
 
-  // ── Sort menu item hover ──
   if ((app.active_pane ? app.r_sort_menu_open : app.sort_menu_open)) {
     const uint32_t hid = app.hit_main.query(x, y);
     int new_hover = -1;
@@ -558,7 +600,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
   }
 
-  // ── Column chooser item hover ──
   if ((app.active_pane ? app.r_columns_menu_open : app.columns_menu_open)) {
     auto& cmh_hover = app.active_pane ? app.r_columns_menu_hover : app.columns_menu_hover;
     const uint32_t hid = app.hit_main.query(x, y);
@@ -575,7 +616,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
   }
 
-  // ── Filter dropdown item hover ──
   {
     auto& pm_filter_section = app.active_pane ? app.r_filter_dropdown_section : app.filter_dropdown_section;
     auto& pm_filter_hover = app.active_pane ? app.r_filter_dropdown_hover : app.filter_dropdown_hover;
@@ -604,7 +644,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
   }
 
-  // ── Path editing drag selection ──
   if ((app.active_pane ? app.r_path_editing : app.path_editing) && (app.active_pane ? app.r_path_edit_dragging : app.path_edit_dragging)) {
     int pm_pe_bar_y = y;
     if (app.split_view) {
@@ -681,7 +720,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
   }
 
-  // ── Dialog input field drag selection ──
   {
     auto helper_drag = [&](const std::string& buf, int& cursor, int& sel_start, int& sel_end,
                            int input_x, int input_y, int input_w, int input_h, double font_size) {
@@ -747,7 +785,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
   }
 
-  // ── Breadcrumb hover tracking ──
   {
     int pm_bc_bar_y = y;
     if (app.split_view) {
@@ -775,7 +812,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     }
   }
 
-  // ── Column divider hover ──
   if (!(app.active_pane ? app.r_path_editing : app.path_editing) && app.cur_tab().view_mode == ViewMode::List && y >= app.top_bar_height + app.tab_bar_height &&
       y < app.top_bar_height + app.tab_bar_height + app.entry_height) {
     int sidebar_w = app.sidebar_w();
@@ -804,7 +840,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     return;
   }
 
-  // ── Column divider drag ──
   if (app.col_resizing >= 0 && app.cur_tab().view_mode == ViewMode::List) {
     int sidebar_w = app.sidebar_w();
     int content_w = app.width - sidebar_w;
@@ -889,7 +924,6 @@ void handle_pointer_move(AppState& app, int x, int y) {
     app.computer_hover_idx = -1;
   }
 
-  // ── Hover preview timer ──
   if (app.cur_tab().hover_idx != prev_hover &&
       app.preview_mode != AppState::PreviewMode::Space) {
     reset_preview(app);

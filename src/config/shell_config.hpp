@@ -16,6 +16,7 @@
 #include <string_view>
 #include <thread>
 #include <unordered_map>
+#include <map>
 
 namespace eh::config {
 
@@ -373,6 +374,9 @@ struct FileBrowserSettings {
   int preview_opacity_pct = 100; // 0–100; frame only, not content
   int dialog_opacity_pct = 100; // 0–100; settings dialog background
   int properties_opacity_pct = 100; // 0–100; properties dialog background
+  bool trash_auto_purge = false;
+  int trash_max_days = 30; // keep trash entries newer than this
+  int trash_max_mb = 0;    // trash quota; 0 = unlimited
   double preview_scale = 1.0;    // 1.0–10.0; hover preview size multiplier
   std::string default_terminal;  // empty = use system default
   int view_mode = 0;             // 0=List, 1=Grid
@@ -394,15 +398,33 @@ struct FileBrowserSettings {
   bool per_folder_props = false; // read/write per-folder .directory view props
   bool independent_dir_views = false; // each folder keeps its own view in-session
 
-  // ── Per-directory view + zoom memory (Independent views per folder) ──
   // Persistent so each folder keeps its view mode/sort/group/zoom across
   // restarts. Keyed by canonical directory path.
   std::unordered_map<std::string, FileBrowserDirView> dir_views;
 
-  // ── Sidebar favorites (bookmarked folders) ──
   std::vector<std::string> favorites;
+  std::vector<std::string> starred;
+  std::vector<std::string> recent;
+  bool track_recent = true;
+  // Default folder the file manager opens to on startup (empty = home).
+  // Set/unset via right-click on any local folder.
+  std::string startup_folder;
+  // Restore last open folders on startup (off by default).
+  bool restore_session = false;  struct RemoteServerBookmark {
+    std::string host;
+    std::string user;
+    std::string path = "/";
+    int port = 22;
+  };
+  std::vector<RemoteServerBookmark> remote_servers;
+  std::string nextcloud_server;
+  std::string nextcloud_user;
+  std::string drive_client_id; // public OAuth client ID (no secret)
+  // Remembered Drive logins (emails only — refresh tokens live in the
+  // login keyring, never here).
+  std::vector<std::string> drive_account_emails;
+  std::map<std::string, std::string> tag_colors;
 
-  // ── Window control button placement ──
   bool window_controls_left = false;
 };
 
@@ -471,6 +493,7 @@ void merge_widget_overrides_from_state_file(ShellConfig& merged);
 [[nodiscard]] std::string legacy_ini_path();
 [[nodiscard]] std::string state_settings_toml_path();
 [[nodiscard]] std::string state_file_browser_toml_path();
+[[nodiscard]] std::string session_toml_path();
 
 [[nodiscard]] std::string normalize_wallpaper_path_for_matugen(const std::string& path);
 
@@ -479,6 +502,17 @@ void merge_widget_overrides_from_state_file(ShellConfig& merged);
 /// Read/write the file-browser-specific TOML (separate from main settings).
 FileBrowserSettings read_file_browser_toml();
 [[nodiscard]] bool write_file_browser_toml(const FileBrowserSettings& fb);
+
+/// Disk-usage analyzer settings (own file; never the file-browser config).
+struct DiskUsageSettings {
+  int drives_opacity_pct = 100; // 0–100
+  int dir_opacity_pct = 100;    // 0–100
+  int ext_opacity_pct = 100;    // 0–100
+  int map_opacity_pct = 100;    // 0–100
+  int bg_opacity_pct = 100;     // 0–100, main surface background
+};
+DiskUsageSettings read_disk_usage_toml();
+[[nodiscard]] bool write_disk_usage_toml(const DiskUsageSettings& du);
 
 /// Read the icon theme directly from the settings.toml on disk (bypasses
 /// the in-memory cache so the file browser can pick up external changes).

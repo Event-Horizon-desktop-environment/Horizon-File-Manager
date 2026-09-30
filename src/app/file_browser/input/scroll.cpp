@@ -35,9 +35,7 @@ namespace fs = std::filesystem;
 namespace xdg = eh::shell::desktop::xdg;
 
 namespace eh::file_browser {
-// ── scroll handler (moved from events.cpp) ──────────────────────────
 void handle_scroll(AppState& app, int x, int, double, double dy) {
-  // ── Sort menu wheel scroll ──
   if (app.r_sort_menu_open || app.sort_menu_open) {
     auto& smx = app.active_pane ? app.r_sort_menu_x : app.sort_menu_x;
     auto& smy = app.active_pane ? app.r_sort_menu_y : app.sort_menu_y;
@@ -77,7 +75,6 @@ void handle_scroll(AppState& app, int x, int, double, double dy) {
     return;
   }
 
-  // ── Properties scroll ──
   if (app.properties.open) {
     int max_scroll = std::max(0, app.properties.content_h - (static_cast<int>(app.properties.h) - 80));
     int delta = (dy > 0) ? 20 : -20;
@@ -89,7 +86,6 @@ void handle_scroll(AppState& app, int x, int, double, double dy) {
     return;
   }
 
-  // ── Wheel over the zoom control: one discrete level per tick ──
   if (app.status_zoom_slider_w > 0 &&
       app.pointerY >= app.height - app.status_bar_height &&
       x >= app.status_zoom_slider_x - 40 &&

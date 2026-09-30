@@ -33,6 +33,7 @@
 
 #include "config/shell_config.hpp"
 #include "base/thread/thread_dispatch.hpp"
+#include "base/thread/thread_pool.hpp"
 #include "platform/common/palette/matugen_palette.hpp"
 #include "platform/desktop/entries/desktop_xdg_ops.hpp"
 #include "dialog/file_chooser_dialog.hpp"
@@ -44,6 +45,10 @@ using menu_clock = std::chrono::steady_clock;
 
 
 namespace eh::file_browser {
+
+// Local-only actions refuse remote targets with a toast (defined below,
+// used by earlier handlers).
+static bool remote_refused_here(AppState& app, const std::string& path);
 
 // (was `static` in context_actions.cpp)
 // Percent-encoding file URI (mirrors ClipboardService/drag encoders).
@@ -141,7 +146,6 @@ static void run_nemo_script(AppState& app, const std::string& script_path) {
 
 // (was `static` in context_actions.cpp)
 
-// ── Open as Administrator ────────────────────────────────────────
 
 // Re-launches the browser as root over pkexec pointed at `target_dir`.
 // pkexec scrubs the environment, so the Wayland session variables the
@@ -339,6 +343,69 @@ bool ctx_run_script(AppState& app, int item_idx, AppState::ContextMenuAction act
   return false;
 }
 
+bool ctx_service_run(AppState& app, int item_idx, AppState::ContextMenuAction action) {
+  if (action == AppState::ContextMenuAction::ServiceRun) {
+    if (item_idx >= 0 &&
+        item_idx < static_cast<int>(app.context_menu_items.size())) {
+      const std::string& cmd = app.context_menu_items[item_idx].data;
+      if (!cmd.empty()) {
+        xdg::spawn_sh_lc_detached(cmd);
+        app.operation_status =
+            "Running " + app.context_menu_items[item_idx].label + "…";
+        app.operation_status_expires_ms = menu_expiry_3s();
+      }
+    }
+    draw(app);
+    return true;
+  }
+  return false;
+}
+
+bool ctx_tag_toggle(AppState& app, int item_idx, AppState::ContextMenuAction action) {
+  if (action != AppState::ContextMenuAction::TagToggle) return false;
+  if (item_idx < 0 ||
+      item_idx >= static_cast<int>(app.context_menu_items.size()))
+    return true;
+  const std::string tag = app.context_menu_items[item_idx].data;
+  if (tag.empty()) return true;
+  // Targets: multi-selection, else the right-clicked entry. Local paths
+  // only (xattrs don't travel over SFTP/Drive; the menu hides otherwise).
+  std::vector<std::string> targets;
+  bool is_multi = app.cur_tab().multi_selected.size() > 1;
+  if (is_multi) {
+    for (int vis_idx : app.cur_tab().multi_selected) {
+      if (vis_idx < 0 ||
+          vis_idx >= static_cast<int>(app.cur_tab().visible_entries.size()))
+        continue;
+      int r = app.cur_tab().visible_entries[vis_idx];
+      if (r < 0 || r >= static_cast<int>(app.cur_tab().entries.size()))
+        continue;
+      const std::string& p = app.cur_tab().entries[r].path;
+      if (!p.empty() && p[0] == '/') targets.push_back(p);
+    }
+  } else if (app.context_menu_file_idx >= 0 &&
+             app.context_menu_file_idx <
+                 static_cast<int>(app.cur_tab().visible_entries.size())) {
+    int r = app.cur_tab().visible_entries[app.context_menu_file_idx];
+    if (r >= 0 && r < static_cast<int>(app.cur_tab().entries.size())) {
+      const std::string& p = app.cur_tab().entries[r].path;
+      if (!p.empty() && p[0] == '/') targets.push_back(p);
+    }
+  }
+  int changed = 0;
+  for (auto& t : targets) {
+    if (write_xdg_tags(t, toggle_tag(read_xdg_tags(t), tag))) ++changed;
+  }
+  if (changed > 0) {
+    app.operation_status =
+        (has_tag(read_xdg_tags(targets.front()), tag) ? "Tagged " : "Untagged ") + tag;
+    app.operation_status_expires_ms = menu_expiry_3s();
+    reload_dir(app);
+  }
+  draw(app);
+  return true;
+}
+
 bool ctx_reload(AppState& app, int item_idx, AppState::ContextMenuAction action) {
   if (action == AppState::ContextMenuAction::Reload) {
     reload_dir(app);
@@ -411,6 +478,7 @@ bool ctx_open_in_terminal(AppState& app, int item_idx, AppState::ContextMenuActi
         target_dir = app.cur_tab().entries[real_idx].path;
       }
     }
+    if (remote_refused_here(app, target_dir)) return true;
     open_terminal_at(app, target_dir);
     return true;
   }
@@ -459,6 +527,65 @@ bool ctx_mount_drive(AppState& app, int item_idx, AppState::ContextMenuAction ac
   return false;
 }
 
+// Fire-and-forget trash auto-maintenance. Snapshots settings (they may
+// change mid-flight); zero-cost when disabled. ThreadPool mirrors the
+// copy engine's fire-and-forget pattern.
+void schedule_trash_maintain(AppState& app) {
+  if (!app.trash_auto_purge) return;
+  int days = app.trash_max_days;
+  uint64_t max_bytes =
+      static_cast<uint64_t>(app.trash_max_mb) * 1024ULL * 1024ULL;
+  ThreadPool::instance().enqueue([days, max_bytes] {
+    xdg::trash_maintain(days, max_bytes);
+  });
+}
+
+bool ctx_disk_usage(AppState& app, int item_idx, AppState::ContextMenuAction action) {
+  if (action != AppState::ContextMenuAction::DiskUsage) return false;
+  if (app.context_menu_sidebar_idx >= 0 &&
+      app.context_menu_sidebar_idx < static_cast<int>(app.sidebar_locations.size())) {
+    const auto& loc = app.sidebar_locations[app.context_menu_sidebar_idx];
+    // Local disks (Kind::Drive) plus the root filesystem row (Kind::Root,
+    // always "/") — both are scannable local paths. Unmounted Drive rows
+    // point at /dev nodes, never a directory, so require mounted there.
+    bool usable =
+        !loc.path.empty() && loc.path[0] == '/' &&
+        (loc.kind == SidebarLocation::Kind::Root ||
+         (loc.kind == SidebarLocation::Kind::Drive && loc.is_mounted));
+    if (usable) {
+      open_disk_usage(app, loc.path);
+      draw(app);
+      return true;
+    }
+  }
+  // File-row folders from the main view (and tree rows): local absolute
+  // directories only; stat re-verifies (dead links, virtual rows).
+  {
+    std::string fpath;
+    if (app.context_menu_file_idx == -9) {
+      fpath = app.context_menu_tree_entry.path;
+    } else if (app.context_menu_file_idx >= 0 &&
+               app.context_menu_file_idx <
+                   static_cast<int>(app.cur_tab().visible_entries.size())) {
+      int real_idx = app.cur_tab().visible_entries[app.context_menu_file_idx];
+      if (real_idx >= 0 &&
+          real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
+          app.cur_tab().entries[real_idx].is_dir)
+        fpath = app.cur_tab().entries[real_idx].path;
+    }
+    if (!fpath.empty() && fpath[0] == '/') {
+      struct stat st {};
+      if (::stat(fpath.c_str(), &st) == 0 && S_ISDIR(st.st_mode)) {
+        open_disk_usage(app, fpath);
+        draw(app);
+        return true;
+      }
+    }
+  }
+  (void)item_idx;
+  return false;
+}
+
 bool ctx_open(AppState& app, int item_idx, AppState::ContextMenuAction action) {
   if (action == AppState::ContextMenuAction::Open &&
       app.context_menu_sidebar_idx >= 0 &&
@@ -470,6 +597,51 @@ bool ctx_open(AppState& app, int item_idx, AppState::ContextMenuAction action) {
       draw(app);
       return true;
     }
+    if (loc.kind == SidebarLocation::Kind::Recent ||
+        loc.kind == SidebarLocation::Kind::Starred ||
+        loc.kind == SidebarLocation::Kind::Remote ||
+        loc.kind == SidebarLocation::Kind::Computer ||
+        loc.kind == SidebarLocation::Kind::Drive ||
+        loc.kind == SidebarLocation::Kind::Home ||
+        loc.kind == SidebarLocation::Kind::Favorite) {
+      navigate_to(app, loc.path);
+      draw(app);
+      return true;
+    }
+  }
+  return false;
+}
+
+bool ctx_connect_server(AppState& app, int item_idx, AppState::ContextMenuAction action) {
+  (void)item_idx;
+  if (action == AppState::ContextMenuAction::ConnectServer) {
+    open_connect_dialog(app);
+    draw(app);
+    return true;
+  }
+  return false;
+}
+
+bool ctx_remove_server(AppState& app, int item_idx, AppState::ContextMenuAction action) {
+  (void)item_idx;
+  if (action == AppState::ContextMenuAction::RemoveServer) {
+    if (app.context_menu_sidebar_idx >= 0 &&
+        app.context_menu_sidebar_idx < static_cast<int>(app.sidebar_locations.size())) {
+      const std::string& uri = app.sidebar_locations[app.context_menu_sidebar_idx].path;
+      auto it = std::remove_if(app.remote_servers.begin(), app.remote_servers.end(),
+                               [&](const AppState::RemoteServer& s) {
+                                 return build_sftp_uri(s.host, s.user, s.port, s.path) == uri;
+                               });
+      if (it != app.remote_servers.end()) {
+        app.remote_servers.erase(it, app.remote_servers.end());
+        save_file_browser_settings(app);
+        refresh_sidebar(app);
+        app.operation_status = "Server removed";
+        app.operation_status_expires_ms = menu_expiry_3s();
+      }
+    }
+    draw(app);
+    return true;
   }
   return false;
 }
@@ -488,6 +660,35 @@ bool ctx_empty_trash(AppState& app, int item_idx, AppState::ContextMenuAction ac
       app.operation_status = "Trash emptied";
       app.operation_status_expires_ms = menu_expiry_3s();
       reload_dir(app);
+    }
+    draw(app);
+    return true;
+  }
+  return false;
+}
+
+bool ctx_clear_recent(AppState& app, int item_idx, AppState::ContextMenuAction action) {
+  if (action == AppState::ContextMenuAction::ClearRecent) {
+    app.recent.clear();
+    save_file_browser_settings(app);
+    if (app.cur_tab().current_path == "recent://") reload_dir(app);
+    app.operation_status = "Recent cleared";
+    app.operation_status_expires_ms = menu_expiry_3s();
+    draw(app);
+    return true;
+  }
+  return false;
+}
+
+bool ctx_crumb_nav(AppState& app, int item_idx, AppState::ContextMenuAction action) {
+  if (action == AppState::ContextMenuAction::BreadcrumbNav) {
+    if (item_idx >= 0 &&
+        item_idx < static_cast<int>(app.context_menu_items.size())) {
+      const std::string& target = app.context_menu_items[item_idx].data;
+      if (!target.empty()) {
+        std::error_code ec;
+        if (fs::is_directory(target, ec) && !ec) navigate_to(app, target);
+      }
     }
     draw(app);
     return true;
@@ -516,6 +717,74 @@ bool ctx_add_to_favorites(AppState& app, int item_idx, AppState::ContextMenuActi
   return false;
 }
 
+// Default startup folder: right-click any local folder (or My Computer /
+// Recent / Starred) to set it as the folder the file manager opens to
+// (persisted in the file-browser TOML), right-click again to unset.
+// Anything else gets a toast instead.
+bool startup_folder_ok(const std::string& p) {
+  if (p == "computer://" || p == "recent://" || p == "starred://") return true;
+  if (p.empty() || p[0] != '/') return false;
+  std::error_code ec;
+  return fs::is_directory(p, ec) && !ec;
+}
+
+namespace {
+
+// Resolve the folder targeted by the current context menu: a folder row
+// (or tree row), a sidebar location, or — for background menus — the
+// current folder. Empty when the menu targets nothing folder-like.
+std::string startup_menu_target(AppState& app) {
+  if (app.context_menu_file_idx == -9) {
+    return app.context_menu_tree_entry.path;
+  }
+  if (app.context_menu_file_idx >= 0 &&
+      app.context_menu_file_idx <
+          static_cast<int>(app.cur_tab().visible_entries.size())) {
+    int r = app.cur_tab().visible_entries[app.context_menu_file_idx];
+    if (r >= 0 && r < static_cast<int>(app.cur_tab().entries.size()) &&
+        app.cur_tab().entries[r].is_dir)
+      return app.cur_tab().entries[r].path;
+    return {};
+  }
+  if (app.context_menu_file_idx == -2 &&
+      app.context_menu_sidebar_idx >= 0 &&
+      app.context_menu_sidebar_idx <
+          static_cast<int>(app.sidebar_locations.size())) {
+    return app.sidebar_locations[app.context_menu_sidebar_idx].path;
+  }
+  // Background menu: the folder being viewed.
+  return app.cur_tab().current_path;
+}
+} // namespace
+
+bool ctx_startup_folder(AppState& app, int item_idx, AppState::ContextMenuAction action) {
+  (void)item_idx;
+  if (action == AppState::ContextMenuAction::SetStartupFolder) {
+    std::string target = startup_menu_target(app);
+    if (!startup_folder_ok(target)) {
+      app.operation_status = "That location can't be the default folder";
+      app.operation_status_expires_ms = menu_expiry_3s();
+      draw(app);
+      return true;
+    }
+    app.startup_folder = target;
+    save_file_browser_settings(app);
+    app.operation_status = "Default folder set to " + target;
+    app.operation_status_expires_ms = menu_expiry_3s();
+    draw(app);
+    return true;
+  }
+  if (action == AppState::ContextMenuAction::ClearStartupFolder) {
+    app.startup_folder.clear();
+    save_file_browser_settings(app);
+    app.operation_status = "Default folder cleared (opens to home)";
+    app.operation_status_expires_ms = menu_expiry_3s();
+    draw(app);
+    return true;
+  }
+  return false;
+}
+
 bool ctx_settings(AppState& app, int item_idx, AppState::ContextMenuAction action) {
   if (action == AppState::ContextMenuAction::Settings) {
     open_settings(app);
@@ -525,7 +794,6 @@ bool ctx_settings(AppState& app, int item_idx, AppState::ContextMenuAction actio
   return false;
 }
 
-// ── Overflow actions for top-bar buttons hidden by the responsive hide
 // loop in draw_top_bar() (narrow windows). The ⋮ menu
 // appends these entries only while their button is hidden, so nothing is
 // ever unreachable.
@@ -774,6 +1042,16 @@ bool ctx_open_in_new_window(AppState& app, int item_idx, AppState::ContextMenuAc
   return false;
 }
 
+static bool remote_refused_here(AppState& app, const std::string& path) {
+  if (is_remote_uri(path)) {
+    app.operation_status = "Not available for remote files yet";
+    app.operation_status_expires_ms = menu_expiry_3s();
+    draw(app);
+    return true;
+  }
+  return false;
+}
+
 bool ctx_open_as_admin(AppState& app, int item_idx, AppState::ContextMenuAction action) {
   if (action == AppState::ContextMenuAction::OpenAsAdmin) {
     std::string target_dir = app.cur_tab().current_path;
@@ -785,6 +1063,7 @@ bool ctx_open_as_admin(AppState& app, int item_idx, AppState::ContextMenuAction 
         target_dir = app.cur_tab().entries[real_idx].path;
       }
     }
+    if (remote_refused_here(app, target_dir)) return true;
     open_as_admin(target_dir);
     draw(app);
     return true;

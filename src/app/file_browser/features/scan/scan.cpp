@@ -20,7 +20,10 @@
 #include "app/file_browser/features/tab_history/tab_history.hpp"
 #include "app/file_browser/features/thumbnails/thumb_pool.hpp"
 #include "app/file_browser/features/filetype/filetype.hpp"
+#include "app/file_browser/features/tags/tags.hpp"
 #include "app/file_browser/features/nav/nav.hpp"
+#include "app/file_browser/features/remote/remote.hpp"
+#include "app/file_browser/features/drive/drive.hpp"
 
 
 namespace eh::file_browser {
@@ -32,6 +35,7 @@ static void recompute_item_counts(Tab& tab, bool show_hidden);
 #include "app/file_browser/features/preview/epub_preview.hpp"
 #include "app/file_browser/features/preview/image_preview.hpp"
 #include "app/file_browser/features/view_zoom/view_zoom.hpp"
+#include "platform/common/bench/memory_usage.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -42,6 +46,9 @@ static void recompute_item_counts(Tab& tab, bool show_hidden);
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#ifdef __GLIBC__
+#include <malloc.h>
+#endif
 #include <filesystem>
 #include <fstream>
 #include <map>
@@ -114,7 +121,6 @@ static int natural_compare(const std::string& a, const std::string& b,
   if (j < b.size()) return -1;
   return 0;
 }
-// ── Background directory scan ────────────────────────────────────────
 //
 // Canonical sort key whose byte-order exactly reproduces
 // natural_compare(a, b, case_sensitive=false). Digit runs are zero-padded to
@@ -294,6 +300,7 @@ struct StatData {
   gid_t gid = 0;
 };
 
+#if defined(EH_HAVE_IO_URING)
 static StatData statdata_from_statx(int res, const struct statx& sx) {
   StatData d;
   if (res == 0 && (sx.stx_mask & STATX_BASIC_STATS)) {
@@ -306,6 +313,7 @@ static StatData statdata_from_statx(int res, const struct statx& sx) {
   }
   return d;
 }
+#endif // EH_HAVE_IO_URING
 
 // Build one FileEntry from a pre-fetched metadata snapshot
 // (pure function of its inputs — safe on any thread).
@@ -390,6 +398,9 @@ static FileEntry make_entry_from(const DirItem& it, const StatData& sd,
     e.icon_name = std::move(icon);
   }
 
+  // Tag badges (user.xdg.tags; one getxattr per file, like the stat above).
+  e.tags_csv = read_xdg_tags(full);
+
   return e;
 }
 
@@ -461,6 +472,7 @@ void refresh_entry_from_disk(FileEntry& e) {
 
   e.mime_type = mime_by_ext(e.name);
   e.type = detect_file_type(e.name, false, e.mime_type, e.path, e.extension);
+  e.tags_csv = read_xdg_tags(e.path);
 
   // Re-derive the icon from the fresh MIME (mirrors make_entry_from) so a
   // changed type (text -> ELF binary) gets the right artwork at next paint.
@@ -770,7 +782,6 @@ static void sort_entries_parallel(std::vector<FileEntry>& entries,
     return;
   }
 
-  // ── Key-based path ──
   std::vector<std::string> keys(n);
   {
     const size_t chunk = (n + K - 1) / K;
@@ -1061,6 +1072,7 @@ void apply_scan_result(AppState& app, bool is_progress) {
   auto t_apply0 = std::chrono::steady_clock::now();
 
   std::vector<FileEntry> incoming;
+  std::string incoming_error;
   {
     std::lock_guard<std::mutex> lk(app.scan_mtx);
     if (app.scan_result.generation != app.scan_generation) {
@@ -1068,6 +1080,8 @@ void apply_scan_result(AppState& app, bool is_progress) {
       return;
     }
     incoming.swap(app.scan_result.entries);
+    incoming_error = std::move(app.scan_result.error);
+    app.scan_result.error.clear();
     if (!is_progress) app.scan_result.generation = 0;
   }
   if (is_progress) {
@@ -1076,8 +1090,17 @@ void apply_scan_result(AppState& app, bool is_progress) {
     app.scan_ready_flag.store(false);
     app.scan_apply_deferred = false;
     app.scan_active_path.clear();
-    app.operation_status.clear();
-    app.operation_status_expires_ms = 0;
+    if (!incoming_error.empty()) {
+      app.operation_status = std::move(incoming_error);
+      app.operation_status_expires_ms =
+          std::chrono::duration_cast<std::chrono::milliseconds>(
+              std::chrono::steady_clock::now().time_since_epoch())
+              .count() +
+          4000;
+    } else {
+      app.operation_status.clear();
+      app.operation_status_expires_ms = 0;
+    }
   }
 
   auto& tab = app.cur_tab();
@@ -1121,7 +1144,6 @@ void apply_scan_result(AppState& app, bool is_progress) {
   if (::stat(tab.current_path.c_str(), &dir_st) == 0)
     tab.dir_mtime = static_cast<int64_t>(dir_st.st_mtime);
 
-  // ── Dynamic view: media-heavy folders auto-switch to icon view once ──
   // Images/videos must outweigh all other
   // entries 2:1, with each subdirectory only counting a third.
   {
@@ -1150,6 +1172,10 @@ void apply_scan_result(AppState& app, bool is_progress) {
         app.last_browser_view_mode = ViewMode::Grid;
         tab.dynamic_view_done = true;
         app.media_folder_child[tab.current_path] = first_media;
+        // Bound: one entry per visited media folder; evict arbitrarily past cap.
+        static constexpr std::size_t kMediaChildMax = 256;
+        while (app.media_folder_child.size() > kMediaChildMax)
+          app.media_folder_child.erase(app.media_folder_child.begin());
       }
     }
   }
@@ -1188,9 +1214,25 @@ void apply_scan_result(AppState& app, bool is_progress) {
             std::chrono::duration<double, std::milli>(
                 std::chrono::steady_clock::now() - t_apply0).count());
 
+  // RAM breakdown on demand: EH_MEM=1 prints RSS/PSS + cache sizes per apply.
+  eh::shell::mem::log_mem_breakdown(is_progress ? "apply-progress" : "apply",
+                                    app.thumb_cache_bytes,
+                                    app.icons.cache_bytes(),
+                                    tab.entries.size());
+
   // Final scan landed: resolve all visible icons synchronously so the next
   // paint is final artwork — no placeholder flash on folder open/switch.
   if (!is_progress) prewarm_tab_icons(app);
+
+  // Transient scan vectors (incoming/parts/keys) just freed bulk pages that
+  // glibc keeps per-arena. Hand them back on every landed listing: apply-time
+  // mall_free routinely shows ~30MB retained on a ~40MB holding. Cheap
+  // (~100us) next to the readdir+statx the nav just did.
+  if (!is_progress) {
+#ifdef __GLIBC__
+    ::malloc_trim(0);
+#endif
+  }
 }
 
 static void recompute_item_counts(Tab& tab, bool show_hidden) {
@@ -1261,10 +1303,74 @@ void reload_dir(AppState& app) {
   reset_preview(app);
   hide_tooltip(app);
 
+  // Native Drive URIs go through the Drive worker (same scan slot).
+  if (is_drive_uri(app.cur_tab().current_path)) {
+    reload_drive_dir(app);
+    return;
+  }
+
+  // Remote URIs go through the GVfs worker (reuses the scan slot below).
+  if (is_remote_uri(app.cur_tab().current_path)) {
+    reload_remote_dir(app);
+    return;
+  }
+
   // Virtual computer view — no directory to load
   if (app.cur_tab().current_path == "computer://") {
     app.cur_tab().view_mode = ViewMode::Computer;
     app.computer_needs_refresh = true;
+    return;
+  }
+
+  // Virtual Recent / Starred views — build from in-memory lists.
+  if (app.cur_tab().current_path == "recent://" ||
+      app.cur_tab().current_path == "starred://") {
+    join_scan(app);
+    app.scan_ready_flag.store(false);
+    app.scan_progress_flag.store(false);
+    app.scan_active_path.clear();
+    const bool starred = app.cur_tab().current_path == "starred://";
+    const std::vector<std::string>& src = starred ? app.starred : app.recent;
+    std::vector<FileEntry> v;
+    v.reserve(src.size());
+    for (const auto& p : src) {
+      std::error_code ec;
+      bool is_dir = fs::is_directory(p, ec);
+      if (ec) continue;
+      // Prune entries that no longer exist (files AND dirs).
+      if (!is_dir && !fs::is_regular_file(p, ec) && !fs::is_symlink(p, ec)) {
+        std::error_code ec2;
+        if (!fs::exists(p, ec2) || ec2) continue;
+      }
+      FileEntry e;
+      e.path = p;
+      e.name = fs::path(p).filename().string();
+      if (e.name.empty()) e.name = p;
+      e.is_dir = is_dir;
+      e.is_hidden = !e.name.empty() && e.name[0] == '.';
+      struct stat st{};
+      if (::stat(p.c_str(), &st) == 0) {
+        e.size = is_dir ? 0 : static_cast<uint64_t>(st.st_size);
+        e.modified_sec = st.st_mtime;
+        e.mode = st.st_mode;
+      }
+      e.type = detect_file_type_for_path(e.name, e.is_dir, e.path);
+      v.push_back(std::move(e));
+    }
+    auto& tab = app.cur_tab();
+    tab.entries = std::move(v);
+    tab.tree_entries_dirty = true;
+    ++app.listing_epoch;
+    tab.visible_entries.clear();
+    tab.visible_entries.reserve(tab.entries.size());
+    for (int i = 0; i < static_cast<int>(tab.entries.size()); ++i) {
+      if (!app.show_hidden && tab.entries[i].is_hidden) continue;
+      if (!query_matches_entry(app, tab.entries[i].name)) continue;
+      tab.visible_entries.push_back(i);
+    }
+    recompute_item_counts(tab, app.show_hidden);
+    reset_scroll_and_selection(app);
+    tab.dir_mtime = 0;
     return;
   }
 
@@ -1277,7 +1383,6 @@ void reload_dir(AppState& app) {
     app.cur_tab().view_mode = app.last_browser_view_mode;
   }
 
-  // ── Per-folder .directory view properties ──
   app.cur_tab().dynamic_view_done = false;
   if (app.per_folder_props) {
     DirProps dp;
@@ -1309,7 +1414,6 @@ void reload_dir(AppState& app) {
     }
   }
 
-  // ── Launch the scan on a background thread ──
   std::string scan_path = fs::path(app.cur_tab().current_path).lexically_normal().string();
   if (!scan_path.empty() && scan_path != app.cur_tab().current_path)
     app.cur_tab().current_path = scan_path;   // collapse '//', trailing '/'
@@ -1345,6 +1449,7 @@ void reload_dir(AppState& app) {
     fprintf(stderr, "[perf] reload_dir '%s' joined in-flight scan\n",
             scan_path.c_str());
   if (!reusable) {
+    remote_cancel_inflight(app);
     join_scan(app);
 
   const uint64_t gen = ++app.scan_generation;
@@ -1365,6 +1470,7 @@ void reload_dir(AppState& app) {
       ap->scan_result.generation = gen;
       ap->scan_result.path = scan_path;
       ap->scan_result.entries = std::move(skel);
+      ap->scan_result.error.clear();
       ap->scan_progress_flag.store(true, std::memory_order_release);
     };
     scan_entries(scan_path, sp, v, ap->scan_cancel, on_progress);
@@ -1382,6 +1488,7 @@ void reload_dir(AppState& app) {
     ap->scan_result.generation = gen;
     ap->scan_result.path = scan_path;
     ap->scan_result.entries = std::move(v);
+    ap->scan_result.error.clear();
     ap->scan_ready_flag.store(true);
     ap->scan_progress_flag.store(false, std::memory_order_release);
   });

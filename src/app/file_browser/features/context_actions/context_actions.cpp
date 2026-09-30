@@ -62,7 +62,6 @@ std::vector<std::string> selected_entry_paths(eh::file_browser::AppState& app) {
   return paths;
 }
 
-// ── context menu action execution ────────────────────────────────
 
 void execute_context_menu_action(AppState& app, int item_idx) {
   if (item_idx < 0 ||
@@ -75,42 +74,39 @@ void execute_context_menu_action(AppState& app, int item_idx) {
   if (action == AppState::ContextMenuAction::Separator)
     return;
 
-  // ── Path editing context menu actions ──
   if (ctx_path_edit_menu(app, item_idx, action)) return;
-  // ── Dialog text editing context menu actions ──
   if (ctx_dialog_text_menu(app, item_idx, action)) return;
   if (ctx_new_folder(app, item_idx, action)) return;
   if (ctx_new_document(app, item_idx, action)) return;
   if (ctx_new_from_template(app, item_idx, action)) return;
   if (ctx_run_script(app, item_idx, action)) return;
+  if (ctx_service_run(app, item_idx, action)) return;
+  if (ctx_tag_toggle(app, item_idx, action)) return;
   if (ctx_reload(app, item_idx, action)) return;
   if (ctx_copy_location(app, item_idx, action)) return;
   if (ctx_select_all(app, item_idx, action)) return;
-  // ── Dots menu "Open With…" — use selected file if any ──
   if (ctx_open_with(app, item_idx, action)) return;
-  // ── Background/dots menu "Properties" — current directory ──
   if (ctx_properties(app, item_idx, action)) return;
   if (ctx_paste(app, item_idx, action)) return;
   if (ctx_open_in_terminal(app, item_idx, action)) return;
   if (ctx_remove_from_favorites(app, item_idx, action)) return;
   if (ctx_unmount_drive(app, item_idx, action)) return;
   if (ctx_mount_drive(app, item_idx, action)) return;
-  // ── Open Trash in current tab ──
+  if (ctx_disk_usage(app, item_idx, action)) return;
   if (ctx_open(app, item_idx, action)) return;
-  // ── Empty Trash ──
   if (ctx_empty_trash(app, item_idx, action)) return;
+  if (ctx_clear_recent(app, item_idx, action)) return;
+  if (ctx_crumb_nav(app, item_idx, action)) return;
   if (ctx_add_to_favorites(app, item_idx, action)) return;
+  if (ctx_startup_folder(app, item_idx, action)) return;
   if (ctx_settings(app, item_idx, action)) return;
   if (ctx_toolbar_overflow(app, item_idx, action)) return;
-  // ── Open in new tab ──
   if (ctx_open_in_new_tab(app, item_idx, action)) return;
-  // ── Tab context menu actions ──
+  if (ctx_connect_server(app, item_idx, action)) return;
+  if (ctx_remove_server(app, item_idx, action)) return;
   if (ctx_tab_menu(app, item_idx, action)) return;
-  // ── Open in new window ──
   if (ctx_open_in_new_window(app, item_idx, action)) return;
-  // ── Open as Administrator ──
   if (ctx_open_as_admin(app, item_idx, action)) return;
-  // ── Open file location (navigate to parent dir) ──
   if (ctx_open_file_location(app, item_idx, action)) return;
 
   // Tree-row menus carry their own materialized target: expanded rows have

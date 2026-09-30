@@ -43,7 +43,6 @@ namespace fs = std::filesystem;
 namespace xdg = eh::shell::desktop::xdg;
 
 namespace eh::file_browser {
-// ── handle_key dispatcher (moved from events.cpp) ──────────────────────────────
 bool handle_key(AppState& app, uint32_t, uint32_t state,
                 xkb_keysym_t sym, const char* utf8, int utf8_len) {
   // Key release — clear repeat tracking
@@ -61,7 +60,6 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   bool alt = xkb && xkb_state_mod_name_is_active(xkb, XKB_MOD_NAME_ALT,
                                                   XKB_STATE_MODS_EFFECTIVE) != 0;
 
-  // ── Properties window keyboard (octal editor / tags editor / Escape) ──
   if (key_properties(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
 
   // In split view, determine which pane has keyboard focus
@@ -72,19 +70,19 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
       app.active_pane = 0;
   }
 
-  // ── Cancel running operation ──
   if (key_cancel_op(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
 
-  // ── Confirm dialog keys ──
   if (key_confirm(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
 
-  // ── Settings dialog keys ──
+  if (app.du_open && app.focused_surface == app.du_surface) {
+    if (handle_du_key(app, sym, ctrl)) return true;
+    return true; // swallow everything else on this surface
+  }
+
   if (key_settings(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
 
-  // ── Select-by-pattern dialog keys ──
   if (key_select_pattern(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
 
-  // ── Compress dialog keys ──
   if (key_compress(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
 
   if (key_create(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
@@ -92,38 +90,32 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   if (key_rename_ui(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
   if (key_batch_rename(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
   if (key_term_chooser(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
+  if (key_checksum(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
+  if (key_connect(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
+  if (key_remote_auth(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
 
-  // ── Search bar keyboard handler (local + recursive) ──
   // Ctrl+H falls through so the global show-hidden toggle keeps working
   const bool show_hidden_passthrough =
       ctrl && !shift && !alt && (sym == XKB_KEY_H || sym == XKB_KEY_h);
   if (key_search(app, sym, ctrl, shift, alt, utf8, utf8_len,
                  show_hidden_passthrough)) return true;
 
-  // ── Path editing keyboard handler ──
   // Ctrl+H falls through so the global show-hidden toggle keeps working
   if (key_path_edit(app, sym, ctrl, shift, alt, utf8, utf8_len,
                     show_hidden_passthrough)) return true;
 
-  // ── Tab shortcuts ──
   if (key_global_shortcuts(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
 
-  // ── Main navigation keys (switch) ──
   if (key_navigate(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
 
-  // ── Printable-text fallback into dialog buffers ──
   if (key_text_fallback(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
 
-  // ── Type-to-find: printable character activates search bar ──
   if (key_type_to_find(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
 
-  // ── Space preview dismiss ──
   if (key_space_dismiss(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
 
-  // ── Dismiss drop action chooser ──
   if (key_drop_dismiss(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
 
-  // ── Escape: clear cut indicator and selection ──
   if (key_escape_clear(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
 
   return false;

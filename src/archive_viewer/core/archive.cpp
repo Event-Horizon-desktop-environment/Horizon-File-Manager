@@ -711,7 +711,8 @@ bool create_archive(const std::string& archive_path,
                      const std::vector<std::string>& files,
                      std::string* error_out,
                      std::atomic<float>* progress,
-                     size_t total_entries) {
+                     size_t total_entries,
+                     int compression_level) {
   if (files.empty()) {
     if (error_out) *error_out = "no input files specified";
     return false;
@@ -724,6 +725,18 @@ bool create_archive(const std::string& archive_path,
     if (error_out) *error_out = last_error();
     archive_write_free(a);
     return false;
+  }
+  if (compression_level >= 0 && compression_level <= 9) {
+    // Best-effort per filter; unknown names are ignored by libarchive.
+    static const char* kMods[] = {"gzip", "bzip2", "xz",  "lzma",
+                                  "zip",  "zstd",  "lzo", "lz4",
+                                  nullptr};
+    char opt[64];
+    for (int i = 0; kMods[i]; ++i) {
+      std::snprintf(opt, sizeof(opt), "%s:compression-level=%d", kMods[i],
+                    compression_level);
+      archive_write_set_options(a, opt);
+    }
   }
 
   int r = archive_write_open_filename(a, archive_path.c_str());
@@ -1004,7 +1017,6 @@ std::string get_comment(const std::string&) {
   return {};
 }
 
-// ── Batch / parallel operations ──────────────────────────────────────
 
 std::vector<BatchItem> batch_check(const std::vector<std::string>& paths,
                                     size_t jobs) {

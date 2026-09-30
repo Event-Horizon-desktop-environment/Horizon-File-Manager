@@ -126,7 +126,6 @@ private:
   std::function<void()> onDragFinished_;
 };
 
-// --- inline implementations ---
 
 inline float Slider::animatedValue(uint64_t nowMs) const {
   if (animDurationMs_ == 0) return value_;

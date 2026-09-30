@@ -5,6 +5,8 @@
 // and the painter can never disagree again about when the sidebar is folded
 // and how much layout space it occupies.
 #include "app/file_browser/app.hpp"
+#include "app/file_browser/features/accounts/accounts.hpp"
+#include "app/file_browser/features/drive/drive.hpp"
 #include "app/file_browser/features/sidebar/sidebar.hpp"
 #include "app/file_browser/trace.hpp"
 #include "ui/hit.hpp"
@@ -21,6 +23,112 @@
 
 #include <algorithm>
 #include <atomic>
+
+namespace {
+// Native Drive rows (Kind::Drive, "drive:" id) live in the NETWORK section:
+// they need no mount step and navigating is a single click.
+bool is_cloud_row(const eh::file_browser::SidebarLocation& loc) {
+  return loc.kind == eh::file_browser::SidebarLocation::Kind::Drive &&
+         loc.drive_id.rfind("drive:", 0) == 0;
+}
+} // namespace
+
+namespace eh::file_browser {
+
+SidebarLayout sidebar_layout(const std::vector<SidebarLocation>& locs) {
+  SidebarLayout l;
+  l.total = static_cast<int>(locs.size());
+  while (l.places_end < l.total &&
+         locs[l.places_end].kind != SidebarLocation::Kind::Favorite &&
+         locs[l.places_end].kind != SidebarLocation::Kind::Network &&
+         locs[l.places_end].kind != SidebarLocation::Kind::Remote &&
+         locs[l.places_end].kind != SidebarLocation::Kind::Root &&
+         locs[l.places_end].kind != SidebarLocation::Kind::Drive)
+    ++l.places_end;
+  l.fav_start = l.places_end;
+  while (l.fav_start < l.total &&
+         locs[l.fav_start].kind == SidebarLocation::Kind::Favorite)
+    ++l.fav_start;
+  l.network_end = l.fav_start;
+  while (l.network_end < l.total &&
+         (locs[l.network_end].kind == SidebarLocation::Kind::Network ||
+          locs[l.network_end].kind == SidebarLocation::Kind::Remote ||
+          is_cloud_row(locs[l.network_end])))
+    ++l.network_end;
+  l.drives_start = l.network_end;
+  l.searches_start = l.total;
+  for (int i = l.total - 1; i >= l.drives_start; --i) {
+    if (locs[static_cast<size_t>(i)].kind != SidebarLocation::Kind::SavedSearch)
+      break;
+    l.searches_start = i;
+  }
+  const double zf = kSidebarZf;
+  l.header_h = static_cast<int>(24.0 * zf);
+  l.div_h = static_cast<int>(16.0 * zf) + 1 + static_cast<int>(16.0 * zf);
+  l.top_pad = static_cast<int>(24.0 * zf);
+  // Mirror the paint order exactly: top pad, PLACES header always, then
+  // each non-empty section with a divider + header first.
+  int y = l.top_pad + l.header_h;
+  for (int i = 0; i < l.places_end; ++i) y += sidebar_row_h(locs[i]);
+  if (l.fav_start > l.places_end) {
+    y += l.div_h + l.header_h;
+    for (int i = l.places_end; i < l.fav_start; ++i) y += sidebar_row_h(locs[i]);
+  }
+  if (l.network_end > l.fav_start) {
+    y += l.div_h + l.header_h;
+    for (int i = l.fav_start; i < l.network_end; ++i) y += sidebar_row_h(locs[i]);
+  }
+  if (l.total > l.drives_start) {
+    y += l.div_h + l.header_h;
+    for (int i = l.drives_start; i < l.searches_start; ++i) y += sidebar_row_h(locs[i]);
+  }
+  if (l.total > l.searches_start) {
+    y += l.div_h + l.header_h;
+    for (int i = l.searches_start; i < l.total; ++i) y += sidebar_row_h(locs[i]);
+  }
+  l.content_h = y;
+  return l;
+}
+
+int SidebarLayout::row_y(const std::vector<SidebarLocation>& locs,
+                         int idx) const {
+  int y = top_pad + header_h;
+  for (int i = 0; i < places_end; ++i) {
+    if (i == idx) return y;
+    y += sidebar_row_h(locs[i]);
+  }
+  if (fav_start > places_end) {
+    y += div_h + header_h;
+    for (int i = places_end; i < fav_start; ++i) {
+      if (i == idx) return y;
+      y += sidebar_row_h(locs[i]);
+    }
+  }
+  if (network_end > fav_start) {
+    y += div_h + header_h;
+    for (int i = fav_start; i < network_end; ++i) {
+      if (i == idx) return y;
+      y += sidebar_row_h(locs[i]);
+    }
+  }
+  if (total > drives_start) {
+    y += div_h + header_h;
+    for (int i = drives_start; i < searches_start; ++i) {
+      if (i == idx) return y;
+      y += sidebar_row_h(locs[i]);
+    }
+  }
+  if (total > searches_start) {
+    y += div_h + header_h;
+    for (int i = searches_start; i < total; ++i) {
+      if (i == idx) return y;
+      y += sidebar_row_h(locs[i]);
+    }
+  }
+  return y;
+}
+
+} // namespace eh::file_browser
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -83,7 +191,6 @@ std::string format_size(uint64_t bytes) {
   return std::to_string(bytes / (1024ULL * 1024 * 1024)) + " GB";
 }
 
-// ── size, draw, hit-testing, model refresh (moved from draw.cpp / nav.cpp) ──
 
 void size_sidebar_to_content(AppState& app, cairo_t* cr) {
   if (!app.sidebar_expanded || app.sidebar_locations.empty()) return;
@@ -126,49 +233,22 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
     (void)tag;
   };
   double zf = app.zoom_pct / 100.0;
-  int total = static_cast<int>(app.sidebar_locations.size());
-  // Find section boundaries in sidebar_locations order:
-  //   Places (Home..Trash) → Favorites → Drives (Root, Drive)
-  int places_end = 0;
-  while (places_end < total &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Favorite &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Root &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Drive)
-    ++places_end;
+  // Single source of truth for sections + content height (scroll clamp,
+  // hit-testing and paint below all derive from it).
+  const SidebarLayout layout = sidebar_layout(app.sidebar_locations);
+  const int total = layout.total;
+  const int places_end = layout.places_end;
+  const int fav_start = layout.fav_start;
+  const int network_end = layout.network_end;
+  const int drives_start = layout.drives_start;
+  const int searches_start = layout.searches_start;
 
-  int fav_start = places_end;
-  while (fav_start < total &&
-         app.sidebar_locations[fav_start].kind == SidebarLocation::Kind::Favorite)
-    ++fav_start;
-
-  int drives_start = fav_start;
-
-  // Compute total sidebar content height for scroll clamping
-  // Items keep a fixed readable size and overflow scrolls
+  // Scroll clamp against the exact painted extent.
   {
-    int p_count = places_end;
-    int f_count = fav_start - places_end;
-    int d_count = total - drives_start;
-    int item_h = static_cast<int>(36 * 1.2);
-    int drive_extra_h = static_cast<int>(16 * 1.2);
-    int header_h = static_cast<int>(24 * 1.2);
-    int div_total = static_cast<int>(17 * 1.2);
-    int drives_h = 0;
-    for (int i = drives_start; i < total; ++i) {
-      const auto& loc = app.sidebar_locations[i];
-      drives_h += item_h;
-      if ((loc.kind == SidebarLocation::Kind::Drive ||
-           loc.kind == SidebarLocation::Kind::Root) &&
-          loc.total_bytes > 0 && loc.is_mounted)
-        drives_h += drive_extra_h;
-    }
-    int total_needed = header_h + p_count * item_h +
-                       div_total + header_h + f_count * item_h +
-                       div_total + header_h + drives_h;
     int available = app.height - app.top_bar_height - app.tab_bar_height - app.status_bar_height;
-    app.sidebar_content_h = total_needed;
+    app.sidebar_content_h = layout.content_h;
     // Clamp scroll to prevent blank space below last item
-    int max_scroll = std::max(0, total_needed - available);
+    int max_scroll = std::max(0, layout.content_h - available);
     if (app.sidebar_scroll_px > max_scroll)
       app.sidebar_scroll_px = max_scroll;
   }
@@ -179,10 +259,9 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
 
   auto draw_item = [&](int idx) {
     const auto& loc = app.sidebar_locations[idx];
-    bool has_usage = (loc.kind == SidebarLocation::Kind::Drive ||
-                      loc.kind == SidebarLocation::Kind::Root) &&
-                     loc.total_bytes > 0 && loc.is_mounted;
-    int item_h = has_usage ? static_cast<int>(52.0 * zf) : static_cast<int>(36.0 * zf);
+    // Row heights come from the shared layout helpers (zf is pinned to
+    // kSidebarZf above), so paint can never drift from the scroll clamp.
+    int item_h = sidebar_row_h(loc);
     bool hovered = (idx == app.sidebar_hover_idx);
     bool drop_target = app.drop_target_is_sidebar && idx == app.drop_target_sidebar_idx;
 
@@ -311,16 +390,19 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
     bool is_drive_kind =
         loc.kind == SidebarLocation::Kind::Drive ||
         loc.kind == SidebarLocation::Kind::Root;
+    // Cloud rows have no mount indicator; other drives reserve room for it.
+    bool cloud = is_cloud_row(loc);
     // Drives leave room for the mount indicator; other rows a small margin.
     int max_label_w = sidebar_w - label_x -
-                      static_cast<int>((is_drive_kind ? 40.0 : 14.0) * zf);
+                      static_cast<int>((is_drive_kind && !cloud ? 40.0 : 14.0) * zf);
     std::string shown = hui::design::clip_end(cr, loc.label, max_label_w);
     cairo_move_to(cr, label_x,
                   y + main_row_h / 2 + static_cast<int>(4.0 * zf));
     cairo_show_text(cr, shown.c_str());
 
-    // Mount indicator for drives
-    if (loc.kind == SidebarLocation::Kind::Drive) {
+    // Mount indicator for drives (never for cloud rows: no mount step,
+    // so the eject icon would be a dead end).
+    if (loc.kind == SidebarLocation::Kind::Drive && !is_cloud_row(loc)) {
       if (loc.is_mounted && app.mounted_svg) {
         int ind_sz = static_cast<int>(18.0 * zf);
         int ind_x = sidebar_w - static_cast<int>(24.0 * zf);
@@ -330,6 +412,7 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
           cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                                  app.text_secondary_b, 0.12);
           double rad = ind_sz * 0.5 + 4;
+          cairo_new_path(cr); // standalone disc
           cairo_arc(cr, ind_x + ind_sz / 2.0, ind_y + ind_sz / 2.0, rad, 0, 2 * M_PI);
           cairo_fill(cr);
         }
@@ -349,7 +432,7 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
     }
 
     // Usage progress bar for drives with data
-    if (has_usage) {
+    if (sidebar_has_usage(loc)) {
       int usage_y = y + main_row_h;
       int bar_x = icon_x;
       int bar_w = sidebar_w - bar_x - static_cast<int>(12.0 * zf);
@@ -396,13 +479,11 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
   };
 
   sub("pre");
-  // ── PLACES ──
   draw_header("PLACES");
   for (int i = 0; i < std::min(places_end, total); ++i)
     draw_item(i);
 
   sub("places");
-  // ── FAVORITES ──
   if (fav_start > places_end) {
     draw_divider();
     draw_header("FAVORITES");
@@ -513,19 +594,74 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
   }
 
   sub("favorites");
-  // ── DRIVES ──
-  if (drives_start < total) {
+  if (network_end > fav_start) {
+    draw_divider();
+    draw_header("NETWORK");
+    for (int i = fav_start; i < std::min(network_end, total); ++i)
+      draw_item(i);
+  }
+
+  sub("network");
+  if (searches_start > drives_start) {
     draw_divider();
     draw_header("DRIVES");
-    for (int i = drives_start; i < total; ++i)
+    for (int i = drives_start; i < std::min(searches_start, total); ++i)
       draw_item(i);
+  }
+
+  sub("drives");
+  if (total > searches_start) {
+    draw_divider();
+    draw_header("SEARCHES");
+    for (int i = searches_start; i < total; ++i)
+      draw_item(i);
+  }
+
+  sub("searches");
+
+  // the content overflows the panel. Wheel scrolls (input/scroll.cpp);
+  // the thumb drags (begin_sidebar_scroll in input).
+  {
+    int panel_h = app.height - app.status_bar_height - top_y;
+    int max_scroll = std::max(0, app.sidebar_content_h - panel_h);
+    app.sidebar_scroll_max = max_scroll;
+    if (max_scroll > 0 && sidebar_w > 16 && panel_h > 40) {
+      int track_x = sidebar_w - 8;
+      int track_y = top_y + 4;
+      int track_h = std::max(1, panel_h - 8);
+      int thumb_h =
+          std::max(28, track_h * panel_h / app.sidebar_content_h);
+      if (thumb_h > track_h) thumb_h = track_h;
+      int thumb_y =
+          track_y + (track_h - thumb_h) * app.sidebar_scroll_px / max_scroll;
+      app.sidebar_scroll_track[0] = track_x - 3;
+      app.sidebar_scroll_track[1] = track_y;
+      app.sidebar_scroll_track[2] = 10;
+      app.sidebar_scroll_track[3] = track_h;
+      app.sidebar_scroll_thumb[0] = track_x;
+      app.sidebar_scroll_thumb[1] = thumb_y;
+      app.sidebar_scroll_thumb[2] = 4;
+      app.sidebar_scroll_thumb[3] = thumb_h;
+      bool active = app.sidebar_scroll_dragging ||
+                    (app.pointerX >= track_x - 3 &&
+                     app.pointerX < track_x + 7 &&
+                     app.pointerY >= thumb_y &&
+                     app.pointerY < thumb_y + thumb_h);
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                            app.text_secondary_b, active ? 0.75 : 0.4);
+      draw_rounded_rect(cr, track_x, thumb_y, 4, thumb_h, 2);
+      cairo_fill(cr);
+    } else {
+      app.sidebar_scroll_track[2] = 0;
+      app.sidebar_scroll_thumb[3] = 0;
+    }
   }
 }
 
 int hit_test_sidebar(AppState& app, int x, int y) {
   // Resolved through the retained hit registry (rects stored during paint),
   // never re-derived here: sidebar geometry cannot drift (see
-  // ui/hit_registry.hpp). Only the chrome bounds below are checked
+  // ui/hit.hpp). Only the chrome bounds below are checked
   // directly; rows come from the registry.
   int side_w = app.effective_sidebar_width();
   if (side_w <= 0) return -1;
@@ -557,30 +693,20 @@ bool hit_test_fav_section(AppState& app, int x, int y) {
       y0 >= app.height - app.status_bar_height - top)
     return false;
 
-  double zf = 1.2;
-  int total = static_cast<int>(app.sidebar_locations.size());
+  const SidebarLayout layout = sidebar_layout(app.sidebar_locations);
+  const int total = layout.total;
+  const int places_end = layout.places_end;
+  const int fav_start = layout.fav_start;
+  const int network_end = layout.network_end;
 
-  int places_end = 0;
-  while (places_end < total &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Favorite &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Root &&
-         app.sidebar_locations[places_end].kind != SidebarLocation::Kind::Drive)
-    ++places_end;
-
-  int fav_start = places_end;
-  while (fav_start < total &&
-         app.sidebar_locations[fav_start].kind == SidebarLocation::Kind::Favorite)
-    ++fav_start;
-
-  int drives_start = fav_start;
+  const int drives_start = network_end;
   int fav_count = fav_start - places_end;
-  if (fav_count == 0 && drives_start >= total) return false;
+  if (fav_count == 0 && network_end >= total) return false;
 
-  int padding = static_cast<int>(24.0 * zf);
-  int header_h = static_cast<int>(24.0 * zf);
-  int item_h = static_cast<int>(36.0 * zf);
-  int div_pad = static_cast<int>(16.0 * zf);
-  int div_total = div_pad + 1 + div_pad;
+  int padding = layout.top_pad;
+  int header_h = layout.header_h;
+  int item_h = static_cast<int>(36.0 * kSidebarZf);
+  int div_total = layout.div_h;
 
   int rel_y = y0 + app.sidebar_scroll_px;
 
@@ -611,6 +737,9 @@ void refresh_sidebar(AppState& app) {
   };
 
   add_location(SidebarLocation::Kind::Computer, "My Computer", "computer://", "computer");
+  if (app.recent_enabled)
+    add_location(SidebarLocation::Kind::Recent, "Recent", "recent://", "document-open-recent");
+  add_location(SidebarLocation::Kind::Starred, "Starred", "starred://", "starred");
 
   add_location(SidebarLocation::Kind::Home, "Home", home, "user-home");
   add_location(SidebarLocation::Kind::Desktop, "Desktop", desktop_dir(), "user-desktop");
@@ -627,7 +756,6 @@ void refresh_sidebar(AppState& app) {
   add_location(SidebarLocation::Kind::Trash, "Trash",
                home + "/.local/share/Trash/files", "user-trash");
 
-  // ── Favorites ──
   for (const auto& fav_path : app.favorites) {
     std::string label = fs::path(fav_path).filename().string();
     if (label.empty()) label = fav_path;
@@ -639,7 +767,18 @@ void refresh_sidebar(AppState& app) {
     app.sidebar_locations.push_back(std::move(loc));
   }
 
-  // ── Drives ──
+  add_location(SidebarLocation::Kind::Network, "Network", "network://",
+               "folder-remote");
+
+  for (const auto& srv : app.remote_servers) {
+    SidebarLocation loc;
+    loc.kind = SidebarLocation::Kind::Remote;
+    loc.label = (srv.user.empty() ? "" : srv.user + "@") + srv.host;
+    loc.path = build_sftp_uri(srv.host, srv.user, srv.port, srv.path);
+    loc.icon_name = "folder-remote";
+    app.sidebar_locations.push_back(std::move(loc));
+  }
+
 
   // Build device → mountpoint map from /proc/mounts (needed for root label + drive filtering)
   std::map<std::string, std::string> mount_map;
@@ -729,6 +868,10 @@ void refresh_sidebar(AppState& app) {
   // Find root device and its filesystem label
   std::string root_dev;
   std::string root_label;
+  // Whether root_label is a real name (vs a capacity/device fallback).
+  // The root row must read as a place ("File System"), never as a bare
+  // capacity like "1.8TB" — capacity already shows in the usage bar lines.
+  bool root_has_name = false;
   for (auto& [dev, mp] : mount_map) {
     if (mp == "/") { root_dev = dev; break; }
   }
@@ -780,7 +923,9 @@ void refresh_sidebar(AppState& app) {
         closedir(plabel);
       }
     }
-    if (root_label.empty() || drives::is_generic_partition_label(root_label)) {
+    root_has_name =
+        !root_label.empty() && !drives::is_generic_partition_label(root_label);
+    if (!root_has_name) {
       uint64_t size = drives::get_device_size_bytes(root_dev);
       if (size > 0)
         root_label = drives::format_device_size(size);
@@ -789,7 +934,7 @@ void refresh_sidebar(AppState& app) {
     }
   }
   add_location(SidebarLocation::Kind::Root,
-               root_label.empty() ? "File System" : root_label.c_str(),
+               root_has_name ? root_label.c_str() : "File System",
                "/", "drive-harddisk");
   {
     struct statvfs vfs;
@@ -895,11 +1040,39 @@ void refresh_sidebar(AppState& app) {
     }
   }
 
+  // rows stay visible above the (often tall) local-disk list. No mount
+  // step — the "drive:" drive_id navigates straight in, mount/unmount
+  // ignore it.
+  for (auto& loc : drive_sidebar_rows(app))
+    app.sidebar_locations.push_back(std::move(loc));
+
   for (auto& loc : drive_locs)
     app.sidebar_locations.push_back(std::move(loc));
+
+  // other non-native mounts). Listed with the drives, Nautilus-style; the
+  // "gio:" drive_id routes their mount/unmount clicks to the GIO workers.
+  for (auto& vol : gio_list_network_volumes()) {
+    SidebarLocation loc;
+    loc.kind = SidebarLocation::Kind::Drive;
+    loc.label = vol.name;
+    loc.icon_name = vol.icon.empty() ? "folder-remote" : vol.icon;
+    loc.path = vol.uri;
+    loc.drive_id = vol.key;
+    loc.is_mounted = vol.mounted;
+    app.sidebar_locations.push_back(std::move(loc));
+  }
+
+  for (size_t i = 0; i < app.saved_searches.size(); ++i) {
+    SidebarLocation loc;
+    loc.kind = SidebarLocation::Kind::SavedSearch;
+    loc.label = app.saved_searches[i].query;
+    loc.path = app.saved_searches[i].base_path;
+    loc.icon_name = "system-search";
+    loc.saved_search_idx = static_cast<int>(i);
+    app.sidebar_locations.push_back(std::move(loc));
+  }
 }
 
-// ── content geometry (single source of truth) ────────────────────
 // The ONLY place the sidebar's contribution to the content column is
 // computed. Must use app.sidebar_w() (fold-aware), matching paint_inline_
 // sidebar and paint_sidebar_flap, so a folded sidebar frees its width
@@ -932,7 +1105,6 @@ void sidebar_content_geometry(AppState& app, int& cx, int& cy, int& cw,
   ch = h - top_h - tab_h - banner_h - status_h - selector_h;
 }
 
-// ── fold state ───────────────────────────────────────────────────
 
 void update_sidebar_fold(AppState& app, int width) {
   bool prev_folded = app.sidebar_folded;
@@ -945,7 +1117,6 @@ void update_sidebar_fold(AppState& app, int width) {
   if (!app.sidebar_folded) app.sidebar_folded_revealed = false;
 }
 
-// ── painting ─────────────────────────────────────────────────────
 
 void paint_inline_sidebar(AppState& app, cairo_t* cr, int h, int status_h,
                           int view_h) {
@@ -1004,7 +1175,6 @@ void paint_sidebar_flap(AppState& app, cairo_t* cr, int w, int h, int view_h,
   cairo_fill(cr);
 }
 
-// ── input ────────────────────────────────────────────────────────
 
 bool sidebar_toggle_hit(AppState& app, int x, int y) {
   // Resolved through the retained hit registry (rect stored during paint);
@@ -1051,6 +1221,35 @@ void drag_sidebar_resize(AppState& app, int x) {
 }
 
 void end_sidebar_resize(AppState& app) { app.sidebar_dragging = false; }
+
+/// Begin a scrollbar thumb drag (pointer pressed on the thumb).
+/// Returns true when a drag actually started (caller should consume it).
+bool begin_sidebar_scroll(AppState& app, int x, int y) {
+  if (app.sidebar_scroll_max <= 0 || app.sidebar_scroll_thumb[3] <= 0)
+    return false;
+  int tx = app.sidebar_scroll_track[0], ty = app.sidebar_scroll_track[1];
+  int tw = app.sidebar_scroll_track[2], th = app.sidebar_scroll_track[3];
+  if (x < tx || x >= tx + tw || y < ty || y >= ty + th) return false;
+  app.sidebar_scroll_dragging = true;
+  app.sidebar_scroll_grab = y - app.sidebar_scroll_thumb[1];
+  return true;
+}
+
+/// Continue a scrollbar thumb drag.
+void drag_sidebar_scroll(AppState& app, int y) {
+  if (!app.sidebar_scroll_dragging) return;
+  int track_y = app.sidebar_scroll_track[1];
+  int track_h = app.sidebar_scroll_track[3];
+  int thumb_h = app.sidebar_scroll_thumb[3];
+  int span = std::max(1, track_h - thumb_h);
+  int pos = std::clamp(y - app.sidebar_scroll_grab - track_y, 0, span);
+  app.sidebar_scroll_px =
+      std::clamp(app.sidebar_scroll_max * pos / span, 0,
+                 app.sidebar_scroll_max);
+}
+
+/// Release the scrollbar drag.
+void end_sidebar_scroll(AppState& app) { app.sidebar_scroll_dragging = false; }
 
 bool update_sidebar_resize_hover(AppState& app, int x) {
   if (app.sidebar_w() > 0) {

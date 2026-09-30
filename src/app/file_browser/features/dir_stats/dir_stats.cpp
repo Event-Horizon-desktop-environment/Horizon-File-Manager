@@ -127,6 +127,11 @@ bool dir_stats_drain(AppState& app) {
     e.truncated = r.truncated;
     e.mtime_sec = r.mtime_sec;
   }
+  // Bound: one entry per stat'd dir, otherwise grows for the whole session.
+  // std::map is ordered, so erase from begin() drops the oldest keys first.
+  static constexpr std::size_t kDirStatMax = 512;
+  while (app.dir_stat_cache.size() > kDirStatMax)
+    app.dir_stat_cache.erase(app.dir_stat_cache.begin());
   return true;
 }
 

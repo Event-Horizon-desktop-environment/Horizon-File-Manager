@@ -37,7 +37,6 @@ namespace fs = std::filesystem;
 namespace xdg = eh::shell::desktop::xdg;
 
 namespace eh::file_browser {
-// ── key region handlers, in original flow order ─────────────────────────────
 
 bool key_search(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
                 const char* utf8, int utf8_len, bool show_hidden_passthrough) {

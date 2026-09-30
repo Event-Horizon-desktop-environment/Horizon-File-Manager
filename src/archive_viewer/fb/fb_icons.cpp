@@ -20,7 +20,6 @@ namespace fs = std::filesystem;
 
 namespace archive_viewer {
 
-// ── Base icon directories (XDG spec) ───────────────────────────────
 
 std::vector<std::string> IconLoader::icon_base_dirs() {
   std::vector<std::string> dirs;
@@ -44,7 +43,6 @@ std::vector<std::string> IconLoader::icon_base_dirs() {
   return dirs;
 }
 
-// ── Detect current icon theme ──────────────────────────────────────
 
 std::string IconLoader::detect_icon_theme() {
   const char* env = std::getenv("EH_ICON_THEME");
@@ -85,7 +83,6 @@ std::string IconLoader::detect_icon_theme() {
   return "Adwaita";
 }
 
-// ── Read inherited themes from index.theme ─────────────────────────
 
 std::vector<std::string> IconLoader::read_inherited_themes(const std::string& theme_dir) {
   std::vector<std::string> result;
@@ -116,7 +113,6 @@ std::vector<std::string> IconLoader::read_inherited_themes(const std::string& th
   return result;
 }
 
-// ── Find icon file in theme directory ──────────────────────────────
 
 std::string IconLoader::find_icon_file(const std::string& theme_dir_str,
                                         const std::string& icon_name,
@@ -167,7 +163,6 @@ std::string IconLoader::find_icon_file(const std::string& theme_dir_str,
   return {};
 }
 
-// ── Load SVG → cairo surface ───────────────────────────────────────
 
 static cairo_surface_t* load_svg_surface(const std::string& path, int size) {
   NSVGimage* image = nsvgParseFromFile(path.c_str(), "px", 96.0f);
@@ -301,7 +296,6 @@ static cairo_surface_t* load_svg_surface(const std::string& path, int size) {
   return surf;
 }
 
-// ── IconLoader implementation ──────────────────────────────────────
 
 IconLoader::IconLoader() {
   theme_ = detect_icon_theme();

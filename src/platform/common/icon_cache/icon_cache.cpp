@@ -40,7 +40,6 @@ static bool icon_debug() {
 
 #define ICON_DBG(...) do { if (icon_debug()) fprintf(stderr, "[icon] " __VA_ARGS__); } while (false)
 
-// ── helpers ──────────────────────────────────────────────────────────
 
 static std::vector<std::string> icon_base_dirs() {
   std::vector<std::string> dirs;
@@ -250,7 +249,6 @@ static cairo_surface_t* load_svg(const std::string& path, int size) {
   return surf;
 }
 
-// ── free functions ───────────────────────────────────────────────────
 
 std::string detect_system_icon_theme() {
   // 0. Environment variable override
@@ -349,7 +347,6 @@ std::vector<CursorThemeInfo> list_installed_cursor_themes() { return {}; }
 cairo_surface_t* load_cursor_shape_surface(const std::string&, const std::string&, int) { return nullptr; }
 GtkThemeDesign extract_gtk_theme_design(const std::string&) { return {}; }
 
-// ── fallback chains ──────────────────────────────────────────────────
 //
 // Fallback chains for mime icon names themes commonly omit. Specific sibling
 // names first, then family generics so every known file type degrades to a
@@ -472,7 +469,6 @@ static std::vector<std::string> read_inherited_themes(const fs::path& theme_dir)
   return result;
 }
 
-// ── IconCache ────────────────────────────────────────────────────────
 
 static constexpr std::size_t kMaxCacheBytes = 16 * 1024 * 1024; // 16 MB
 
@@ -557,7 +553,6 @@ void IconCache::clear() {
   d_->generation++;
 }
 
-// ── theme directory index ────────────────────────────────────────────
 //
 // One readdir pass per theme builds an in-memory name -> candidates map.
 // After that every icon lookup is pure hash probing — zero filesystem
@@ -824,11 +819,15 @@ static void resolve_and_insert(IconCacheData& d, const std::string& key,
   // First job on a worker also builds the theme index — deliberately OUTSIDE
   // mtx so paint threads doing cache checks never wait behind a ~5-17 ms
   // filesystem scan (they just draw placeholders until results land).
+  // NOTE: the gate is indexesBuilt only (not searchDirs): the winner below
+  // rebuilds the dir list first, so an early job that races prewarm still
+  // takes the lock-free path. Gating on !searchDirs.empty() instead forced
+  // that job onto the under-lock fallback and stalled startup ~60 ms.
   {
     bool need = false;
     {
       std::lock_guard<std::mutex> lk(d.mtx);
-      need = !d.indexesBuilt && !d.searchDirs.empty();
+      need = !d.indexesBuilt;
     }
     if (need) {
       bool expected = false;
@@ -943,7 +942,6 @@ const IconEntry* IconCache::resolve_and_cache(const std::string& key,
   return it != d_->cache.end() ? &it->second : nullptr;
 }
 
-// ── async loading ────────────────────────────────────────────────────
 
 void IconCache::enqueue_async(const std::string& key, const std::string& name, int px) {
   std::unique_lock<std::mutex> lk(d_->mtx);
@@ -1080,7 +1078,6 @@ const IconEntry* IconCache::app_icon_from_exec_basename(const std::string& exec_
   return resolve_and_cache(key, exec_basename, false);
 }
 
-// ── test/bench hooks ─────────────────────────────────────────────────
 
 IconCacheStats IconCache::stats() const {
   IconCacheStats s;

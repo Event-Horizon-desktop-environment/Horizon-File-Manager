@@ -133,7 +133,6 @@ struct IconCacheData {
   bool searchDirsBuilt = false;
   std::uint64_t generation = 0;
 
-  // ── performance additions ────────────────────────────────────────
   // Per-theme-directory index: icon name -> candidates across size dirs.
   // Built once per directory so lookups never touch the filesystem.
   struct IconCandidate {
@@ -207,7 +206,6 @@ public:
   bool refresh_auto_theme_if_needed();
   void prewarm_search_dirs();
 
-  // ── test/bench hooks ─────────────────────────────────────────────
   IconCacheStats stats() const;
   // Current raster bytes held (for the memory readout).
   std::size_t cache_bytes() const;

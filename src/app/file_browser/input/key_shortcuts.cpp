@@ -38,7 +38,6 @@ namespace fs = std::filesystem;
 namespace xdg = eh::shell::desktop::xdg;
 
 namespace eh::file_browser {
-// ── key region handlers, in original flow order ─────────────────────────────
 
 bool key_cancel_op(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
                     const char* utf8, int utf8_len) {
@@ -427,7 +426,7 @@ bool key_type_to_find(AppState& app, uint32_t sym, bool ctrl, bool shift, bool a
                     const char* utf8, int utf8_len) {
   if (!(app.active_pane ? app.r_search_active : app.search_active) && !(app.active_pane ? app.r_path_editing : app.path_editing) && !app.settings_open &&
       !app.confirm_open && !app.create_dialog_open && !app.rename_ui_open &&
-      !app.password_dialog_open &&
+      !app.password_dialog_open && !app.checksum_open && !app.connect_open && !app.remote_auth_open &&
       !app.properties.open && !app.open_with_open && !app.compress_dialog_open &&
       !app.batch_rename_open && !app.settings_dropdown_open &&
       (app.active_pane ? !app.r_sort_menu_open : !app.sort_menu_open) && !app.context_menu_open && !app.drop_chooser_open &&

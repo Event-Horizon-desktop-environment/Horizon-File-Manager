@@ -67,6 +67,14 @@ void compare_selected_files(AppState& app) {
       sel_paths.push_back(tab.entries[r].path);
   }
 
+  for (const auto& sp : sel_paths) {
+    if (is_remote_uri(sp)) {
+      app.operation_status = "Cannot compare remote files yet";
+      app.operation_status_expires_ms = toast_expiry_3s();
+      app.pendingRedraw = true;
+      return;
+    }
+  }
   const char* tool = compare_tool_name();
   if (sel_paths.size() != 2) {
     app.operation_status = "Select exactly two items to compare";

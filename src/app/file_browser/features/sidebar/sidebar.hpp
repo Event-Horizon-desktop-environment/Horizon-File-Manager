@@ -8,7 +8,6 @@
 
 namespace eh::file_browser {
 
-// ── Sidebar module (features/sidebar.cpp) ────────────────────────
 // Every piece of file-browser sidebar logic and geometry lives here so the
 // width the LAYOUT contributes and the width the PAINTER draws can never
 // drift apart: they all derive the sidebar's layout width from
@@ -41,6 +40,47 @@ void paint_inline_sidebar(AppState& app, cairo_t* cr, int h, int status_h,
 /// declared in app.hpp).
 std::string format_size(uint64_t bytes);
 
+/// Pinned sidebar scale: paint, hit-testing and scroll math all derive
+/// from it, so rows can never drift out from under the scroll clamp.
+inline constexpr double kSidebarZf = 1.2;
+
+/// True for drive rows with a usage bar (taller rows).
+inline bool sidebar_has_usage(const SidebarLocation& loc) {
+  return (loc.kind == SidebarLocation::Kind::Drive ||
+          loc.kind == SidebarLocation::Kind::Root) &&
+         loc.total_bytes > 0 && loc.is_mounted;
+}
+
+/// Pixel height of one sidebar row (usage rows are taller).
+inline int sidebar_row_h(const SidebarLocation& loc) {
+  int item_h = static_cast<int>(36.0 * kSidebarZf);
+  if (sidebar_has_usage(loc))
+    item_h = static_cast<int>(52.0 * kSidebarZf);
+  return item_h;
+}
+
+/// Section boundaries + exact pixel geometry, computed once per model and
+/// shared by paint, hit-testing and the scroll clamp — the single source
+/// of truth that keeps the sidebar's bottom reachable (Dolphin/Nautilus
+/// parity: overflow scrolls instead of clipping away).
+struct SidebarLayout {
+  int places_end = 0;
+  int fav_start = 0;
+  int network_end = 0;
+  int drives_start = 0;
+  int searches_start = 0; // saved searches (end); == total when empty
+  int total = 0;
+  int header_h = 0; // 24px section titles
+  int div_h = 0;    // 16 + 1 + 16 divider
+  int top_pad = 0;  // 24px top padding
+  int content_h = 0; // total, top pad included
+  /// Unscrolled y of a row top (row must be a real item index).
+  int row_y(const std::vector<SidebarLocation>& locs, int idx) const;
+};
+
+/// Compute section bounds + content height for a location list.
+SidebarLayout sidebar_layout(const std::vector<SidebarLocation>& locs);
+
 /// True when (x, y) is inside the fold-toggle toolbar button (drawn only
 /// while the sidebar is folded).
 bool sidebar_toggle_hit(AppState& app, int x, int y);
@@ -63,6 +103,16 @@ void drag_sidebar_resize(AppState& app, int x);
 
 /// Release the sidebar resize drag.
 void end_sidebar_resize(AppState& app);
+
+/// Begin a scrollbar thumb drag (pointer pressed on the thumb).
+/// Returns true when a drag actually started (caller should consume it).
+bool begin_sidebar_scroll(AppState& app, int x, int y);
+
+/// Continue a scrollbar thumb drag.
+void drag_sidebar_scroll(AppState& app, int y);
+
+/// Release the scrollbar drag.
+void end_sidebar_scroll(AppState& app);
 
 /// Track the separator resize-edge hover. Returns true when the flag
 /// changed (caller triggers a repaint on change).

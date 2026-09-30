@@ -23,7 +23,6 @@ struct ShapeTokens {
 // Per-component shape assignments:
 //
 //   Component              | Shape          | Value
-//   -----------------------|----------------|-------
 //   Filled button          | full           | 999dp
 //   Outlined button        | full           | 999dp
 //   Tonal button           | full           | 999dp

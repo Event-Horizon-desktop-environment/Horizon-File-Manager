@@ -21,8 +21,14 @@
 #include <cstring>
 #include <ctime>
 #include <filesystem>
+#include <fstream>
 #include <string>
+#include <thread>
 #include <vector>
+
+#include <openssl/evp.h>
+
+#include "base/thread/thread_dispatch.hpp"
 
 #include <grp.h>
 #include <pwd.h>
@@ -52,7 +58,6 @@ static void blit_icon(cairo_t* cr, cairo_surface_t* svg, double x, double y,
   cairo_restore(cr);
 }
 
-// ── create dialog ────────────────────────────────────────────────
 
 void draw_create_dialog(AppState& app, cairo_t* cr) {
   int w = app.width;
@@ -205,7 +210,6 @@ void draw_create_dialog(AppState& app, cairo_t* cr) {
                  app.create_hover_btn == 0);
 }
 
-// ── confirm dialog ───────────────────────────────────────────────
 
 void draw_confirm_dialog(AppState& app, cairo_t* cr) {
   int w = app.width;
@@ -351,7 +355,6 @@ void draw_confirm_dialog(AppState& app, cairo_t* cr) {
                  app.confirm_hover_btn == 1);
 }
 
-// ── Overwrite/merge conflict dialog ─────────────
 
 void draw_conflict_dialog(AppState& app, cairo_t* cr) {
   if (app.conflict_queue.empty()) return;
@@ -401,7 +404,6 @@ void draw_conflict_dialog(AppState& app, cairo_t* cr) {
     cairo_show_text(cr, sub);
   }
 
-  // ── Source vs Destination columns ──
   auto fmt_time = [](int64_t sec) {
     if (sec == 0) return std::string("\u2014");
     return hui::design::date_md(sec);
@@ -469,7 +471,6 @@ void draw_conflict_dialog(AppState& app, cairo_t* cr) {
   cairo_line_to(cr, dlg_x + dlg_w / 2 + 0.5, col_top + 92);
   cairo_stroke(cr);
 
-  // ── Apply-to-all checkbox (only when more than one conflict remains) ──
   int check_y = dlg_y + dlg_h - 96;
   if (app.conflict_queue.size() > 1) {
     int box_sz = 16;
@@ -512,7 +513,6 @@ void draw_conflict_dialog(AppState& app, cairo_t* cr) {
     app.conflict_check_rect[2] = 0; app.conflict_check_rect[3] = 0;
   }
 
-  // ── Buttons: Skip | Cancel | Overwrite(Merge) ──
   int btn_y = dlg_y + dlg_h - 54;
   int btn_h = 34;
   int btn_w = 104;
@@ -541,7 +541,6 @@ void draw_conflict_dialog(AppState& app, cairo_t* cr) {
   }
 }
 
-// ── password dialog ─────────────────────────────────────────────
 
 void draw_password_dialog(AppState& app, cairo_t* cr) {
   int w = app.width;
@@ -723,7 +722,6 @@ void draw_password_dialog(AppState& app, cairo_t* cr) {
   hui::design::button(cr, app, pw_extract_r.x, pw_extract_r.y, pw_extract_r.w, pw_extract_r.h, "Extract", true, false);
 }
 
-// ── compress dialog ──────────────────────────────────────────────
 
 void draw_compress_dialog(AppState& app, cairo_t* cr) {
   int w = app.width;
@@ -749,7 +747,6 @@ void draw_compress_dialog(AppState& app, cairo_t* cr) {
   cairo_move_to(cr, dlg_x + 20, dlg_y + 28);
   cairo_show_text(cr, "Compress");
 
-  // ── Format row ──
   static const char* fmt_labels[] = {"Zip", "Tar.gz", "Tar.bz2", "Tar.xz",
                                       "7z", "Rar", "Tar"};
   int content_x = dlg_x + 20;
@@ -918,7 +915,6 @@ void draw_compress_dialog(AppState& app, cairo_t* cr) {
     cairo_show_text(cr, fmt_labels[i]);
   }
 
-  // ── Name row ──
   cairo_set_font_size(cr, 12);
   cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                         app.text_secondary_b, 1.0);
@@ -952,7 +948,6 @@ void draw_compress_dialog(AppState& app, cairo_t* cr) {
     cairo_fill(cr);
   }
 
-  // ── Level row ──
   cairo_set_font_size(cr, 12);
   cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                         app.text_secondary_b, 1.0);
@@ -988,7 +983,6 @@ void draw_compress_dialog(AppState& app, cairo_t* cr) {
     cairo_show_text(cr, level_labels[i]);
   }
 
-  // ── Threads row ──
   cairo_set_font_size(cr, 12);
   cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                         app.text_secondary_b, 1.0);
@@ -1029,14 +1023,12 @@ void draw_compress_dialog(AppState& app, cairo_t* cr) {
     cairo_show_text(cr, th_label);
   }
 
-  // ── Buttons ──
   hui::design::button(cr, app, cancel_r.x, cancel_r.y, cancel_r.w, cancel_r.h, "Cancel", false,
                  app.compress_hover_btn == 0);
   hui::design::button(cr, app, ok_r.x, ok_r.y, ok_r.w, ok_r.h, "Compress", true,
                  app.compress_hover_btn == 1);
 }
 
-// ── terminal chooser dialog ──────────────────────────────────────
 
 void draw_terminal_chooser(AppState& app, cairo_t* cr) {
   int w = app.width;
@@ -1154,6 +1146,397 @@ void draw_terminal_chooser(AppState& app, cairo_t* cr) {
     cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.4);
     draw_rounded_rect(cr, sx, sbY, 4, sbH, 2);
     cairo_fill(cr);
+  }
+}
+
+
+namespace {
+std::string evp_file_hex(const std::string& path, const EVP_MD* md, std::string& err) {
+  std::ifstream f(path, std::ios::binary);
+  if (!f) { err = "Cannot open file"; return {}; }
+  EVP_MD_CTX* ctx = EVP_MD_CTX_new();
+  if (!ctx) { err = "Hash init failed"; return {}; }
+  if (EVP_DigestInit_ex(ctx, md, nullptr) != 1) {
+    EVP_MD_CTX_free(ctx);
+    err = "Hash init failed";
+    return {};
+  }
+  char buf[131072];
+  while (f) {
+    f.read(buf, sizeof buf);
+    std::streamsize n = f.gcount();
+    if (n > 0 && EVP_DigestUpdate(ctx, buf, static_cast<size_t>(n)) != 1) {
+      EVP_MD_CTX_free(ctx);
+      err = "Hash failed";
+      return {};
+    }
+  }
+  if (f.bad()) {
+    EVP_MD_CTX_free(ctx);
+    err = "Read failed";
+    return {};
+  }
+  unsigned char digest[EVP_MAX_MD_SIZE];
+  unsigned int len = 0;
+  if (EVP_DigestFinal_ex(ctx, digest, &len) != 1) {
+    EVP_MD_CTX_free(ctx);
+    err = "Hash failed";
+    return {};
+  }
+  EVP_MD_CTX_free(ctx);
+  static constexpr char kHex[] = "0123456789abcdef";
+  std::string out;
+  out.reserve(len * 2);
+  for (unsigned i = 0; i < len; ++i) {
+    out.push_back(kHex[digest[i] >> 4]);
+    out.push_back(kHex[digest[i] & 0xF]);
+  }
+  return out;
+}
+} // namespace
+
+void open_checksums(AppState& app, const std::string& file_path) {
+  ++app.checksum_generation;
+  uint64_t gen = app.checksum_generation;
+  app.checksum_open = true;
+  app.checksum_path = file_path;
+  app.checksum_md5.clear();
+  app.checksum_sha1.clear();
+  app.checksum_sha256.clear();
+  app.checksum_error.clear();
+  app.checksum_computing = true;
+  app.checksum_hover_btn = -1;
+  std::thread([&app, path = file_path, gen]() {
+    std::string err;
+    std::string md5 = evp_file_hex(path, EVP_md5(), err);
+    std::string err1 = err;
+    err.clear();
+    std::string sha1 = evp_file_hex(path, EVP_sha1(), err);
+    if (err1.empty()) err1 = err;
+    err.clear();
+    std::string sha256 = evp_file_hex(path, EVP_sha256(), err);
+    if (err1.empty()) err1 = err;
+    DeferredCall::callLater([&app, gen, md5 = std::move(md5), sha1 = std::move(sha1),
+                             sha256 = std::move(sha256), err1 = std::move(err1)]() mutable {
+      if (gen != app.checksum_generation || !app.checksum_open) return;
+      app.checksum_md5 = std::move(md5);
+      app.checksum_sha1 = std::move(sha1);
+      app.checksum_sha256 = std::move(sha256);
+      app.checksum_error = std::move(err1);
+      app.checksum_computing = false;
+      draw(app);
+    });
+  }).detach();
+}
+
+void draw_checksum_dialog(AppState& app, cairo_t* cr) {
+  if (!app.checksum_open) return;
+  int w = app.width;
+  int h = app.height;
+  int dlg_w = 520;
+  int dlg_h = 300;
+  int dlg_x = (w - dlg_w) / 2;
+  int dlg_y = (h - dlg_h) / 2;
+
+  cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
+  cairo_rectangle(cr, 0, 0, w, h);
+  cairo_fill(cr);
+
+  draw_dialog_card(app, cr, dlg_x, dlg_y, dlg_w, dlg_h, 12);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgChecksum, 0), dlg_x, dlg_y, dlg_w, dlg_h);
+
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+  cairo_set_font_size(cr, 15);
+  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+  cairo_move_to(cr, dlg_x + 20, dlg_y + 30);
+  cairo_show_text(cr, "Checksums");
+
+  std::string fname = fs::path(app.checksum_path).filename().string();
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+  cairo_set_font_size(cr, 12);
+  cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                        app.text_secondary_b, 1.0);
+  std::string shown = hui::design::clip_end(cr, fname, dlg_w - 40);
+  cairo_move_to(cr, dlg_x + 20, dlg_y + 50);
+  cairo_show_text(cr, shown.c_str());
+
+  const char* labels[3] = {"MD5", "SHA1", "SHA256"};
+  const std::string* values[3] = {&app.checksum_md5, &app.checksum_sha1, &app.checksum_sha256};
+  int row_y = dlg_y + 76;
+  int row_h = 44;
+  int label_w = 64;
+  int copy_w = 64;
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+  for (int i = 0; i < 3; ++i) {
+    int ly = row_y + i * row_h;
+    cairo_set_font_size(cr, 12);
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                          app.text_secondary_b, 1.0);
+    cairo_move_to(cr, dlg_x + 20, ly + 16);
+    cairo_show_text(cr, labels[i]);
+
+    std::string val;
+    if (app.checksum_computing) val = "Computing…";
+    else if (!app.checksum_error.empty()) val = app.checksum_error;
+    else val = *values[i];
+    cairo_set_font_size(cr, 11);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    std::string clipped = hui::design::clip_end(cr, val, dlg_w - 20 - label_w - copy_w - 48);
+    cairo_move_to(cr, dlg_x + 20 + label_w, ly + 16);
+    cairo_show_text(cr, clipped.c_str());
+
+    int cx = dlg_x + dlg_w - 20 - copy_w;
+    int cy = ly - 4;
+    app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgChecksum, hui::Hit::kChecksumCopyBase + i),
+                     cx, cy, copy_w, 28);
+    bool filled = !values[i]->empty() && !app.checksum_computing;
+    if (!filled) {
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.06);
+    } else if (app.checksum_hover_btn == i) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.20);
+    } else {
+      hui::design::card_fill(cr, app, 0.55);
+    }
+    draw_rounded_rect(cr, cx, cy, copy_w, 28, 8);
+    cairo_fill(cr);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, filled ? 0.9 : 0.35);
+    cairo_set_font_size(cr, 11);
+    cairo_move_to(cr, cx + 14, cy + 18);
+    cairo_show_text(cr, "Copy");
+  }
+
+  int btn_w = 90;
+  int btn_h = 32;
+  int btn_x = dlg_x + dlg_w - 20 - btn_w;
+  int btn_y = dlg_y + dlg_h - 20 - btn_h;
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgChecksum, hui::Hit::kChecksumClose),
+                   btn_x, btn_y, btn_w, btn_h);
+  hui::design::button(cr, app, btn_x, btn_y, btn_w, btn_h, "Close", true,
+                      app.checksum_hover_btn == 3);
+}
+
+
+void draw_connect_dialog(AppState& app, cairo_t* cr) {
+  if (!app.connect_open) return;
+  int w = app.width;
+  int h = app.height;
+  int dlg_w = 440;
+  int dlg_h = 440;
+  int dlg_x = (w - dlg_w) / 2;
+  int dlg_y = (h - dlg_h) / 2;
+
+  cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
+  cairo_rectangle(cr, 0, 0, w, h);
+  cairo_fill(cr);
+
+  draw_dialog_card(app, cr, dlg_x, dlg_y, dlg_w, dlg_h, 12);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgConnect, 0), dlg_x, dlg_y, dlg_w, dlg_h);
+
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+  cairo_set_font_size(cr, 15);
+  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+  cairo_move_to(cr, dlg_x + 20, dlg_y + 30);
+  cairo_show_text(cr, "Connect to Server");
+
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+  cairo_set_font_size(cr, 12);
+  cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                        app.text_secondary_b, 1.0);
+  cairo_move_to(cr, dlg_x + 20, dlg_y + 50);
+  cairo_show_text(cr, "SFTP — passwords stay in memory for this session only");
+
+  struct Field {
+    const char* label;
+    std::string* buf;
+    bool secret;
+  };
+  Field fields[5] = {
+      {"Host", &app.connect_host, false},
+      {"Username", &app.connect_user, false},
+      {"Password (optional)", &app.connect_pass, true},
+      {"Port", &app.connect_port_buf, false},
+      {"Path", &app.connect_path, false},
+  };
+  int fy = dlg_y + 66;
+  for (int i = 0; i < 5; ++i) {
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 12);
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                          app.text_secondary_b, 1.0);
+    cairo_move_to(cr, dlg_x + 20, fy + 14);
+    cairo_show_text(cr, fields[i].label);
+    int ix = dlg_x + 20;
+    int iy = fy + 20;
+    int iw = dlg_w - 40;
+    int ih = 32;
+    bool focused = (app.connect_focus == i);
+    cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.55);
+    draw_rounded_rect(cr, ix, iy, iw, ih, 8);
+    cairo_fill(cr);
+    if (focused) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.55);
+      cairo_set_line_width(cr, 1.2);
+      draw_rounded_rect(cr, ix + 0.5, iy + 0.5, iw - 1, ih - 1, 7.5);
+      cairo_stroke(cr);
+    }
+    app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgConnect, hui::Hit::kConnectFieldBase + i),
+                     ix, iy, iw, ih);
+    std::string shown = *fields[i].buf;
+    if (fields[i].secret && !shown.empty()) shown.assign(shown.size(), '*');
+    cairo_save(cr);
+    draw_rounded_rect(cr, ix + 2, iy + 2, iw - 4, ih - 4, 6);
+    cairo_clip(cr);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
+                          shown.empty() ? 0.30 : 0.95);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 13);
+    cairo_move_to(cr, ix + 10, iy + ih / 2 + 4);
+    cairo_show_text(cr, shown.empty() ? "—" : shown.c_str());
+    if (focused && !shown.empty()) {
+      cairo_text_extents_t te;
+      cairo_text_extents(cr, shown.c_str(), &te);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.6);
+      cairo_rectangle(cr, ix + 10 + te.width, iy + 7, 1, ih - 14);
+      cairo_fill(cr);
+    }
+    cairo_restore(cr);
+    fy += 20 + 32 + 10;
+  }
+
+  int btn_w = 90;
+  int btn_h = 32;
+  int ok_x = dlg_x + dlg_w - 20 - btn_w;
+  int cancel_x = ok_x - 10 - btn_w;
+  int btn_y = dlg_y + dlg_h - 20 - btn_h;
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgConnect, hui::Hit::kConnectCancel),
+                   cancel_x, btn_y, btn_w, btn_h);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgConnect, hui::Hit::kConnectOk),
+                   ok_x, btn_y, btn_w, btn_h);
+  hui::design::button(cr, app, cancel_x, btn_y, btn_w, btn_h, "Cancel", false,
+                      app.connect_hover_btn == 1);
+  hui::design::button(cr, app, ok_x, btn_y, btn_w, btn_h, "Connect", true,
+                      app.connect_hover_btn == 0);
+}
+
+
+void draw_remote_auth_dialog(AppState& app, cairo_t* cr) {
+  if (!app.remote_auth_open || !app.remote_auth.active) return;
+  const auto& req = app.remote_auth;
+  int w = app.width;
+  int h = app.height;
+
+  bool approval = !req.choices.empty();
+  int n_fields = (req.need_user ? 1 : 0) + (req.need_password ? 1 : 0);
+  int n_buttons = approval ? static_cast<int>(req.choices.size()) : 0;
+  int dlg_w = 460;
+  int dlg_h = 150 + n_fields * 62 + (approval ? n_buttons * 38 + 42 : 52);
+  int dlg_x = (w - dlg_w) / 2;
+  int dlg_y = (h - dlg_h) / 2;
+
+  cairo_set_source_rgba(cr, 0, 0, 0, 0.35);
+  cairo_rectangle(cr, 0, 0, w, h);
+  cairo_fill(cr);
+
+  draw_dialog_card(app, cr, dlg_x, dlg_y, dlg_w, dlg_h, 12);
+  app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgRemoteAuth, 0), dlg_x, dlg_y, dlg_w, dlg_h);
+
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_BOLD);
+  cairo_set_font_size(cr, 15);
+  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+  cairo_move_to(cr, dlg_x + 20, dlg_y + 30);
+  cairo_show_text(cr, approval ? "Verify server" : "Authentication required");
+
+  cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+  cairo_set_font_size(cr, 12);
+  cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                        app.text_secondary_b, 1.0);
+  std::string msg = hui::design::clip_end(cr, req.message, dlg_w - 40);
+  cairo_move_to(cr, dlg_x + 20, dlg_y + 50);
+  cairo_show_text(cr, msg.c_str());
+
+  int fy = dlg_y + 66;
+  auto draw_field = [&](int idx, const char* label, const std::string& buf, bool secret) {
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 12);
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                          app.text_secondary_b, 1.0);
+    cairo_move_to(cr, dlg_x + 20, fy + 14);
+    cairo_show_text(cr, label);
+    int ix = dlg_x + 20;
+    int iy = fy + 20;
+    int iw = dlg_w - 40;
+    int ih = 32;
+    bool focused = (app.remote_auth_focus == idx);
+    cairo_set_source_rgba(cr, app.bg_r, app.bg_g, app.bg_b, 0.55);
+    draw_rounded_rect(cr, ix, iy, iw, ih, 8);
+    cairo_fill(cr);
+    if (focused) {
+      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.55);
+      cairo_set_line_width(cr, 1.2);
+      draw_rounded_rect(cr, ix + 0.5, iy + 0.5, iw - 1, ih - 1, 7.5);
+      cairo_stroke(cr);
+    }
+    app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgRemoteAuth, hui::Hit::kRemoteAuthFieldBase + idx),
+                     ix, iy, iw, ih);
+    std::string shown = buf;
+    if (secret && !shown.empty()) shown.assign(shown.size(), '*');
+    cairo_save(cr);
+    draw_rounded_rect(cr, ix + 2, iy + 2, iw - 4, ih - 4, 6);
+    cairo_clip(cr);
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
+                          shown.empty() ? 0.30 : 0.95);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 13);
+    cairo_move_to(cr, ix + 10, iy + ih / 2 + 4);
+    cairo_show_text(cr, shown.empty() ? "—" : shown.c_str());
+    if (focused && !shown.empty()) {
+      cairo_text_extents_t te;
+      cairo_text_extents(cr, shown.c_str(), &te);
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.6);
+      cairo_rectangle(cr, ix + 10 + te.width, iy + 7, 1, ih - 14);
+      cairo_fill(cr);
+    }
+    cairo_restore(cr);
+    fy += 20 + 32 + 10;
+  };
+
+  if (!approval) {
+    int idx = 0;
+    if (req.need_user) draw_field(idx++, "Username", app.remote_auth_user_buf, false);
+    if (req.need_password) draw_field(idx++, "Password", app.remote_auth_pass_buf, true);
+  } else {
+    fy += 4;
+  }
+
+  if (approval) {
+    int bw = dlg_w - 40;
+    for (size_t i = 0; i < req.choices.size(); ++i) {
+      int by = fy + static_cast<int>(i) * 38;
+      app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgRemoteAuth, hui::Hit::kRemoteAuthChoiceBase + static_cast<int>(i)),
+                       dlg_x + 20, by, bw, 32);
+      hui::design::button(cr, app, dlg_x + 20, by, bw, 32, req.choices[i].c_str(), false,
+                          app.remote_auth_hover_btn == 10 + static_cast<int>(i));
+    }
+    fy += static_cast<int>(req.choices.size()) * 38 + 10;
+    int cancel_w = 90;
+    app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgRemoteAuth, hui::Hit::kRemoteAuthCancel),
+                     dlg_x + dlg_w - 20 - cancel_w, fy, cancel_w, 32);
+    hui::design::button(cr, app, dlg_x + dlg_w - 20 - cancel_w, fy, cancel_w, 32, "Cancel", false,
+                        app.remote_auth_hover_btn == 1);
+  } else {
+    int btn_w = 90;
+    int btn_h = 32;
+    int ok_x = dlg_x + dlg_w - 20 - btn_w;
+    int cancel_x = ok_x - 10 - btn_w;
+    int btn_y = dlg_y + dlg_h - 20 - btn_h;
+    app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgRemoteAuth, hui::Hit::kRemoteAuthCancel),
+                     cancel_x, btn_y, btn_w, btn_h);
+    app.hit_main.add(hui::Hit::dialog(hui::Hit::kDlgRemoteAuth, hui::Hit::kRemoteAuthOk),
+                     ok_x, btn_y, btn_w, btn_h);
+    hui::design::button(cr, app, cancel_x, btn_y, btn_w, btn_h, "Cancel", false,
+                        app.remote_auth_hover_btn == 1);
+    hui::design::button(cr, app, ok_x, btn_y, btn_w, btn_h, "Connect", true,
+                        app.remote_auth_hover_btn == 0);
   }
 }
 

@@ -42,7 +42,6 @@ cairo_surface_t* scale_surface(cairo_surface_t* src, int max_px) {
   return scaled;
 }
 
-// ── full-res preview frame helpers ─────────────────────────
 
 struct PngReadCtx {
   const std::vector<unsigned char>* data;
@@ -94,7 +93,6 @@ cairo_surface_t* extract_preview_frame(const std::string& path, int max_px) {
 
 } // namespace
 
-// ── VideoThumbWorker ───────────────────────────────────────
 
 VideoThumbWorker::VideoThumbWorker() {
   for (int i = 0; i < kNumThreads; ++i)
@@ -294,14 +292,12 @@ void VideoThumbWorker::thread_main(int /*thread_id*/) {
   }
 }
 
-// ── Singleton access ────────────────────────────────────────
 
 VideoThumbWorker& video_worker() {
   static VideoThumbWorker instance;
   return instance;
 }
 
-// ── Drain completed thumbnails into AppState cache ──────────
 
 void drain_video_thumbnails(AppState& app) {
   auto& worker = video_worker();

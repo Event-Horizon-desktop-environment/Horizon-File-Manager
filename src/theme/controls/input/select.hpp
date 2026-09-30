@@ -104,7 +104,6 @@ private:
   std::function<void(std::size_t, std::string_view)> onSelect_;
 };
 
-// --- inline impl ---
 
 std::string_view Select::selectedText() const noexcept {
   if (sel_ >= options_.size()) return {};

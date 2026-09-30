@@ -27,7 +27,6 @@ struct SpacingTokens {
 // Semantic spacing conventions:
 //
 //   Context                    | Value | Usage
-//   ---------------------------|-------|------------------------------
 //   Container content          | 16dp  | Cards, dialogs, sheets, menus
 //   Container compact          | 12dp  | Small containers, chips
 //   Container wide             | 24dp  | Large dialogs, wide cards
@@ -45,7 +44,6 @@ struct SpacingTokens {
 // Per-component sizing:
 //
 //   Component              | Size / Height / Width
-//   -----------------------|-----------------------
 //   Button XS              | 24dp height, 16dp horizontal pad
 //   Button S               | 32dp height, 16dp horizontal pad
 //   Button M (default)     | 40dp height, 24dp horizontal pad

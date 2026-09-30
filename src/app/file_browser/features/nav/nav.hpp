@@ -4,7 +4,6 @@
 
 namespace eh::file_browser {
 
-// ── nav.cpp shared internals ─────────────────────────────────────
 // Helpers defined in nav.cpp but consumed by sibling modules of the
 // navigation/scan/preview split:
 //

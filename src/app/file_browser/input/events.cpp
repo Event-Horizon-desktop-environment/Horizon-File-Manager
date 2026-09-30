@@ -14,7 +14,6 @@
 
 namespace eh::file_browser {
 
-// ── Main-view scrollbar dragging ────────────────────────────────────
 //
 // draw_scrollbar() records its interactive rect every frame; clicking inside
 // that strip grabs the thumb (or jumps to the tapped position) and motion

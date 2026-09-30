@@ -57,7 +57,6 @@ void schedule_frame(AppState& app);
 /// Handle a pointer button press.
 void handle_click(AppState& app, int x, int y, int button);
 
-/// Handle a pointer button release.
 void handle_pointer_release(AppState& app, int x, int y, int button);
 
 /// Handle pointer motion.
@@ -149,7 +148,6 @@ void resize_active_image_preview(AppState& app);
 // Restart the active pane's search with current query/mode/case/filters.
 void restart_active_search(AppState& app);
 
-// ── Sort dropdown row model (shared by draw + click handling) ──
 struct SortMenuRow {
   enum class Kind {
     Field,               // sort_field selector (field = SortField as int)
@@ -225,7 +223,6 @@ void close_tab(AppState& app);
 void next_tab(AppState& app);
 void prev_tab(AppState& app);
 
-/// Clear the thumbnail cache.
 void clear_thumb_cache(AppState& app);
 
 /// Decode one queued thumbnail and schedule a redraw.
@@ -250,7 +247,6 @@ void open_selected(AppState& app);
 /// Open a context menu for the given item index.
 void open_context_menu(AppState& app, int item_idx, int x, int y);
 
-// ── drawing helpers (file_browser_draw.cpp) ──────────────────────
 
 /// Pre-initialise fontconfig/Pango so the first popup/tooltip doesn't stall.
 void warmup_text_rendering();
@@ -294,7 +290,6 @@ void draw_terminal_chooser(AppState& app, cairo_t* cr);
 void draw_context_menu(AppState& app, cairo_t* cr);
 void draw_marquee(AppState& app, cairo_t* cr);
 
-// ── hit testing (file_browser_draw.cpp) ──────────────────────────
 
 int hit_test_list(AppState& app, int x, int y);
 int hit_test_grid(AppState& app, int x, int y);
@@ -311,14 +306,12 @@ int hit_test_drop_chooser(const AppState& app, int x, int y);
 bool hit_test_fav_section(AppState& app, int x, int y);
 void hit_test_marquee(AppState& app);
 
-// ── context menu logic (file_browser_menu.cpp + context_actions.cpp) ──
 
 // Shared 3-second expiry helper (definition in context_actions.cpp).
 std::uint64_t menu_expiry_3s();
 
 void execute_context_menu_action(AppState& app, int item_idx);
 
-// ── context menu action module (features/context_actions{,_items,_regions}.cpp) ──
 // execute_context_menu_action calls the per-region handlers below (bool = handled,
 // exits the dispatcher), then resolves `entry` and calls execute_item_action. The
 // handlers and switcher live in separate TUs, so these are the cross-cluster decls.
@@ -336,6 +329,8 @@ bool ctx_new_folder(AppState& app, int item_idx, AppState::ContextMenuAction act
 bool ctx_new_document(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_new_from_template(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_run_script(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_service_run(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_tag_toggle(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_reload(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_copy_location(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_select_all(AppState& app, int item_idx, AppState::ContextMenuAction action);
@@ -346,9 +341,20 @@ bool ctx_open_in_terminal(AppState& app, int item_idx, AppState::ContextMenuActi
 bool ctx_remove_from_favorites(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_unmount_drive(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_mount_drive(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_disk_usage(AppState& app, int item_idx, AppState::ContextMenuAction action);
+// Fire-and-forget trash auto-maintenance (no-op unless enabled).
+void schedule_trash_maintain(AppState& app);
 bool ctx_open(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_connect_server(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_remove_server(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_empty_trash(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_clear_recent(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_add_to_favorites(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_startup_folder(AppState& app, int item_idx, AppState::ContextMenuAction action);
+// A path usable as the default startup folder: a local directory, or the
+// My Computer / Recent / Starred virtual views. Remote, drive and trash
+// locations are excluded (no live connections or removals at startup).
+bool startup_folder_ok(const std::string& p);
 bool ctx_settings(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_toolbar_overflow(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_open_in_new_tab(AppState& app, int item_idx, AppState::ContextMenuAction action);
@@ -356,6 +362,7 @@ bool ctx_tab_menu(AppState& app, int item_idx, AppState::ContextMenuAction actio
 bool ctx_open_in_new_window(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_open_as_admin(AppState& app, int item_idx, AppState::ContextMenuAction action);
 bool ctx_open_file_location(AppState& app, int item_idx, AppState::ContextMenuAction action);
+bool ctx_crumb_nav(AppState& app, int item_idx, AppState::ContextMenuAction action);
 
 // Per-item action dispatch (feature context_actions_items.cpp): the switch on
 // `action` for the resolved entry; returns without drawing on a return-cased
@@ -370,19 +377,37 @@ void insert_template_submenu(AppState& app, std::size_t pos);
 /// given position; no-op when no executable scripts exist.
 void insert_scripts_submenu(AppState& app, std::size_t pos);
 
-// ── Open With dialog (file_browser_menu.cpp + open_with.cpp + draw.cpp) ──
 
 void open_with_open(AppState& app, const std::string& file_path);
 void open_with_close(AppState& app);
 void draw_open_with(AppState& app, cairo_t* cr);
 
-// ── Settings dialog (file_browser_menu.cpp + settings.cpp + draw.cpp) ───
+void open_checksums(AppState& app, const std::string& file_path);
+void draw_checksum_dialog(AppState& app, cairo_t* cr);
+
+void open_connect_dialog(AppState& app);
+void draw_connect_dialog(AppState& app, cairo_t* cr);
+// Validate + connect: upserts the bookmark (never the password), arms the
+// one-shot session password, closes the dialog and navigates. Shared by
+// mouse and keyboard commit.
+void connect_submit(AppState& app);
+void draw_remote_auth_dialog(AppState& app, cairo_t* cr);
+// Submit the dialog (choice = approval-button index, or -1 for the
+// password form). Fulfills the worker's promise; safe to call when stale.
+void remote_auth_submit(AppState& app, int choice);
+// Cancel: fulfills with abort and closes the dialog. Safe when stale.
+void remote_auth_cancel(AppState& app);
+
 
 void open_settings(AppState& app);
 void save_file_browser_settings(AppState& app);
 void request_fs_operation(AppState& app, const std::vector<std::string>& srcs,
                           const std::string& dest_dir, bool is_move,
                           const std::string& success_toast, bool clear_cut = false);
+// Single-file remote copy under a precomputed destination name (Duplicate).
+void launch_remote_copy_as(AppState& app, const std::string& src,
+                           const std::string& dest_dir, const std::string& dst_name,
+                           const std::string& toast);
 // Deferred-drop chooser: stash a pending copy/move operation so the user can
 // pick Copy vs Move from the popup once the wl_data_device session is over.
 void open_drop_chooser(AppState& app, std::vector<std::string> ops, std::string target);
@@ -408,16 +433,24 @@ int properties_hit_test(AppState& app, int x, int y);
 int settings_hit_test(AppState& app, int x, int y);
 void show_properties(AppState& app, const std::string& path, const std::string& icon_name = "");
 void show_properties_multi(AppState& app, const std::vector<std::string>& paths);
+// Recursive file/dir/byte totals for one directory tree. Runs on worker
+// threads (see show_properties). Never throws: unreadable or vanishing
+// entries are skipped and partial totals are returned, because an uncaught
+// filesystem_error in a detached worker kills the app via std::terminate.
+struct DirSize {
+  uint64_t files = 0;
+  uint64_t dirs = 0;
+  uint64_t bytes = 0;
+};
+DirSize walk_dir_size(const std::string& path) noexcept;
 void reload_settings_from_config(AppState& app);
 void reload_colors_from_config(AppState& app);
 
-// ── Properties window (separate xdg-toplevel) ───────────────────
 void create_props_window(AppState& app);
 void destroy_props_window(AppState& app);
 void draw_props_window(AppState& app);
 void handle_props_click(AppState& app, int x, int y, int button);
 
-// ── Settings window (separate xdg-toplevel) ─────────────────────
 void create_settings_window(AppState& app);
 void destroy_settings_window(AppState& app);
 void draw_settings_window(AppState& app);
@@ -432,7 +465,6 @@ int settings_dialog_card_height(const AppState& app);
 /// Re-pin the settings xdg-toplevel to the size required by current content.
 void update_settings_window_size(AppState& app);
 
-// ── compress feature (features/compress.cpp) ─────────────────────
 
 bool is_archive_extension(const std::string& path);
 std::string default_extract_dir(const std::string& archive_path);
@@ -441,12 +473,10 @@ void execute_compress_async(AppState& app);
 void execute_extract_async(AppState& app, const std::string& archive_path,
                             const std::string& dest_dir);
 
-// ── terminal helpers (file_browser_terminal.cpp) ─────────────────
 
 void scan_terminal_apps(AppState& app);
 void open_terminal_at(AppState& app, const std::string& dir);
 
-// ── shared helpers (file_browser_nav.cpp) ────────────────────────
 
 std::string home_dir();
 
