@@ -6,6 +6,8 @@
 #include <sys/mman.h>
 
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <chrono>
 #include <fcntl.h>
 #include <filesystem>
@@ -23,6 +25,16 @@ namespace eh::file_browser {
 
 namespace {
 
+// EH_PREVIEW_DEBUG=1 also traces the DnD lifecycle (enter/leave/drop,
+// breadcrumb targets) because a stuck drag-over state is the prime suspect
+// whenever the hover preview goes silent.
+static bool dnd_dbg() {
+  static const bool on = [] {
+    const char* e = std::getenv("EH_PREVIEW_DEBUG");
+    return e && *e && e[0] != '0';
+  }();
+  return on;
+}
 
 std::string file_uri_for_path(const std::string& abs_path) {
   std::string out = "file://";
@@ -131,6 +143,12 @@ void data_source_action(void*, wl_data_source*, uint32_t dnd_action) {
 
 
 void start_drag(AppState& app) {
+  // The hover preview must never survive into a drag — dismiss it up front
+  // so it can't pop up mid-drag and block the drop target.
+  reset_preview(app);
+  hide_tooltip(app);
+  if (dnd_dbg())
+    fprintf(stderr, "[dnd] start_drag paths=%zu\n", app.drag_paths.size());
   if (!app.data_device || app.drag_paths.empty()) {
     cancel_drag(app);
     return;
@@ -499,6 +517,10 @@ void start_drag(AppState& app) {
 
 
 void cancel_drag(AppState& app) {
+  if (dnd_dbg() && (app.drag_source || app.drag_potential || !app.drag_paths.empty()))
+    fprintf(stderr, "[dnd] cancel_drag (source=%d potential=%d paths=%zu)\n",
+            app.drag_source ? 1 : 0, app.drag_potential ? 1 : 0,
+            app.drag_paths.size());
   if (app.drag_source) {
     wl_data_source_destroy(app.drag_source);
     app.drag_source = nullptr;
@@ -525,6 +547,8 @@ void cancel_drag(AppState& app) {
   app.drop_hover_open_path.clear();
   app.drop_target_tab_idx = -1;
   app.drop_tab_switch_start_ms = 0;
+  app.breadcrumb_hover = -1;
+  app.r_breadcrumb_hover = -1;
 }
 
 void update_drag_icon(AppState& app) {
@@ -585,6 +609,91 @@ static void activate_pane_under_dnd(AppState& app, int sx) {
   }
 }
 
+// Drop-target highlight state (NOT the chooser srcs/target). Cleared on
+// leave and whenever a drop lands, so a missing leave event can never leave
+// a stale highlight — or a stuck preview suppression — behind.
+static void clear_drop_highlight(AppState& app) {
+  app.drop_target_path.clear();
+  app.drop_target_idx = -1;
+  app.drop_target_is_sidebar = false;
+  app.drop_target_sidebar_idx = -1;
+  app.drop_target_fav_section = false;
+  app.drop_target_is_valid = false;
+  app.drop_enter_serial = 0;
+  app.drop_hover_open_start_ms = 0;
+  app.drop_hover_open_path.clear();
+  app.drop_target_tab_idx = -1;
+  app.drop_tab_switch_start_ms = 0;
+  app.breadcrumb_hover = -1;
+  app.r_breadcrumb_hover = -1;
+}
+
+// Hit-test the breadcrumb (nav) bar for DnD: returns the segment index in
+// the active pane's crumbs, or -1. Only real local directories count —
+// virtual segments (recent://, computer://, drive/remote URIs) can never be
+// a copy/move target and are skipped.
+static int hit_test_breadcrumb(AppState& app, int sx, int sy) {
+  bool editing = app.active_pane ? app.r_path_editing : app.path_editing;
+  if (editing) return -1;
+  const std::vector<BreadcrumbSegment>* crumbs = nullptr;
+  if (!app.split_view) {
+    if (sy < 0 || sy >= app.top_bar_height) return -1;
+    crumbs = &app.breadcrumbs;
+  } else {
+    int content_y = app.top_bar_height + app.tab_bar_height;
+    if (sy < content_y || sy >= content_y + app.top_bar_height) return -1;
+    crumbs = app.active_pane ? &app.r_breadcrumbs : &app.breadcrumbs;
+  }
+  if (!crumbs) return -1;
+  for (size_t i = 0; i < crumbs->size(); ++i) {
+    const auto& seg = (*crumbs)[i];
+    if (sx >= seg.x && sx < seg.x + seg.w) {
+      if (seg.path.empty() || seg.path[0] != '/') return -1;
+      std::error_code ec;
+      if (!std::filesystem::is_directory(seg.path, ec) || ec) return -1;
+      return static_cast<int>(i);
+    }
+  }
+  return -1;
+}
+
+// Point the drop target at a breadcrumb segment (or clear the crumb
+// highlight with -1). Sets the crumb hover highlight so the bar shows where
+// the files will land; dropping there copies/moves into that folder.
+static void set_breadcrumb_drop_target(AppState& app, int crumb_idx) {
+  auto& hover = app.active_pane ? app.r_breadcrumb_hover : app.breadcrumb_hover;
+  if (crumb_idx < 0) {
+    if (hover >= 0) {
+      hover = -1;
+      app.pendingRedraw = true;
+    }
+    return;
+  }
+  const auto& crumbs = app.active_pane ? app.r_breadcrumbs : app.breadcrumbs;
+  if (crumb_idx >= static_cast<int>(crumbs.size())) return;
+  const std::string& path = crumbs[crumb_idx].path;
+  if (app.drop_target_path != path || !app.drop_target_is_valid ||
+      app.drop_target_is_sidebar || app.drop_target_fav_section ||
+      app.drop_target_idx != -1) {
+    app.drop_target_path = path;
+    app.drop_target_idx = -1;
+    app.drop_target_is_sidebar = false;
+    app.drop_target_sidebar_idx = -1;
+    app.drop_target_fav_section = false;
+    app.drop_target_is_valid = true;
+    app.drop_hover_open_start_ms = 0;
+    app.drop_hover_open_path.clear();
+    app.pendingRedraw = true;
+  }
+  if (hover != crumb_idx) {
+    hover = crumb_idx;
+    app.pendingRedraw = true;
+    if (dnd_dbg())
+      fprintf(stderr, "[dnd] crumb target idx=%d path='%s'\n", crumb_idx,
+              path.c_str());
+  }
+}
+
 void data_device_data_offer(void* data, wl_data_device*, wl_data_offer* offer) {
   auto& app = *static_cast<AppState*>(data);
   if (app.drop_offer) {
@@ -601,6 +710,15 @@ void data_device_data_offer(void* data, wl_data_device*, wl_data_offer* offer) {
 void data_device_enter(void* data, wl_data_device*, uint32_t serial, wl_surface*,
                        wl_fixed_t x, wl_fixed_t y, wl_data_offer* offer) {
   auto& app = *static_cast<AppState*>(data);
+  // An external drag hovering the window must never be met with a hover
+  // preview / tooltip blocking the drop target.
+  reset_preview(app);
+  hide_tooltip(app);
+  if (dnd_dbg()) {
+    int sx = wl_fixed_to_int(x);
+    int sy = wl_fixed_to_int(y);
+    fprintf(stderr, "[dnd] enter serial=%u at=(%d,%d)\n", serial, sx, sy);
+  }
   app.drop_enter_serial = serial;
   app.drop_chosen_action = WL_DATA_DEVICE_MANAGER_DND_ACTION_MOVE;
   auto* offer_data = static_cast<DropOfferData*>(wl_data_offer_get_user_data(offer));
@@ -619,6 +737,10 @@ void data_device_enter(void* data, wl_data_device*, uint32_t serial, wl_surface*
   app.drop_x = sx;
   app.drop_y = sy;
   activate_pane_under_dnd(app, sx);
+  // Fresh drag-over: no stale crumb highlight (tab/crumb/content branches
+  // below set what they need).
+  app.breadcrumb_hover = -1;
+  app.r_breadcrumb_hover = -1;
 
   // Check tab bar
   int tab_bar_top = app.top_bar_height;
@@ -636,6 +758,14 @@ void data_device_enter(void* data, wl_data_device*, uint32_t serial, wl_surface*
         return;
       }
     }
+    return;
+  }
+
+  // Check breadcrumb (nav) bar: dropping on a crumb copies/moves into
+  // that folder (e.g. drag from .../Pictures/Pittore Studio onto Pictures).
+  int crumb = hit_test_breadcrumb(app, sx, sy);
+  if (crumb >= 0) {
+    set_breadcrumb_drop_target(app, crumb);
     return;
   }
 
@@ -690,6 +820,7 @@ void data_device_enter(void* data, wl_data_device*, uint32_t serial, wl_surface*
 
 void data_device_leave(void* data, wl_data_device*) {
   auto& app = *static_cast<AppState*>(data);
+  if (dnd_dbg()) fprintf(stderr, "[dnd] leave\n");
   app.drop_target_path.clear();
   app.drop_target_idx = -1;
   app.drop_target_is_sidebar = false;
@@ -704,6 +835,8 @@ void data_device_leave(void* data, wl_data_device*) {
   app.drop_hover_open_path.clear();
   app.drop_target_tab_idx = -1;
   app.drop_tab_switch_start_ms = 0;
+  app.breadcrumb_hover = -1;
+  app.r_breadcrumb_hover = -1;
   app.pendingRedraw = true;
   if (app.drop_offer) {
     auto* offer_data = static_cast<DropOfferData*>(wl_data_offer_get_user_data(app.drop_offer));
@@ -715,6 +848,9 @@ void data_device_leave(void* data, wl_data_device*) {
 
 void data_device_motion(void* data, wl_data_device*, uint32_t, wl_fixed_t x, wl_fixed_t y) {
   auto& app = *static_cast<AppState*>(data);
+  // Keep any armed/active hover overlay down for the whole drag-over.
+  if (app.preview_entry_idx >= 0 || app.preview_active) reset_preview(app);
+  if (!app.tooltip_path.empty() || app.tooltip_active) hide_tooltip(app);
   int sx = wl_fixed_to_int(x);
   int sy = wl_fixed_to_int(y);
   app.drop_x = sx;
@@ -747,6 +883,7 @@ void data_device_motion(void* data, wl_data_device*, uint32_t, wl_fixed_t x, wl_
         app.drop_tab_switch_start_ms = static_cast<uint64_t>(now_ms);
         app.pendingRedraw = true;
       }
+      set_breadcrumb_drop_target(app, -1);
       return;
     }
     // Over tab bar but not on a non-active tab — clear
@@ -755,6 +892,7 @@ void data_device_motion(void* data, wl_data_device*, uint32_t, wl_fixed_t x, wl_
       app.drop_tab_switch_start_ms = 0;
       app.pendingRedraw = true;
     }
+    set_breadcrumb_drop_target(app, -1);
     return;
   }
   // Not in tab bar area — clear tab target
@@ -763,6 +901,15 @@ void data_device_motion(void* data, wl_data_device*, uint32_t, wl_fixed_t x, wl_
     app.drop_tab_switch_start_ms = 0;
     app.pendingRedraw = true;
   }
+
+  // Breadcrumb (nav) bar: dropping on a crumb lands the files in that
+  // folder. Clears the crumb highlight when anywhere else.
+  int crumb = hit_test_breadcrumb(app, sx, sy);
+  if (crumb >= 0) {
+    set_breadcrumb_drop_target(app, crumb);
+    return;
+  }
+  set_breadcrumb_drop_target(app, -1);
 
   // Check visible entries first (content-area folders get highest priority)
   int idx = -1;
@@ -852,11 +999,36 @@ void data_device_motion(void* data, wl_data_device*, uint32_t, wl_fixed_t x, wl_
   }
 }
 
-void data_device_selection(void*, wl_data_device*, wl_data_offer*) {}
+void data_device_selection(void* data, wl_data_device*, wl_data_offer* offer) {
+  auto& app = *static_cast<AppState*>(data);
+  // Selection (clipboard) offers arrive via data_offer as well. When no drag
+  // is over our window, the stored offer belongs to the selection — not a
+  // drop — so release it instead of letting it masquerade as an active drag
+  // (which would suppress the hover preview forever). The clipboard itself
+  // is served separately via the data-control protocol, so nothing else
+  // needs this object.
+  if (app.drop_enter_serial == 0 && app.drop_offer &&
+      (!offer || offer == app.drop_offer)) {
+    auto* offer_data =
+        static_cast<DropOfferData*>(wl_data_offer_get_user_data(app.drop_offer));
+    delete offer_data;
+    wl_data_offer_destroy(app.drop_offer);
+    app.drop_offer = nullptr;
+    if (dnd_dbg())
+      fprintf(stderr, "[dnd] selection offer released (not a drag)\n");
+  }
+}
 
 void data_device_drop(void* data, wl_data_device*) {
   auto& app = *static_cast<AppState*>(data);
-  if (!app.drop_offer) return;
+  if (!app.drop_offer) {
+    if (dnd_dbg()) fprintf(stderr, "[dnd] drop ignored (no offer)\n");
+    return;
+  }
+  if (dnd_dbg())
+    fprintf(stderr, "[dnd] drop internal=%d target='%s' valid=%d\n",
+            (app.drag_source && !app.drag_paths.empty()) ? 1 : 0,
+            app.drop_target_path.c_str(), app.drop_target_is_valid ? 1 : 0);
 
   if (app.drag_source && !app.drag_paths.empty()) {
     auto* offer_data = static_cast<DropOfferData*>(wl_data_offer_get_user_data(app.drop_offer));
@@ -876,9 +1048,7 @@ void data_device_drop(void* data, wl_data_device*) {
       }
       save_file_browser_settings(app);
       refresh_sidebar(app);
-      app.drop_target_fav_section = false;
-      app.drop_target_is_valid = false;
-      app.drop_target_path.clear();
+      clear_drop_highlight(app);
       app.pendingRedraw = true;
       return;
     }
@@ -908,12 +1078,7 @@ void data_device_drop(void* data, wl_data_device*) {
         ops.push_back(src);
     }
     if (ops.empty()) {
-      app.drop_target_path.clear();
-      app.drop_target_idx = -1;
-      app.drop_target_is_sidebar = false;
-      app.drop_target_sidebar_idx = -1;
-      app.drop_target_fav_section = false;
-      app.drop_target_is_valid = false;
+      clear_drop_highlight(app);
       app.drop_x = 0;
       app.drop_y = 0;
       app.pendingRedraw = true;
@@ -1000,7 +1165,10 @@ void data_device_drop(void* data, wl_data_device*) {
   wl_data_offer_destroy(app.drop_offer);
   app.drop_offer = nullptr;
 
-  if (paths.empty()) return;
+  if (paths.empty()) {
+    clear_drop_highlight(app);
+    return;
+  }
 
   // Determine target directory
   std::string target = app.drop_target_is_valid ? app.drop_target_path : app.cur_tab().current_path;
@@ -1013,7 +1181,10 @@ void data_device_drop(void* data, wl_data_device*) {
                            std::filesystem::path(target)))
       ops.push_back(std::move(p));
   }
-  if (ops.empty()) return;
+  if (ops.empty()) {
+    clear_drop_highlight(app);
+    return;
+  }
 
   // Ask the user how to handle the drop before starting any file I/O.
   open_drop_chooser(app, std::move(ops), std::move(target));
@@ -1042,12 +1213,17 @@ void open_drop_chooser(AppState& app, std::vector<std::string> ops,
   app.drop_chooser_y = app.drop_y;
   app.drop_chooser_hover = -1;
   app.drop_chooser_open = true;
+  // The drop landed: the highlight/hover-open/tab-switch state is done.
+  // Clear it here (not just on leave) so a missing leave event can't leave
+  // stale highlight — or a stuck overlay suppression — behind.
+  clear_drop_highlight(app);
   app.pendingRedraw = true;
 }
 
 void resolve_drop_chooser(AppState& app, int choice) {
   app.drop_chooser_open = false;
   app.drop_chooser_hover = -1;
+  clear_drop_highlight(app);
   auto srcs = std::move(app.drop_chooser_srcs);
   app.drop_chooser_srcs.clear();
   std::string target = std::move(app.drop_chooser_target);

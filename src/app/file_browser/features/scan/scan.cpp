@@ -24,6 +24,7 @@
 #include "app/file_browser/features/nav/nav.hpp"
 #include "app/file_browser/features/remote/remote.hpp"
 #include "app/file_browser/features/drive/drive.hpp"
+#include "app/file_browser/ui/layout.hpp"
 
 
 namespace eh::file_browser {
@@ -1139,6 +1140,143 @@ void apply_scan_result(AppState& app, bool is_progress) {
     reset_scroll_and_selection(app);
   }
 
+  // One-shot launch reveal (file path passed on the command line, or "Open
+  // File Location" navigating to the file itself): select the file once its
+  // parent listing lands and scroll it into view so the highlight is actually
+  // visible. Skeletons carry no stable metadata, so only the final apply
+  // consumes the request.
+  std::string reveal_path_for_tree;
+  if (!is_progress && !app.pending_select_path.empty()) {
+    const std::string want = app.pending_select_path;
+    app.pending_select_path.clear();
+    if (std::getenv("EH_REVEAL_DEBUG")) {
+      std::fprintf(stderr,
+                   "[reveal] apply want='%s' dir='%s' entries=%zu "
+                   "visible=%zu view=%d\n",
+                   want.c_str(), tab.current_path.c_str(), tab.entries.size(),
+                   tab.visible_entries.size(),
+                   static_cast<int>(tab.view_mode));
+    }
+    // A hidden reveal target would otherwise be filtered out of
+    // visible_entries and silently select nothing: unhide the view so the
+    // requested file can be shown.
+    for (const auto& e : tab.entries) {
+      if (e.path == want && e.is_hidden && !app.show_hidden) {
+        app.show_hidden = true;
+        tab.visible_entries.clear();
+        tab.visible_entries.reserve(tab.entries.size());
+        for (int i = 0; i < static_cast<int>(tab.entries.size()); ++i) {
+          if (!app.show_hidden && tab.entries[i].is_hidden) continue;
+          if (!query_matches_entry(app, tab.entries[i].name)) continue;
+          tab.visible_entries.push_back(i);
+        }
+        recompute_item_counts(tab, app.show_hidden);
+        break;
+      }
+    }
+    // If a search query hides the target, drop the query so the reveal can
+    // land instead of selecting nothing.
+    bool want_visible = false;
+    for (int vi = 0; vi < static_cast<int>(tab.visible_entries.size()); ++vi) {
+      const int ri = tab.visible_entries[vi];
+      if (ri >= 0 && ri < static_cast<int>(tab.entries.size()) &&
+          tab.entries[ri].path == want) {
+        want_visible = true;
+        break;
+      }
+    }
+    if (!want_visible) {
+      bool have_target = false;
+      for (const auto& e : tab.entries) {
+        if (e.path == want) {
+          have_target = true;
+          break;
+        }
+      }
+      if (have_target) {
+        if (app.active_pane) {
+          app.r_search_active = false;
+          app.r_recursive_search_active = false;
+          app.r_search_query.clear();
+          app.r_recursive_search_query.clear();
+        } else {
+          app.search_active = false;
+          app.recursive_search_active = false;
+          app.search_query.clear();
+          app.recursive_search_query.clear();
+        }
+        tab.visible_entries.clear();
+        tab.visible_entries.reserve(tab.entries.size());
+        for (int i = 0; i < static_cast<int>(tab.entries.size()); ++i) {
+          if (!app.show_hidden && tab.entries[i].is_hidden) continue;
+          if (!query_matches_entry(app, tab.entries[i].name)) continue;
+          tab.visible_entries.push_back(i);
+        }
+        recompute_item_counts(tab, app.show_hidden);
+      }
+    }
+    for (int vi = 0; vi < static_cast<int>(tab.visible_entries.size());
+         ++vi) {
+      const int ri = tab.visible_entries[vi];
+      if (ri >= 0 && ri < static_cast<int>(tab.entries.size()) &&
+          tab.entries[ri].path == want) {
+        tab.selected_idx = vi;
+        tab.multi_selected = {vi};
+        tab.sel_anchor = vi;
+        tab.selected_by_kbd = false;
+        tab.tree_selected_path = want;
+        reveal_path_for_tree = want;
+        // Scroll the row to the top of the content column so the selection
+        // is on screen when the new window paints (otherwise the folder
+        // opens at scroll 0 and the highlight sits invisibly below the fold).
+        int target_scroll = 0;
+        if (tab.view_mode == ViewMode::Grid) {
+          PaneViewRect pr = pane_view_rect_for_index(app, app.active_pane);
+          int content_w = pr.w > 0 ? pr.w : app.width;
+          GridLayout gl = compute_grid_layout(content_w, app.zoom_pct / 100.0);
+          int cols = std::max(1, gl.cols);
+          target_scroll = gl.row_gap_at_top + (vi / cols) * gl.row_h;
+        } else if (tab.view_mode == ViewMode::Tree) {
+          double zf = app.zoom_pct / 100.0;
+          int entry_h = static_cast<int>(28.0 * zf);
+          // Tree rows are resolved after build_tree_entries() below; scroll
+          // then. Approximate here with the list offset.
+          target_scroll = vi * std::max(1, entry_h);
+        } else {
+          int count = 0, prev = -1;
+          if (tab.group_by_type) {
+            for (int i = 0; i <= vi; ++i) {
+              int r = tab.visible_entries[i];
+              if (r < 0 || r >= static_cast<int>(tab.entries.size())) continue;
+              int t = static_cast<int>(tab.entries[r].type);
+              if (t != prev) {
+                ++count;
+                prev = t;
+              }
+            }
+          }
+          int header_h = static_cast<int>(app.entry_height * 0.55);
+          target_scroll = vi * app.entry_height + count * header_h;
+        }
+        if (target_scroll < 0) target_scroll = 0;
+        tab.scroll_px = target_scroll;
+        tab.scroll_smooth_current = static_cast<double>(target_scroll);
+        tab.scroll_smooth_target = static_cast<double>(target_scroll);
+        app.pendingRedraw = true;
+        if (std::getenv("EH_REVEAL_DEBUG")) {
+          std::fprintf(stderr,
+                       "[reveal] selected vi=%d scroll=%d entries=%zu\n", vi,
+                       target_scroll, tab.entries.size());
+        }
+        break;
+      }
+    }
+    if (std::getenv("EH_REVEAL_DEBUG")) {
+      std::fprintf(stderr, "[reveal] done selected_idx=%d scroll=%d\n",
+                   tab.selected_idx, tab.scroll_px);
+    }
+  }
+
   // Track directory mtime for auto-refresh
   struct stat dir_st;
   if (::stat(tab.current_path.c_str(), &dir_st) == 0)
@@ -1196,7 +1334,29 @@ void apply_scan_result(AppState& app, bool is_progress) {
   }
 
   // Rebuild tree entries if in tree mode
-  if (tab.view_mode == ViewMode::Tree) build_tree_entries(app);
+  if (tab.view_mode == ViewMode::Tree) {
+    build_tree_entries(app);
+    // The reveal above stored a visible-list index, but tree view addresses
+    // rows in tree_entries instead: re-resolve to the tree row and scroll it
+    // into view. Scoped to this apply's reveal so unrelated reloads keep
+    // their existing tree selection behavior.
+    if (!reveal_path_for_tree.empty()) {
+      for (int ti = 0; ti < static_cast<int>(tab.tree_entries.size()); ++ti) {
+        if (tab.tree_entries[ti].path == reveal_path_for_tree) {
+          tab.selected_idx = ti;
+          tab.multi_selected = {ti};
+          tab.sel_anchor = ti;
+          double zf = app.zoom_pct / 100.0;
+          int entry_h = static_cast<int>(28.0 * zf);
+          int target_scroll = ti * std::max(1, entry_h);
+          tab.scroll_px = target_scroll;
+          tab.scroll_smooth_current = static_cast<double>(target_scroll);
+          tab.scroll_smooth_target = static_cast<double>(target_scroll);
+          break;
+        }
+      }
+    }
+  }
 
   if (is_progress) {
     std::string leaf =

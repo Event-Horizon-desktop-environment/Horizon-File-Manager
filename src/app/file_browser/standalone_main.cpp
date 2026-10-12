@@ -1,4 +1,6 @@
 #include "app/file_browser/embed/embed.hpp"
+#include "app/file_browser/features/filemanager1/filemanager1.hpp"
+#include "app/file_browser/features/launch/launch_path.hpp"
 
 #include <clocale>
 #include <cstdio>
@@ -12,6 +14,21 @@ int main(int argc, char** argv) {
   // idle. Locked at 128 KiB, large buffers are mmap'd and actually freed.
   mallopt(M_MMAP_THRESHOLD, 128 * 1024);
   setlocale(LC_ALL, "");
+  // Headless FileManager1 service (D-Bus activation when no window runs):
+  // own org.freedesktop.FileManager1 and translate browser ShowItems into
+  // window launches. Never opens a window itself.
+  for (int i = 1; i < argc; ++i) {
+    if (!argv[i]) continue;
+    if (std::strcmp(argv[i], "--filemanager1-service") == 0 ||
+        std::strcmp(argv[i], "--gapplication-service") == 0) {
+      eh::file_browser::filemanager1_run_service();
+      return 0;
+    }
+  }
+  // Own FileManager1 while this window lives so late browser ShowItems calls
+  // spawn windows even after startup (best-effort; silently no-ops when the
+  // name is already owned or no session bus exists).
+  eh::file_browser::filemanager1_start_in_background();
   if (argc > 1 && std::strcmp(argv[1], "--select-directory") == 0) {
     std::string path;
     int ret = eh::file_browser::run_select_directory(path);
@@ -30,9 +47,13 @@ int main(int argc, char** argv) {
     }
     return ret;
   }
-  // If the first non-flag argument is a path, navigate to it
-  if (argc > 1 && argv[1][0] != '-') {
-    return eh::file_browser::run_standalone(argv[1]);
+  // Launch targets from browsers/portals/CLI: a directory, a file to reveal
+  // in its parent folder (incl. file:// URIs and Nautilus-style --select),
+  // or nothing (plain Home). navigate_to() resolves files to parent+select.
+  std::string target =
+      eh::file_browser::find_cli_launch_target(argc, argv);
+  if (!target.empty()) {
+    return eh::file_browser::run_standalone(target);
   }
   return eh::file_browser::run_standalone();
 }

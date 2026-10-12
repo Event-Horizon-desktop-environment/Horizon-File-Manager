@@ -334,6 +334,11 @@ struct AppState {
   bool embedded = false;
 
   std::string initial_navigate_path;
+  // File to select once its parent listing lands (one-shot): set when the
+  // launch target is a file rather than a directory (browser "show in
+  // folder" passing the download itself). Consumed by the next final scan
+  // apply whose folder contains it, cleared by any explicit dir navigation.
+  std::string pending_select_path;
 
   bool select_dir_mode = false;
   bool select_file_mode = false;

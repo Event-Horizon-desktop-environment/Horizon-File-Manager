@@ -170,6 +170,8 @@ sources = files(
   'src/app/file_browser/features/properties/properties.cpp',
   'src/app/file_browser/features/open_with/open_with.cpp',
   'src/app/file_browser/features/nav/nav.cpp',
+  'src/app/file_browser/features/launch/launch_path.cpp',
+  'src/app/file_browser/features/filemanager1/filemanager1.cpp',
   'src/app/file_browser/features/progress/progress.cpp',
   'src/app/file_browser/features/query_match/query_match.cpp',
   'src/app/file_browser/features/dirprops/dirprops.cpp',
@@ -191,6 +193,7 @@ sources = files(
   'src/app/file_browser/features/preview/video_preview.cpp',
   'src/app/file_browser/features/preview/video_worker.cpp',
   'src/app/file_browser/features/thumbnails/thumb_pool.cpp',
+  'src/app/file_browser/features/thumbnails/thumb_defer.cpp',
   'src/app/file_browser/features/dir_stats/dir_stats.cpp',
   'src/app/file_browser/features/dir_watch/dir_watch.cpp',
   'src/app/file_browser/features/terminal/terminal.cpp',
@@ -354,6 +357,20 @@ executable(
 install_data('src/horizon-files.desktop',
   install_dir: join_paths(get_option('datadir'), 'applications'))
 
+# ── FileManager1 D-Bus service (browser "Show in folder") ─────────────
+# Lets browsers reach us via org.freedesktop.FileManager1.ShowItems with
+# file:// URIs; D-Bus activates `horizon-files --filemanager1-service` when
+# no window is running, and running windows also own the name in the
+# background. Without this, browsers fall back to opening just the parent
+# folder and the file is never selected.
+filemanager1_service = configure_file(
+  input: 'src/org.freedesktop.FileManager1.service.in',
+  output: 'org.freedesktop.FileManager1.service',
+  configuration: {'bindir': join_paths(get_option('prefix'), get_option('bindir'))},
+)
+install_data(filemanager1_service,
+  install_dir: join_paths(get_option('datadir'), 'dbus-1', 'services'))
+
 # ── Icon ─────────────────────────────────────────────────────────────
 install_data(
   join_paths(meson.project_source_root(), 'assets', 'icons', 'Horizon-Files.svg'),
@@ -421,6 +438,17 @@ actions_test = executable(
 )
 
 test('actions', actions_test)
+
+launch_thumb_test = executable(
+  'test_launch_thumb',
+  'tests/test_launch_thumb.cpp',
+  'src/app/file_browser/features/launch/launch_path.cpp',
+  'src/app/file_browser/features/thumbnails/thumb_defer.cpp',
+  include_directories: inc,
+  cpp_args: test_cpp_args,
+)
+
+test('launch_thumb', launch_thumb_test)
 
 # Extraction toolchain stress: byte-identity across unzip/7z/bsdtar on a
 # many-file fixture (or $REFII_ZIP when set). Headless, skips (77) if tools

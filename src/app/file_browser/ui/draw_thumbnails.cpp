@@ -4,6 +4,7 @@
 #include "../app.hpp"
 #include "../features/sidebar/sidebar.hpp"
 #include "app/file_browser/features/thumbnails/thumb_pool.hpp"
+#include "app/file_browser/features/thumbnails/thumb_defer.hpp"
 #include "draw_thumbnails.hpp"
 
 #include <cairo/cairo.h>
@@ -105,6 +106,8 @@ cairo_surface_t* thumb_via_helper(const std::string& path, int size) {
       !is_pdf_extension(path) && !is_epub_extension(path) &&
       !is_image_extension(path))
     return nullptr;
+  // In-progress downloads demux slowly and fail: don't spend a fork on them.
+  if (thumb_should_defer(path)) return nullptr;
 
   char tmpl[] = "/tmp/horizon-thumb-XXXXXX.png";
   int fd = ::mkstemps(tmpl, 4);
@@ -153,6 +156,9 @@ cairo_surface_t* thumb_via_helper(const std::string& path, int size) {
 cairo_surface_t* thumb_decode_sync(const std::string& path, int size,
                                    bool* used_video) {
   *used_video = is_video_extension(path);
+  // Decode-time recheck: the file may have become hot after it was queued
+  // (download started mid-listing). Skipping here unblocks the worker.
+  if (thumb_should_defer(path)) return nullptr;
   if (cairo_surface_t* cached = load_cached_thumbnail(path, size)) return cached;
   if (cairo_surface_t* h = thumb_via_helper(path, size)) {
     // Save helper results back to disk cache (skip video — ffmpegthumbnailer

@@ -13,6 +13,7 @@
 #include <chrono>
 
 #include "app/file_browser/features/desktop_icon_parser/desktop_icon_parser.hpp"
+#include "app/file_browser/features/launch/launch_path.hpp"
 #include "app/file_browser/features/dirprops/dirprops.hpp"
 #include "app/file_browser/features/query_match/query_match.hpp"
 #include "app/file_browser/features/recursive_search_worker/recursive_search_worker.hpp"
@@ -608,8 +609,41 @@ void navigate_to(AppState& app, const std::string& path) {
     return;
   }
 
-  std::string resolved = fs::absolute(path).lexically_normal().string();
-  if (!fs::is_directory(resolved)) return;
+  std::string launch = normalize_launch_path(path);
+  if (launch.empty()) return;
+  std::string resolved =
+      fs::absolute(launch).lexically_normal().string();
+  std::string reveal;
+  if (!fs::is_directory(resolved)) {
+    // A file, not a folder (browser "show in folder" passing the download
+    // itself, or a path renamed away mid-click): open the containing folder
+    // and select the file once the listing lands instead of stranding the
+    // new window on an empty Home.
+    std::error_code fec;
+    const bool exists = fs::exists(resolved, fec) && !fec;
+    fec.clear();
+    fs::path parent = fs::path(resolved).parent_path();
+    std::string pdir = parent.empty()
+                           ? std::string("/")
+                           : parent.lexically_normal().string();
+    if (!fs::is_directory(pdir, fec) || fec) return;
+    if (exists) {
+      push_recent(app, resolved);
+      reveal = resolved;
+    }
+    resolved = pdir;
+  } else {
+    // Explicit directory navigation supersedes any stale reveal request.
+    app.pending_select_path.clear();
+  }
+  if (!reveal.empty()) app.pending_select_path = reveal;
+  if (std::getenv("EH_REVEAL_DEBUG")) {
+    std::fprintf(stderr,
+                 "[reveal] navigate in='%s' launch='%s' resolved='%s' "
+                 "reveal='%s' pending='%s'\n",
+                 path.c_str(), launch.c_str(), resolved.c_str(),
+                 reveal.c_str(), app.pending_select_path.c_str());
+  }
 
   push_recent(app, resolved);
 

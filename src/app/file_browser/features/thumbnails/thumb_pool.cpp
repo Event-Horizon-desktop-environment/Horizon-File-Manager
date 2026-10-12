@@ -1,5 +1,6 @@
 #include "thumb_pool.hpp"
 
+#include "app/file_browser/features/thumbnails/thumb_defer.hpp"
 #include "../../app_types.hpp"
 
 #include <condition_variable>
@@ -69,6 +70,10 @@ void thumb_pool_stop() {
 
 void thumb_pool_enqueue(AppState& app, const std::string& path, int size) {
   (void)app;
+  // Never let an in-progress multi-GB download wedge the single decode
+  // worker: the bytes shift under the decoder and the result is uncacheable
+  // anyway. The post-download reload re-enqueues it once settled.
+  if (thumb_should_defer(path)) return;
   std::lock_guard<std::mutex> lk(g_mtx);
   if (!g_running) return;
   auto it = g_pending.find(path);

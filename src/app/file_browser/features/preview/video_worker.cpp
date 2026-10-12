@@ -1,5 +1,6 @@
 #include "app/file_browser/features/preview/video_worker.hpp"
 #include "app/file_browser/app.hpp"
+#include "app/file_browser/features/thumbnails/thumb_defer.hpp"
 
 #include <cairo/cairo.h>
 
@@ -109,6 +110,9 @@ VideoThumbWorker::~VideoThumbWorker() {
 void VideoThumbWorker::enqueue(const std::string& path, int max_px,
                                 const std::string& cache_path,
                                 time_t src_mtime) {
+  // Same rationale as thumb_pool_enqueue: decoding a growing file burns a
+  // worker on bytes that shift mid-demux. Retried after the next reload.
+  if (thumb_should_defer(path)) return;
   {
     std::lock_guard<std::mutex> lock(m_in_mutex);
     auto it = m_pending.find(path);
@@ -136,6 +140,7 @@ void VideoThumbWorker::enqueue(const std::string& path, int max_px,
 }
 
 void VideoThumbWorker::enqueue_preview(const std::string& path, int max_px) {
+  if (thumb_should_defer(path)) return;
   {
     std::lock_guard<std::mutex> lock(m_in_mutex);
     if (m_prev_pending.count(path)) return;

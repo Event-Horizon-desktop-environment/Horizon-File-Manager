@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <ctime>
 #include <cmath>
 #include <filesystem>
@@ -96,6 +97,10 @@ void handle_pointer_move(AppState& app, int x, int y) {
     double dx = x - app.drag_start_x;
     double dy = y - app.drag_start_y;
     if (dx * dx + dy * dy > 64.0) {
+      // A drag is starting: any armed/active hover preview or tooltip must
+      // go away now — it must never pop up mid-drag and block the drop.
+      reset_preview(app);
+      hide_tooltip(app);
       if (!app.drag_paths.empty()) {
         start_drag(app);
       } else {
@@ -104,6 +109,10 @@ void handle_pointer_move(AppState& app, int x, int y) {
       if (app.wl.display()) wl_display_flush(app.wl.display());
       return;
     }
+    // Button still held below the drag threshold: keep hover tracking but
+    // never arm a preview — only a pure, button-free hover may do that.
+    // Fall through to the hover update below; the arming block further down
+    // checks drag_potential and skips arming.
   }
 
   if (app.sidebar_dragging) {
@@ -928,7 +937,30 @@ void handle_pointer_move(AppState& app, int x, int y) {
       app.preview_mode != AppState::PreviewMode::Space) {
     reset_preview(app);
     hide_tooltip(app);
-    if (app.cur_tab().hover_idx >= 0) {
+    // Only a pure hover may arm a preview/tooltip. While a button is held
+    // (drag potential / active DnD in either direction / drop chooser),
+    // hover tracking above still runs for selection, but no overlay arms.
+    // (drag_paths alone is NOT checked — manual state that could stick;
+    // potential/source cover every real drag phase.)
+    const char* skip_reason = nullptr;
+    if (app.drag_potential) skip_reason = "drag_potential";
+    else if (app.drag_source) skip_reason = "drag_source(active dnd)";
+    else if (app.drop_offer) skip_reason = "drop_offer(active dnd)";
+    else if (app.drop_enter_serial != 0) skip_reason = "drop_enter_serial(active dnd)";
+    else if (app.drop_chooser_open) skip_reason = "drop_chooser_open";
+    else if (app.marquee_active) skip_reason = "marquee_active";
+    bool no_hover_overlay = (skip_reason != nullptr);
+    if (no_hover_overlay) {
+      static bool dbg = [] {
+        const char* e = std::getenv("EH_PREVIEW_DEBUG");
+        return e && *e && e[0] != '0';
+      }();
+      if (dbg)
+        fprintf(stderr,
+                "[preview] pointer arm skipped (%s) hover %d -> %d\n",
+                skip_reason, prev_hover, app.cur_tab().hover_idx);
+    }
+    if (!no_hover_overlay && app.cur_tab().hover_idx >= 0) {
       int vi = app.cur_tab().hover_idx;
       if (vi >= 0 && vi < static_cast<int>(app.cur_tab().visible_entries.size())) {
         int ri = app.cur_tab().visible_entries[vi];
@@ -941,6 +973,13 @@ void handle_pointer_move(AppState& app, int x, int y) {
             clock_gettime(CLOCK_MONOTONIC, &ts);
             app.preview_hover_start_ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
                                           static_cast<uint64_t>(ts.tv_nsec);
+            static bool dbg = [] {
+              const char* e = std::getenv("EH_PREVIEW_DEBUG");
+              return e && *e && e[0] != '0';
+            }();
+            if (dbg)
+              fprintf(stderr, "[preview] pointer arm idx=%d path='%s'\n",
+                      vi, entry.path.c_str());
           } else if (entry.is_dir) {
             // Rich tooltip for entries without a live preview (folders)
             app.tooltip_path = entry.path;

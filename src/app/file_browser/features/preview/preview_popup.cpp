@@ -275,27 +275,105 @@ static void hover_anchor_point(AppState& app, int vi, int& mx, int& my) {
   my = top + ll.entry_h / 2;
 }
 
+// Hover preview delay: the cursor must rest on one entry this long before
+// the popup appears (classic 400ms feel).
+inline constexpr uint64_t kHoverPreviewDelayNs = 400000000ull; // 400ms
+
+// Null when a file drag-and-drop gesture is NOT in progress; otherwise a
+// short reason string. The hover preview (and tooltip) must never pop up
+// mid-drag and block the drop target — otherwise any pure hover may show
+// them. EH_PREVIEW_DEBUG=1 logs every suppression transition plus the exact
+// flag at fault, so a "preview never shows" report can be diagnosed from
+// stderr instead of guessed at.
+static const char* hover_suppress_reason(const AppState& app) {
+  if (app.context_menu_open) return "context_menu_open";
+  if (app.drop_chooser_open) return "drop_chooser_open";
+  // Outgoing drag: button held (potential) → active session (source).
+  // NOTE: drag_paths alone is deliberately NOT checked — it is manual state
+  // that could outlive the gesture; potential/source fully cover every real
+  // drag phase without risk of sticking the suppression on.
+  if (app.drag_potential) return "drag_potential";
+  if (app.drag_source) return "drag_source(active dnd)";
+  // Incoming (or own) drag over our window: offer + enter serial.
+  // NOTE: drop-target highlight flags are deliberately NOT checked — they
+  // are highlight state cleared on leave/drop and must never stick the
+  // suppression on if a leave event goes missing.
+  if (app.drop_offer) return "drop_offer(active dnd)";
+  if (app.drop_enter_serial != 0) return "drop_enter_serial(active dnd)";
+  // Rubber-band selection drag.
+  if (app.marquee_active) return "marquee_active";
+  return nullptr;
+}
+
+// One-line transition log so a stuck suppression is visible without spam:
+// logs when suppression turns on/off, never every frame.
+static void log_suppress_transition(const char* what, const char* reason,
+                                    bool& was, int armed_idx, bool active) {
+  if (!preview_dbg()) return;
+  bool is = (reason != nullptr);
+  if (is == was) return;
+  was = is;
+  if (is) {
+    fprintf(stderr,
+            "[preview] %s suppressed (%s) armed_idx=%d active=%d\n", what,
+            reason, armed_idx, active ? 1 : 0);
+  } else {
+    fprintf(stderr, "[preview] %s unsuppressed armed_idx=%d active=%d\n",
+            what, armed_idx, active ? 1 : 0);
+  }
+}
+
 void check_hover_preview(AppState& app) {
   // Don't touch space preview
   if (app.preview_mode == AppState::PreviewMode::Space) return;
 
   // A right-click menu must never sit under (or re-arm) a hover preview.
-  if (app.context_menu_open) {
-    if (app.preview_entry_idx >= 0) reset_preview(app);
+  // A file drag-and-drop gesture also suppresses it so the popup can't
+  // block the drop target.
+  static bool was_suppressed = false;
+  const char* suppress_reason = hover_suppress_reason(app);
+  log_suppress_transition("hover-preview", suppress_reason, was_suppressed,
+                          app.preview_entry_idx, app.preview_active);
+  if (suppress_reason) {
+    if (preview_dbg() && (app.preview_entry_idx >= 0 || app.preview_active))
+      fprintf(stderr, "[preview] hover-preview dismissed (%s)\n",
+              suppress_reason);
+    if (app.preview_entry_idx >= 0 || app.preview_active) reset_preview(app);
     return;
   }
 
   // Guard: if index is stale (entries changed), reset
   int n_visible = static_cast<int>(app.cur_tab().visible_entries.size());
   if (app.preview_entry_idx >= n_visible) {
+    if (preview_dbg() && app.preview_entry_idx >= 0)
+      fprintf(stderr, "[preview] reset: stale idx %d >= %d visible\n",
+              app.preview_entry_idx, n_visible);
     reset_preview(app);
     return;
   }
 
   int target = overlay_target_idx(app);
+  if (preview_dbg()) {
+    // Target drift (hover_idx/selected_idx behind the armed entry) is the
+    // other classic "never shows" cause — log it, but only while armed so
+    // idle frames stay quiet.
+    static int last_target = -2;
+    if (app.preview_entry_idx >= 0 && target != last_target) {
+      last_target = target;
+      fprintf(stderr,
+              "[preview] armed idx=%d target=%d hover_idx=%d kbd_sel=%d\n",
+              app.preview_entry_idx, target, app.cur_tab().hover_idx,
+              app.cur_tab().selected_by_kbd ? app.cur_tab().selected_idx : -1);
+    } else if (app.preview_entry_idx < 0) {
+      last_target = -2;
+    }
+  }
 
   // If the entry is no longer hovered, cancel
   if (app.preview_entry_idx >= 0 && app.preview_entry_idx != target) {
+    if (preview_dbg())
+      fprintf(stderr, "[preview] reset: target changed %d -> %d\n",
+              app.preview_entry_idx, target);
     reset_preview(app);
     return;
   }
@@ -308,23 +386,65 @@ void check_hover_preview(AppState& app) {
     int tri = app.cur_tab().visible_entries[target];
     if (tri < 0 || tri >= static_cast<int>(app.cur_tab().entries.size())) return;
     const FileEntry& tentry = app.cur_tab().entries[tri];
-    if (!is_previewable_entry(tentry)) return; // dirs get the tooltip instead
+    if (!is_previewable_entry(tentry)) {
+      if (preview_dbg()) {
+        // Not an error: dirs/folders intentionally get the tooltip instead.
+        // Logged because "hovered but nothing appears" is otherwise a mystery.
+        static std::string last_unpreviewable;
+        if (last_unpreviewable != tentry.path) {
+          last_unpreviewable = tentry.path;
+          fprintf(stderr,
+                  "[preview] self-arm skipped: '%s' type=%d (no renderer; "
+                  "tooltip covers dirs)\n",
+                  tentry.path.c_str(), static_cast<int>(tentry.type));
+        }
+      }
+      return; // dirs get the tooltip instead
+    }
     app.preview_entry_idx = target;
     app.preview_path = tentry.path;
     timespec ts{};
     clock_gettime(CLOCK_MONOTONIC, &ts);
     app.preview_hover_start_ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
                                   static_cast<uint64_t>(ts.tv_nsec);
+    if (preview_dbg())
+      fprintf(stderr, "[preview] self-arm idx=%d path='%s'\n", target,
+              tentry.path.c_str());
     return;
   }
 
-  // Timer: activate after 400ms
+  // Timer: activate after 400ms of hover
   if (!app.preview_active && app.preview_entry_idx >= 0) {
     timespec ts{};
     clock_gettime(CLOCK_MONOTONIC, &ts);
     uint64_t now = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
                    static_cast<uint64_t>(ts.tv_nsec);
-    if (now - app.preview_hover_start_ns > 400000000) { // 400ms
+    if (preview_dbg()) {
+      // Waiting-for-timer heartbeat: at most one line per armed entry, so a
+      // dead timer (start never set, clock skew) is visible without spam.
+      static int last_wait_idx = -2;
+      static uint64_t last_wait_start = 0;
+      if (app.preview_entry_idx != last_wait_idx ||
+          app.preview_hover_start_ns != last_wait_start) {
+        last_wait_idx = app.preview_entry_idx;
+        last_wait_start = app.preview_hover_start_ns;
+        double waited =
+            (now >= app.preview_hover_start_ns)
+                ? (static_cast<double>(now - app.preview_hover_start_ns) /
+                   1000000.0)
+                : -1.0;
+        fprintf(stderr,
+                "[preview] waiting idx=%d path='%s' waited=%.0fms need=%llums\n",
+                app.preview_entry_idx, app.preview_path.c_str(), waited,
+                (unsigned long long)(kHoverPreviewDelayNs / 1000000ull));
+      }
+    }
+    if (now - app.preview_hover_start_ns > kHoverPreviewDelayNs) { // 400ms
+      double waited_ms =
+          static_cast<double>(now - app.preview_hover_start_ns) / 1000000.0;
+      if (preview_dbg())
+        fprintf(stderr, "[preview] timer fired idx=%d path='%s' waited=%.0fms\n",
+                app.preview_entry_idx, app.preview_path.c_str(), waited_ms);
       auto hover_t0 = std::chrono::steady_clock::now();
       struct HoverTimer {
         std::chrono::steady_clock::time_point t0;
@@ -399,12 +519,26 @@ void check_hover_preview(AppState& app) {
           app.preview_path = entry.path;
 
           // Create + draw + commit the subsurface popup
-          if (create_preview_popup(app))
+          bool popup_ok = create_preview_popup(app);
+          if (popup_ok) {
             commit_preview_popup(app);
+          } else if (preview_dbg()) {
+            fprintf(stderr,
+                    "[preview] POPUP CREATE FAILED idx=%d path='%s' w=%d h=%d "
+                    "(active flag still set; surface may be missing)\n",
+                    vi, entry.path.c_str(), app.preview_w, app.preview_h);
+          }
 
           app.preview_active = true;
           app.preview_mode = AppState::PreviewMode::Hover;
           app.pendingRedraw = true;
+          if (preview_dbg())
+            fprintf(stderr,
+                    "[preview] ACTIVE idx=%d path='%s' type=%d popup=%dx%d "
+                    "at=(%d,%d) committed=%d\n",
+                    vi, entry.path.c_str(), static_cast<int>(entry.type),
+                    app.preview_w, app.preview_h, app.preview_x, app.preview_y,
+                    popup_ok ? 1 : 0);
         }
       }
     }
@@ -594,6 +728,15 @@ static void commit_tooltip_popup(AppState& app) {
 void check_hover_tooltip(AppState& app) {
   if (app.preview_mode == AppState::PreviewMode::Space) return;
   if (app.context_menu_open || app.preview_active) return;
+  // Same rule as the hover preview: no tooltip mid file-drag either.
+  static bool was_suppressed = false;
+  const char* suppress_reason = hover_suppress_reason(app);
+  log_suppress_transition("tooltip", suppress_reason, was_suppressed, -1,
+                          app.tooltip_active);
+  if (suppress_reason) {
+    if (!app.tooltip_path.empty() || app.tooltip_active) hide_tooltip(app);
+    return;
+  }
 
   long long now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
       std::chrono::steady_clock::now().time_since_epoch()).count();

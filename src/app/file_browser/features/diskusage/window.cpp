@@ -1767,14 +1767,9 @@ void handle_du_click(AppState& app, int x, int y, int button) {
   }
   if (ctrl == hui::Hit::kDuOpenLoc) {
     if (!du.selected.empty()) {
-      std::string target = du.selected;
-      if (!du_path_is_dir(app, target)) {
-        auto slash = target.rfind('/');
-        target = (slash == std::string::npos || slash == 0)
-                     ? "/"
-                     : target.substr(0, slash);
-      }
-      navigate_to(app, target);
+      // Navigate to the file itself so navigate_to() opens the containing
+      // folder and selects the file once the listing lands.
+      navigate_to(app, du.selected);
       draw(app);
     }
     return;

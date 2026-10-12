@@ -1078,10 +1078,22 @@ bool ctx_open_file_location(AppState& app, int item_idx, AppState::ContextMenuAc
       int real_idx = app.cur_tab().visible_entries[app.context_menu_file_idx];
       if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size())) {
         std::string file_path = app.cur_tab().entries[real_idx].path;
-        auto slash = file_path.rfind('/');
-        if (slash != std::string::npos) {
-          std::string parent = file_path.substr(0, slash);
-          navigate_to(app, parent);
+        // Navigate to the file itself: navigate_to() opens the containing
+        // folder and arms pending_select_path so the file is selected (and
+        // scrolled into view) once the listing lands. Navigating to only the
+        // parent would clear any reveal request and leave nothing selected.
+        // Non-local URIs (drive://, sftp://, virtual views) have no file
+        // reveal path, so fall back to opening the parent folder directly.
+        if (!file_path.empty()) {
+          if (!file_path.empty() && file_path[0] == '/') {
+            navigate_to(app, file_path);
+          } else {
+            auto slash = file_path.rfind('/');
+            if (slash != std::string::npos) {
+              std::string parent = file_path.substr(0, slash);
+              if (!parent.empty()) navigate_to(app, parent);
+            }
+          }
         }
       }
     }
