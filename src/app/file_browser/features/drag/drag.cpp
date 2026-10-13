@@ -790,18 +790,10 @@ void data_device_enter(void* data, wl_data_device*, uint32_t serial, wl_surface*
     }
   }
 
-  // Check favorites section
-  if (hit_test_fav_section(app, sx, sy)) {
-    app.drop_target_fav_section = true;
-    app.drop_target_is_sidebar = false;
-    app.drop_target_sidebar_idx = -1;
-    app.drop_target_path.clear();
-    app.drop_target_is_valid = true;
-    app.pendingRedraw = true;
-    return;
-  }
-
-  // Check sidebar (lowest priority — only when cursor is actually in sidebar area)
+  // Check sidebar first — an existing Favorite row is a valid copy/move
+  // target (drop INTO the folder). Only empty Favorites chrome
+  // (divider/header, no row under the cursor) falls through to the
+  // add-new-favorite zone below.
   int sb_idx = hit_test_sidebar(app, sx, sy);
   if (sb_idx >= 0 && sb_idx < static_cast<int>(app.sidebar_locations.size())) {
     const auto& loc = app.sidebar_locations[sb_idx];
@@ -811,10 +803,22 @@ void data_device_enter(void* data, wl_data_device*, uint32_t serial, wl_surface*
       app.drop_target_idx = -1;
       app.drop_target_is_sidebar = true;
       app.drop_target_sidebar_idx = sb_idx;
+      app.drop_target_fav_section = false;
       app.drop_target_is_valid = true;
       app.pendingRedraw = true;
       return;
     }
+  }
+
+  // Check favorites section (empty area — adds dragged folders as new favorites)
+  if (hit_test_fav_section(app, sx, sy)) {
+    app.drop_target_fav_section = true;
+    app.drop_target_is_sidebar = false;
+    app.drop_target_sidebar_idx = -1;
+    app.drop_target_path.clear();
+    app.drop_target_is_valid = true;
+    app.pendingRedraw = true;
+    return;
   }
 }
 
@@ -944,7 +948,42 @@ void data_device_motion(void* data, wl_data_device*, uint32_t, wl_fixed_t x, wl_
     }
   }
 
-  // Check if dragging over the Favorites section (to add a new favorite)
+  // Check sidebar first — an existing Favorite row is a valid copy/move
+  // target (drop INTO the folder). Only empty Favorites chrome
+  // (divider/header, no row under the cursor) falls through to the
+  // add-new-favorite zone below.
+  {
+    int sb_idx = hit_test_sidebar(app, sx, sy);
+    if (sb_idx >= 0 && sb_idx < static_cast<int>(app.sidebar_locations.size())) {
+      const auto& loc = app.sidebar_locations[sb_idx];
+      std::error_code ec;
+      if (std::filesystem::is_directory(loc.path, ec)) {
+        if (!app.drop_target_is_sidebar || app.drop_target_sidebar_idx != sb_idx ||
+            app.drop_target_fav_section) {
+          app.drop_target_fav_section = false;
+          app.drop_target_path = loc.path;
+          app.drop_target_idx = -1;
+          app.drop_target_is_sidebar = true;
+          app.drop_target_sidebar_idx = sb_idx;
+          app.drop_target_is_valid = true;
+          app.drop_hover_open_start_ms = 0;
+          app.drop_hover_open_path.clear();
+          app.pendingRedraw = true;
+        }
+        return;
+      }
+      // Over a sidebar row that isn't a valid drop dir (e.g. a stale
+      // Favorite, virtual row): clear any fav-section indicator that may
+      // have been set, then fall through so the empty-area check below
+      // can still offer add-as-favorite.
+      if (app.drop_target_fav_section) {
+        app.drop_target_fav_section = false;
+        app.pendingRedraw = true;
+      }
+    }
+  }
+
+  // Check if dragging over the Favorites empty area (to add a new favorite)
   if (hit_test_fav_section(app, sx, sy)) {
     if (!app.drop_target_fav_section) {
       app.drop_target_fav_section = true;
@@ -957,32 +996,6 @@ void data_device_motion(void* data, wl_data_device*, uint32_t, wl_fixed_t x, wl_
       app.pendingRedraw = true;
     }
     return;
-  }
-
-  // Check sidebar (lowest priority — only when cursor is actually in sidebar area)
-  int sb_idx = hit_test_sidebar(app, sx, sy);
-  if (sb_idx >= 0 && sb_idx < static_cast<int>(app.sidebar_locations.size())) {
-    // If over a sidebar item, clear the favorites section indicator
-    if (app.drop_target_fav_section) {
-      app.drop_target_fav_section = false;
-      app.pendingRedraw = true;
-    }
-    const auto& loc = app.sidebar_locations[sb_idx];
-    std::error_code ec;
-    if (std::filesystem::is_directory(loc.path, ec)) {
-      if (!app.drop_target_is_sidebar || app.drop_target_sidebar_idx != sb_idx) {
-        app.drop_target_fav_section = false;
-        app.drop_target_path = loc.path;
-        app.drop_target_idx = -1;
-        app.drop_target_is_sidebar = true;
-        app.drop_target_sidebar_idx = sb_idx;
-        app.drop_target_is_valid = true;
-        app.drop_hover_open_start_ms = 0;
-        app.drop_hover_open_path.clear();
-        app.pendingRedraw = true;
-      }
-      return;
-    }
   }
 
   // No valid target under cursor — clear hover-to-open timer
@@ -1167,6 +1180,26 @@ void data_device_drop(void* data, wl_data_device*) {
 
   if (paths.empty()) {
     clear_drop_highlight(app);
+    return;
+  }
+
+  // Drop on Favorites empty area from another app — add dragged folders
+  // as new favorites (mirrors the internal-drag branch above). Drops onto
+  // an existing Favorite row arrive here as a sidebar target instead, so
+  // they fall through to the copy/move chooser below.
+  if (app.drop_target_fav_section) {
+    for (const auto& p : paths) {
+      std::error_code ec;
+      if (std::filesystem::is_directory(p, ec)) {
+        if (std::find(app.favorites.begin(), app.favorites.end(), p) == app.favorites.end()) {
+          app.favorites.push_back(p);
+        }
+      }
+    }
+    save_file_browser_settings(app);
+    refresh_sidebar(app);
+    clear_drop_highlight(app);
+    app.pendingRedraw = true;
     return;
   }
 

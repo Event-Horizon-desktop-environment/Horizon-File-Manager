@@ -70,6 +70,11 @@ static const TerminalInfo kKnownTerminals[] = {
   {"kitty",                  "--directory"},
   {"deepin-terminal",        "--workdir"},
   {"cool-retro-term",        "--workdir"},
+  // Ptyxis is single-instance (DBusActivatable): a bare `ptyxis` call just
+  // activates the existing window and ignores CWD. `--new-window` forces a
+  // new window; combined with `--working-directory` per `ptyxis --help` /
+  // man page ("may be combined with --working-directory").
+  {"ptyxis",                 "--new-window --working-directory"},
 
   // Terminals that honour inherited CWD — no flag needed.
   {"alacritty",              nullptr},
@@ -81,15 +86,83 @@ static const TerminalInfo kKnownTerminals[] = {
   {"sakura",                 nullptr},
 };
 
-static const char* terminal_workdir_flag(const std::string& desktop_id) {
-  std::string stem = desktop_id;
-  auto slash = stem.rfind('/');
-  if (slash != std::string::npos) stem = stem.substr(slash + 1);
-  auto dot = stem.rfind('.');
-  if (dot != std::string::npos) stem = stem.substr(0, dot);
+static std::string to_lower_copy(std::string s) {
+  for (char& c : s) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+  return s;
+}
 
+// Basename stem, lowercased, without .desktop suffix:
+// "/usr/share/applications/org.gnome.Ptyxis.desktop" -> "org.gnome.ptyxis"
+// "ptyxis" -> "ptyxis"
+static std::string terminal_stem_lower(const std::string& id) {
+  std::string stem = id;
+  if (auto slash = stem.rfind('/'); slash != std::string::npos)
+    stem = stem.substr(slash + 1);
+  std::string low = to_lower_copy(stem);
+  const std::string suffix = ".desktop";
+  if (low.size() > suffix.size() &&
+      low.compare(low.size() - suffix.size(), suffix.size(), suffix) == 0) {
+    stem = stem.substr(0, stem.size() - suffix.size());
+    low = to_lower_copy(stem);
+  }
+  return low;
+}
+
+static bool terminal_stem_matches(const std::string& stem_low, const std::string& want_low) {
+  if (stem_low == want_low) return true;
+  // Reverse-domain match: "org.gnome.ptyxis" matches "ptyxis".
+  if (stem_low.size() > want_low.size() + 1 &&
+      stem_low.compare(stem_low.size() - want_low.size() - 1, want_low.size() + 1,
+                       "." + want_low) == 0)
+    return true;
+  return false;
+}
+
+// True when a stored terminal id refers to the given .desktop entry:
+// exact path, exact stem (case-insensitive), or bare-vs-domain
+// ("ptyxis" vs "org.gnome.Ptyxis").
+static bool terminal_id_matches(const std::string& desktop_id, const std::string& term_id) {
+  if (desktop_id == term_id) return true;
+  std::string a = terminal_stem_lower(desktop_id);
+  std::string b = terminal_stem_lower(term_id);
+  if (a == b) return true;
+  if (terminal_stem_matches(a, b) || terminal_stem_matches(b, a)) return true;
+  return false;
+}
+
+// GTK >= 4.23.3 binds ext-background-effect on every window with an empty
+// blur region, which tells Hyprland >= 0.56 "no blur wanted" (GNOME/gtk#8344).
+// Hiding the protocol global from GTK restores compositor auto-blur. Only
+// the main Ptyxis process reads it (single-instance), but prefixing every
+// launch covers cold starts from any entry point (keybind, .desktop,
+// file manager, D-Bus activation).
+  // NOTE: this function is deliberately compiled at O0 (see push_options
+  // below). With GCC 16 -O3 the "ext_background_effect_manager_v1" bytes
+  // came out corrupted in the object ("..._mafect_..."), silently breaking
+  // the workaround — verified byte-for-byte in the .o. Splitting the value
+  // into pieces was not sufficient on its own; the O0 guard is what holds.
+#pragma GCC push_options
+#pragma GCC optimize("O0")
+static std::string terminal_env_prefix(const std::string& desktop_id) {
+  if (!terminal_stem_matches(terminal_stem_lower(desktop_id), "ptyxis"))
+    return {};
+  // NOTE: keep this value out of a single string literal (see above).
+  std::string v = "env GDK_WAYLAND_DISABLE=";
+  v += "ext_back";
+  v += "ground_effect_manager_v1 ";
+  return v;
+}
+#pragma GCC pop_options
+
+static const char* terminal_workdir_flag(const std::string& desktop_id) {
+  const std::string stem_low = terminal_stem_lower(desktop_id);
+  // Exact matches first so "gnome-terminal.wrapper" can't be shadowed.
   for (const auto& t : kKnownTerminals) {
-    if (stem == t.stem) return t.flag;
+    if (stem_low == to_lower_copy(t.stem)) return t.flag;
+  }
+  // Then reverse-domain suffix matches ("org.gnome.ptyxis" -> "ptyxis").
+  for (const auto& t : kKnownTerminals) {
+    if (terminal_stem_matches(stem_low, to_lower_copy(t.stem))) return t.flag;
   }
   return nullptr; // unknown → rely on cd
 }
@@ -132,22 +205,18 @@ void open_terminal_at(AppState& app, const std::string& dir) {
   scan_terminal_apps(app);
   bool found = false;
   for (const auto& ta : app.term_chooser_apps) {
-    std::string stem = ta.desktop_id;
-    auto slash = stem.rfind('/');
-    if (slash != std::string::npos) stem = stem.substr(slash + 1);
-    auto dot = stem.rfind('.');
-    if (dot != std::string::npos) stem = stem.substr(0, dot);
-    if (stem == term_id || ta.desktop_id == term_id || ta.desktop_id == term_id + ".desktop") {
+    if (terminal_id_matches(ta.desktop_id, term_id)) {
       std::string cleaned = clean_exec_line(ta.exec);
       const char* wd_flag = terminal_workdir_flag(ta.desktop_id);
 
       std::string full;
+      const std::string env = terminal_env_prefix(ta.desktop_id);
       if (wd_flag) {
         // Known terminal – pass directory via explicit flag.
-        full = cleaned + " " + wd_flag + " " + sh_quote(dir) + " >/dev/null 2>&1";
+        full = env + cleaned + " " + wd_flag + " " + sh_quote(dir) + " >/dev/null 2>&1";
       } else {
         // Unknown terminal / inherits CWD – cd first, then launch.
-        full = "cd " + sh_quote(dir) + " && " + cleaned + " >/dev/null 2>&1";
+        full = "cd " + sh_quote(dir) + " && " + env + cleaned + " >/dev/null 2>&1";
       }
       xdg::spawn_sh_lc_detached(full);
       found = true;
@@ -157,11 +226,12 @@ void open_terminal_at(AppState& app, const std::string& dir) {
   if (!found) {
     // No .desktop entry matched – try term_id as a raw command name.
     const char* wd_flag = terminal_workdir_flag(term_id);
+    const std::string env = terminal_env_prefix(term_id);
     std::string full;
     if (wd_flag) {
-      full = term_id + " " + wd_flag + " " + sh_quote(dir) + " >/dev/null 2>&1";
+      full = env + term_id + " " + wd_flag + " " + sh_quote(dir) + " >/dev/null 2>&1";
     } else {
-      full = "cd " + sh_quote(dir) + " && " + term_id + " >/dev/null 2>&1";
+      full = "cd " + sh_quote(dir) + " && " + env + term_id + " >/dev/null 2>&1";
     }
     xdg::spawn_sh_lc_detached(full);
   }
