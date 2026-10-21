@@ -52,6 +52,7 @@ dep_librsvg   = dependency('librsvg-2.0', required: false)
 dep_uring     = dependency('liburing', required: false)
 dep_zlib      = dependency('zlib', required: false)
 dep_lzma      = dependency('liblzma', required: false)
+dep_bz2       = dependency('bzip2', required: false)
 
 if dep_poppler.found()
   cpp_args += ['-DEH_HAVE_POPPLER']
@@ -67,6 +68,11 @@ if dep_zlib.found()
 endif
 if dep_lzma.found()
   cpp_args += ['-DEH_HAVE_LZMA']
+endif
+
+dep_bz2 = dependency('bzip2', required: false)
+if dep_bz2.found()
+  cpp_args += ['-DEH_HAVE_BZ2']
 endif
 if dep_librsvg.found()
   cpp_args += ['-DEH_HAVE_RSVG']
@@ -153,6 +159,8 @@ sources = files(
   'src/app/file_browser/features/compress/engine/engine_zip.cpp',
   'src/app/file_browser/features/compress/engine/engine_xz.cpp',
   'src/app/file_browser/features/compress/engine/engine_7z.cpp',
+  'src/app/file_browser/features/compress/engine/engine_bzip2.cpp',
+  'src/app/file_browser/features/compress/engine/engine_extract.cpp',
   'src/app/file_browser/features/compress/engine/engine.cpp',
   'src/app/file_browser/features/compare/compare.cpp',
   'src/app/file_browser/features/desktop_icon_parser/desktop_icon_parser.cpp',
@@ -348,6 +356,7 @@ executable(
     dep_uring,
     dep_zlib,
     dep_lzma,
+    dep_bz2,
     eh_material_colors_dep,
   ] + drive_deps,
   install: true,
@@ -490,6 +499,7 @@ bench_paint_exe = executable(
     dep_uring,
     dep_zlib,
     dep_lzma,
+    dep_bz2,
     eh_material_colors_dep,
   ] + drive_deps,
   install: false,

@@ -44,4 +44,22 @@ bool engine_compress(const EnginePlan& plan, const std::string& archive_path,
                      int format_idx, int level, int threads,
                      const std::shared_ptr<OperationProgress>& prog);
 
+// In-process extraction using only linked codec libs (zlib/lzma) + our own
+// tar/zip/7z parsers — no libarchive, no external tools. Mirrors the
+// compress engine: supported extensions return true from
+// engine_supports_extract(); engine_extract() returns true on success,
+// false on failure, unsupported coder/encryption, or cancel (caller checks
+// prog->cancel; partial output stays for the caller to keep or remove).
+// Password-protected archives are never attempted (caller must skip the
+// engine when a password is present).
+bool engine_supports_extract(const std::string& archive_path);
+bool engine_extract(const std::string& archive_path,
+                    const std::string& dest_dir,
+                    const std::shared_ptr<OperationProgress>& prog);
+// True when our parsers can see encryption markers (zip bit 0, 7z encoded
+// header / AES coder). Tar-family containers have no encryption signal and
+// report false. Unknown layouts report false (caller falls back to the
+// libarchive probe).
+bool engine_archive_is_encrypted(const std::string& archive_path);
+
 } // namespace eh::file_browser

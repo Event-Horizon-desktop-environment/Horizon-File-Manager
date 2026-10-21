@@ -228,14 +228,20 @@ static bool tool_available(const char* name) {
 }
 
 void check_compress_tool_availability(AppState& app) {
-  // format 0 (zip), 1 (tar.gz), 2 (tar.bz2), 3 (tar.xz)
-  app.compress_format_available[0] = tool_available("zip") || tool_available("7z");
-  app.compress_format_available[1] = tool_available("tar") && tool_available("gzip");
-  app.compress_format_available[2] = tool_available("tar") && tool_available("bzip2");
-  app.compress_format_available[3] = tool_available("tar") && tool_available("xz");
-  app.compress_format_available[4] = tool_available("7z");
+  // A format is available when the in-process engine can write it OR an
+  // external tool exists. Rar stays external-only (we never write RAR).
+  // format 0 (zip), 1 (tar.gz), 2 (tar.bz2), 3 (tar.xz), 4 (7z), 6 (tar)
+  app.compress_format_available[0] = engine_supports_format(0) ||
+                                     tool_available("zip") || tool_available("7z");
+  app.compress_format_available[1] = engine_supports_format(1) ||
+                                     (tool_available("tar") && tool_available("gzip"));
+  app.compress_format_available[2] = engine_supports_format(2) ||
+                                     (tool_available("tar") && tool_available("bzip2"));
+  app.compress_format_available[3] = engine_supports_format(3) ||
+                                     (tool_available("tar") && tool_available("xz"));
+  app.compress_format_available[4] = engine_supports_format(4) || tool_available("7z");
   app.compress_format_available[5] = tool_available("rar");
-  app.compress_format_available[6] = tool_available("tar");
+  app.compress_format_available[6] = engine_supports_format(6) || tool_available("tar");
 
   // Auto-switch to first available format if current one is unavailable
   if (!app.compress_format_available[app.compress_format]) {
@@ -635,11 +641,26 @@ void execute_compress_async(AppState& app) {
 
     bool engine_ok = false;
     bool engine_tried = false;
-    // Out-of-process first (non-Rar): libarchive + codecs run outside
-    // horizon-files RSS with live progress; engine/external stay as fallback.
+    // In-process engine first: our own writers (zlib/lzma) run here with
+    // exact progress. Only formats the engine doesn't cover fall through
+    // to the out-of-process helper / external tools below.
+    if (engine_supports_format(format_idx) && !prog->cancel.load()) {
+      engine_tried = true;
+      engine_ok = engine_compress(plan, archive, format_idx, level,
+                                  compress_effective_threads(threads), prog);
+      if (!engine_ok && !prog->cancel.load()) {
+        // Engine failed: remove its partial output so the fallback below
+        // starts clean (cancel path is handled centrally after ret).
+        std::error_code ec3;
+        fs::remove(archive, ec3);
+      }
+    }
+    // Out-of-process fallback (non-Rar, engine didn't already run): libarchive
+    // + codecs run outside horizon-files RSS with live progress.
     int helper_ret = -2;
     bool helper_tried = false;
-    if (format_idx != 5 && !prog->cancel.load()) {
+    if (!engine_tried && !engine_ok && format_idx != 5 &&
+        !prog->cancel.load()) {
       helper_tried = true;
       helper_ret = compress_via_helper(archive, sources, level, threads, prog,
                                        total);
@@ -655,11 +676,7 @@ void execute_compress_async(AppState& app) {
     if (helper_ret == 0) {
       engine_ok = true;  // reuse the success path (snap-to-full + toast)
     } else if (helper_ret == -1) {
-      // cancelled: skip engine/external, handled below via cancel flag
-    } else if (engine_supports_format(format_idx) && !prog->cancel.load()) {
-      engine_tried = true;
-      engine_ok = engine_compress(plan, archive, format_idx, level,
-                                  compress_effective_threads(threads), prog);
+      // cancelled: skip external, handled below via cancel flag
     }
 
     int ret = -2;
@@ -1080,6 +1097,39 @@ static void do_libarchive_extract(const std::string& archive_path,
                                    const std::string& dest_dir,
                                    std::shared_ptr<OperationProgress> prog,
                                    const std::string& password = {}) {
+  // Custom engine first (no libarchive, no external tools). Password flows
+  // never reach the engine: it has no crypto, so encrypted archives and
+  // explicit passwords go straight to libarchive/shell below.
+  if (password.empty() && engine_supports_extract(archive_path) &&
+      !prog->cancel.load()) {
+    // Reset live counters so a failed engine attempt doesn't pollute the
+    // libarchive fallback's progress.
+    prog->total_files.store(0);
+    prog->total_bytes.store(0);
+    prog->copied_files.store(0);
+    prog->done_bytes.store(0);
+    prog->progress.store(0.0);
+    prog->start_time = std::chrono::steady_clock::now();
+    if (engine_extract(archive_path, dest_dir, prog)) {
+      prog->success.store(true);
+      prog->active = false;
+      prog->clear_current_file();
+      return;
+    }
+    if (prog->cancel.load()) {
+      prog->success.store(false);
+      prog->active = false;
+      prog->clear_current_file();
+      return;
+    }
+    // Engine failed (unsupported coder/layout): reset again and fall through
+    // to libarchive -> shell.
+    prog->total_files.store(0);
+    prog->total_bytes.store(0);
+    prog->copied_files.store(0);
+    prog->done_bytes.store(0);
+    prog->progress.store(0.0);
+  }
   if (do_libarchive_extract_inner(archive_path, dest_dir, prog, password)) {
     prog->active = false;
     prog->clear_current_file();
@@ -1155,7 +1205,16 @@ void execute_extract_with_password(AppState& app, const std::string& archive_pat
 
 void execute_extract_async(AppState& app, const std::string& archive_path,
                             const std::string& dest_dir) {
-  if (archive_is_encrypted(archive_path)) {
+  // Prefer the custom engine's encryption probe so supported formats never
+  // touch libarchive on this path; fall back to the libarchive probe for
+  // formats the engine doesn't cover (rar/bz2/...) or when its probe is
+  // inconclusive.
+  if (engine_supports_extract(archive_path)) {
+    if (engine_archive_is_encrypted(archive_path)) {
+      show_password_dialog(app, archive_path, dest_dir);
+      return;
+    }
+  } else if (archive_is_encrypted(archive_path)) {
     show_password_dialog(app, archive_path, dest_dir);
     return;
   }
@@ -1181,6 +1240,7 @@ void execute_extract_with_password(AppState& app, const std::string& archive_pat
   std::error_code ec;
   fs::create_directories(dest_dir, ec);
 
+  // Engine has no crypto: password flows always use shell tools here.
   std::string cmd = format_extract_cmd_internal(archive_path, dest_dir);
   if (cmd.empty()) {
     app.operation_status = "Unsupported archive format";
@@ -1216,6 +1276,53 @@ void execute_extract_async(AppState& app, const std::string& archive_path,
                             const std::string& dest_dir) {
   std::error_code ec;
   fs::create_directories(dest_dir, ec);
+
+  // Custom engine first even without libarchive; shell tools stay fallback.
+  if (engine_supports_extract(archive_path) &&
+      !engine_archive_is_encrypted(archive_path)) {
+    auto prog = std::make_shared<OperationProgress>();
+    prog->type = OperationType::Extract;
+    prog->active.store(true);
+    prog->start_time = std::chrono::steady_clock::now();
+    app.op_progress = prog;
+    app.ops_panel_open = true;
+    draw(app);
+    std::string arc = archive_path, dst = dest_dir;
+    std::thread([&app, prog, arc, dst]() {
+      bool ok = engine_extract(arc, dst, prog);
+      bool cancelled = prog->cancel.load();
+      if (ok && !cancelled) {
+        prog->success.store(true);
+        prog->progress.store(1.0);
+      } else if (!cancelled) {
+        // Engine failed: fall back to shell tools inside the same worker.
+        std::string cmd = format_extract_cmd_internal(arc, dst);
+        bool sok = false;
+        if (!cmd.empty()) {
+          cmd += " 2>/dev/null";
+          sok = (std::system(cmd.c_str()) == 0);
+        }
+        prog->success.store(sok);
+        prog->progress.store(sok ? 1.0 : prog->progress.load());
+      } else {
+        prog->success.store(false);
+      }
+      prog->active.store(false);
+      prog->clear_current_file();
+      bool success = prog->success.load();
+      DeferredCall::callLater([&app, cancelled, success]() {
+        if (cancelled)
+          app.operation_status = "Extraction cancelled";
+        else
+          app.operation_status =
+              success ? "Extraction complete" : "Extraction failed";
+        app.operation_status_expires_ms = cmp_expiry_3s();
+        reload_dir(app);
+        draw(app);
+      });
+    }).detach();
+    return;
+  }
 
   std::string cmd = format_extract_cmd_internal(archive_path, dest_dir);
   if (cmd.empty()) {

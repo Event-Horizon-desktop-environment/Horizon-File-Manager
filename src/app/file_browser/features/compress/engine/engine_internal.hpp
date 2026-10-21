@@ -43,5 +43,13 @@ bool engine_compress_tar_xz(const EnginePlan& plan, const std::string& archive_p
 bool engine_compress_7z(const EnginePlan& plan, const std::string& archive_path,
                         int level, int threads,
                         const std::shared_ptr<OperationProgress>& prog);
+bool engine_compress_tar(const EnginePlan& plan, const std::string& archive_path,
+                         int level, int threads,
+                         const std::shared_ptr<OperationProgress>& prog);
+#ifdef EH_HAVE_BZ2
+bool engine_compress_tar_bz2(const EnginePlan& plan, const std::string& archive_path,
+                             int level, int threads,
+                             const std::shared_ptr<OperationProgress>& prog);
+#endif
 
 } // namespace eh::file_browser
