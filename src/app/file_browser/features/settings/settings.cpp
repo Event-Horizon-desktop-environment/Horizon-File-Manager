@@ -74,6 +74,7 @@ void open_settings(AppState& app) {
   app.settings_trash_auto_purge = app.trash_auto_purge;
   app.settings_trash_max_days = app.trash_max_days;
   app.settings_trash_max_mb = app.trash_max_mb;
+  app.settings_click_preview = app.click_preview;
 
   {
     const auto& sc = eh::config::shell_config_snapshot();
@@ -187,6 +188,7 @@ void save_file_browser_settings(AppState& app) {
   fbs.statusbar_opacity_pct = app.statusbar_opacity_pct;
   fbs.preview_opacity_pct = app.preview_opacity_pct;
   fbs.preview_scale = app.preview_scale;
+  fbs.click_preview = app.click_preview;
   fbs.dialog_opacity_pct = app.dialog_opacity_pct;
   fbs.properties_opacity_pct = app.properties_opacity_pct;
   fbs.trash_auto_purge = app.trash_auto_purge;
@@ -260,6 +262,7 @@ void settings_apply(AppState& app) {
   fbs.statusbar_opacity_pct = app.settings_statusbar_opacity_pct;
   fbs.preview_opacity_pct = app.settings_preview_opacity_pct;
   fbs.preview_scale = app.settings_preview_scale;
+  fbs.click_preview = app.settings_click_preview;
   fbs.dialog_opacity_pct = app.settings_dialog_opacity_pct;
   fbs.properties_opacity_pct = app.settings_properties_opacity_pct;
   fbs.trash_auto_purge = app.settings_trash_auto_purge;
@@ -409,6 +412,8 @@ void reload_settings_from_config(AppState& app) {
   app.preview_opacity_pct = fbs.preview_opacity_pct;
   app.preview_scale = fbs.preview_scale;
   app.settings_preview_scale = fbs.preview_scale;
+  app.click_preview = fbs.click_preview;
+  app.settings_click_preview = fbs.click_preview;
   app.dialog_opacity_pct = fbs.dialog_opacity_pct;
   app.properties_opacity_pct = fbs.properties_opacity_pct;
   app.trash_auto_purge = fbs.trash_auto_purge;

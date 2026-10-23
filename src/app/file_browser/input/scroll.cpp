@@ -86,6 +86,30 @@ void handle_scroll(AppState& app, int x, int, double, double dy) {
     return;
   }
 
+  // Wheel over the info panel's Preview tab scrolls the file text preview
+  // instead of the file list behind it.
+  if (app.info_panel_open && app.info_panel_is_text &&
+      !app.info_panel_text.empty() && app.info_panel_preview_body_h > 0) {
+    int panel_px = app.width - app.info_panel_width;
+    int top_h = app.top_bar_height + app.tab_bar_height;
+    if (x >= panel_px && app.pointerY >= top_h &&
+        app.pointerY < app.height - app.status_bar_height) {
+      int max_scroll = std::max(0, app.info_panel_preview_content_h -
+                                        app.info_panel_preview_body_h);
+      if (max_scroll > 0) {
+        const int line_h = std::max(1, static_cast<int>(16.0 * app.zoom_pct / 100.0));
+        int ns = std::clamp(app.info_panel_preview_scroll_px +
+                                static_cast<int>(std::lround(-dy * line_h * 2.5)),
+                            0, max_scroll);
+        if (ns != app.info_panel_preview_scroll_px) {
+          app.info_panel_preview_scroll_px = ns;
+          draw(app);
+        }
+      }
+      return;
+    }
+  }
+
   if (app.status_zoom_slider_w > 0 &&
       app.pointerY >= app.height - app.status_bar_height &&
       x >= app.status_zoom_slider_x - 40 &&

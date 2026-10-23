@@ -1083,7 +1083,9 @@ void sidebar_content_geometry(AppState& app, int& cx, int& cy, int& cw,
   const int w = app.width;
   const int h = app.height;
   int sidebar_w = app.sidebar_w();
-  int info_panel_w = app.info_panel_open ? app.info_panel_width : 0;
+  int info_panel_w = (app.info_panel_open || app.info_panel_slide > 0.01)
+                         ? app.info_panel_width
+                         : 0;
   if (info_panel_w > 0) {
     int max_info = w - 300;
     if (max_info > 320) max_info = 320;

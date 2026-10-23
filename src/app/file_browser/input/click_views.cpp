@@ -254,6 +254,29 @@ bool click_content_hit(AppState& app, int x, int y, int button, uint64_t now_ns)
         app.cur_tab().sel_anchor = idx;
       }
     }
+
+    // Click-to-preview (opt-in via Settings → Preview): a plain click on a
+    // text-like file (TXT/SRT/LUA, markdown, source code) slides the info
+    // panel open on its Preview tab with the file contents. Keeps working
+    // on re-clicks while the panel is already open (metadata follows the
+    // selection in paint()).
+    if (!shift_mod && !ctrl_mod && app.click_preview &&
+        app.cur_tab().view_mode != ViewMode::Tree &&
+        app.cur_tab().view_mode != ViewMode::Computer) {
+      if (idx >= 0 && idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+        int real_idx = app.cur_tab().visible_entries[idx];
+        if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size())) {
+          const auto& fe = app.cur_tab().entries[real_idx];
+          if (fe.type == FileType::Text || fe.type == FileType::Markdown ||
+              fe.type == FileType::Code) {
+            if (!app.info_panel_open) {
+              app.info_panel_open = true;
+              app.info_panel_tab = 0;   // disclose the Preview tab, not Properties
+            }
+          }
+        }
+      }
+    }
     app.last_click_ns = now_ns;
     app.last_click_x = x;
     app.last_click_y = y;
@@ -286,6 +309,11 @@ bool click_content_hit(AppState& app, int x, int y, int button, uint64_t now_ns)
       }
     }
   } else {
+    // Empty background: outside the content column (e.g. over the info
+    // panel body) the click is swallowed — no marquee, nothing deselects.
+    int c_x, c_y, c_w, c_h, c_banner;
+    sidebar_content_geometry(app, c_x, c_y, c_w, c_h, c_banner);
+    if (x < c_x || x >= c_x + c_w || y < c_y || y >= c_y + c_h) return true;
     // Start marquee selection on empty background
     app.marquee_x0 = static_cast<double>(x);
     app.marquee_y0 = static_cast<double>(y);
@@ -295,6 +323,8 @@ bool click_content_hit(AppState& app, int x, int y, int button, uint64_t now_ns)
     app.cur_tab().selected_idx = -1;
     app.cur_tab().multi_selected.clear();
     app.cur_tab().sel_anchor = -1;
+    // Deselecting the only previewed file closes the panel (slide-shut).
+    if (app.info_panel_open) app.info_panel_open = false;
     app.last_click_ns = 0;
   }
   draw(app);

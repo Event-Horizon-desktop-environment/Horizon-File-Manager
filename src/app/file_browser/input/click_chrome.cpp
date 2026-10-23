@@ -162,21 +162,37 @@ bool click_picker_bar(AppState& app, int x, int y, int button) {
 }
 
 bool click_info_tab(AppState& app, int x, int y, int button) {
-  if (app.info_panel_open) {
+  (void)button;
+  // Active while open or mid-slide (closing frames keep drawing the panel).
+  if (app.info_panel_open || app.info_panel_slide > 0.01) {
     int panel_px = app.width - app.info_panel_width;
     int top_h = app.top_bar_height + app.tab_bar_height;
     int tab_h = static_cast<int>(38 * app.zoom_pct / 100.0);
-    if (x >= panel_px && y >= top_h && y < top_h + tab_h) {
-      for (int i = 0; i < 3; ++i) {
-        if (x >= static_cast<int>(app.info_panel_hit_tabs[i][0]) &&
-            x < static_cast<int>(app.info_panel_hit_tabs[i][0] + app.info_panel_hit_tabs[i][2]) &&
-            y >= static_cast<int>(app.info_panel_hit_tabs[i][1]) &&
-            y < static_cast<int>(app.info_panel_hit_tabs[i][1] + app.info_panel_hit_tabs[i][3])) {
-          app.info_panel_tab = i;
-          draw(app);
-          return true;
+    if (x >= panel_px && y >= top_h && y < app.height - app.status_bar_height) {
+      // Close (×) button in the right end of the tab strip.
+      const double* h = app.info_panel_hit_close;
+      if (x >= static_cast<int>(h[0]) && x < static_cast<int>(h[0] + h[2]) &&
+          y >= static_cast<int>(h[1]) && y < static_cast<int>(h[1] + h[3])) {
+        app.info_panel_open = false;   // slide eases shut in paint()
+        draw(app);
+        return true;
+      }
+      if (y < top_h + tab_h) {
+        for (int i = 0; i < 3; ++i) {
+          if (x >= static_cast<int>(app.info_panel_hit_tabs[i][0]) &&
+              x < static_cast<int>(app.info_panel_hit_tabs[i][0] + app.info_panel_hit_tabs[i][2]) &&
+              y >= static_cast<int>(app.info_panel_hit_tabs[i][1]) &&
+              y < static_cast<int>(app.info_panel_hit_tabs[i][1] + app.info_panel_hit_tabs[i][3])) {
+            app.info_panel_tab = i;
+            draw(app);
+            return true;
+          }
         }
       }
+      // Panel body below the tab strip is inert: swallow the click so it
+      // can't start a marquee, deselect, or spawn a context menu through
+      // the panel onto the file list behind it.
+      return true;
     }
   }
   return false;

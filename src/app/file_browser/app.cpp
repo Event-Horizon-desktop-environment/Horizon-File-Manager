@@ -48,6 +48,44 @@ struct PaintPhase {
 }  // namespace
 
 
+// Text-like types feed the info panel's text preview (single-click preview;
+// covers .txt/.srt and .lua as well as markdown and source files).
+static bool entry_is_text_previewable(const FileEntry& e) {
+  return e.type == FileType::Text || e.type == FileType::Markdown ||
+         e.type == FileType::Code;
+}
+
+// Read a capped prefix of the selected file for the info panel's text
+// preview. Same plain fopen/fread pattern as the hover/space preview
+// popups; the wrapped-row cache is invalidated here and rebuilt lazily by
+// the painter.
+static void load_info_panel_preview_text(AppState& app) {
+  app.info_panel_text_path = app.info_panel_path;
+  app.info_panel_text.clear();
+  app.info_panel_text_truncated = false;
+  app.info_panel_text_rows.clear();
+  app.info_panel_text_rows_w = -1;
+  app.info_panel_text_rows_zf = -1.0;
+  app.info_panel_preview_scroll_px = 0;
+  app.info_panel_preview_content_h = 0;
+  app.info_panel_preview_body_h = 0;
+  if (app.info_panel_path.empty() || app.info_panel_is_dir ||
+      !app.info_panel_is_text)
+    return;
+  FILE* f = fopen(app.info_panel_path.c_str(), "rb");
+  if (!f) return;
+  constexpr size_t kMaxPreviewBytes = 128 * 1024;
+  std::string buf(kMaxPreviewBytes, '\0');
+  size_t n = fread(buf.data(), 1, kMaxPreviewBytes, f);
+  // One byte past the cap distinguishes "exactly cap large" from truncated.
+  char probe = 0;
+  app.info_panel_text_truncated = (fread(&probe, 1, 1, f) == 1);
+  buf.resize(n);
+  app.info_panel_text = std::move(buf);
+  fclose(f);
+}
+
+
 // Content column geometry (bench identity probe). The real geometry lives
 // in features/sidebar.cpp (sidebar_content_geometry) so paint(), the reuse
 // gate and the painter all share one fold-aware source of truth.
@@ -318,6 +356,20 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
     }
   }
 
+  // Info panel shoot-open/close: the slide factor eases toward the open
+  // state every frame, and the panel width below scales with it so the
+  // panel glides in from the right edge while the content column reflows.
+  {
+    double target = app.info_panel_open ? 1.0 : 0.0;
+    double diff = target - app.info_panel_slide;
+    if (std::abs(diff) > 0.01) {
+      app.info_panel_slide += diff * 0.22;
+      app.scroll_needs_redraw = true;
+    } else {
+      app.info_panel_slide = target;
+    }
+  }
+
   // Close ops panel when operation finishes. op_progress can be null here:
   // fast operations complete before the UI assigns the shared pointer (the
   // completion callback resets it), which used to leave the panel stuck open.
@@ -361,8 +413,10 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
   }
 
   int info_panel_w = 0;
-  if (app.info_panel_open) {
-    app.info_panel_width = std::max(200, static_cast<int>(280 * app.zoom_pct / 100.0));
+  if (app.info_panel_open || app.info_panel_slide > 0.01) {
+    app.info_panel_width = static_cast<int>(
+        std::max(200, static_cast<int>(280 * app.zoom_pct / 100.0)) *
+        app.info_panel_slide + 0.5);
     info_panel_w = app.info_panel_width;
   }
   // Ops panel floats over the content as an overlay; keep its zoom-scaled
@@ -401,6 +455,7 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
       app.info_panel_size = 0;
       app.info_panel_modified_sec = 0;
       app.info_panel_is_dir = false;
+      app.info_panel_is_text = false;
       app.info_panel_owner.clear();
       app.info_panel_group.clear();
       app.info_panel_mode = 0;
@@ -410,6 +465,7 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
         auto& e = app.cur_tab().entries[app.cur_tab().visible_entries[app.cur_tab().selected_idx]];
         app.info_panel_name = e.name;
         app.info_panel_is_dir = e.is_dir;
+        app.info_panel_is_text = entry_is_text_previewable(e);
         struct stat st;
         if (stat(cur_path.c_str(), &st) == 0) {
           app.info_panel_size = static_cast<uint64_t>(st.st_size);
@@ -423,6 +479,8 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
         if (!e.mime_type.empty())
           app.info_panel_mime_type = e.mime_type;
       }
+      // Refresh the text preview (no-op / clear for non-text types).
+      load_info_panel_preview_text(app);
     }
   }
 
@@ -887,6 +945,12 @@ void schedule_frame(AppState& app) {
   if (!need_anim) {
     double ops_target = app.ops_panel_open ? 1.0 : 0.0;
     need_anim = std::abs(app.ops_panel_slide - ops_target) > 0.01;
+  }
+
+  // Info panel shoot-open slide animation
+  if (!need_anim) {
+    double info_target = app.info_panel_open ? 1.0 : 0.0;
+    need_anim = std::abs(app.info_panel_slide - info_target) > 0.01;
   }
 
   // Resize sessions are paced to the compositor: one frame per callback.

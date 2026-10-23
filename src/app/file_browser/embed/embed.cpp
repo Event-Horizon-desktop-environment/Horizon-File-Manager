@@ -1125,6 +1125,12 @@ void handle_settings_click(AppState& app, int x, int y, int button) {
     app.settings_pendingRedraw = true;
     return;
   }
+  if (hit == -76) {
+    // Preview tab: open the side preview panel on clicking a text file.
+    app.settings_click_preview = !app.settings_click_preview;
+    app.settings_pendingRedraw = true;
+    return;
+  }
   if (hit == -70) {
     app.settings_trash_auto_purge = !app.settings_trash_auto_purge;
     app.settings_pendingRedraw = true;

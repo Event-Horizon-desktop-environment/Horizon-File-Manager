@@ -790,6 +790,28 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     cairo_show_text(cr, "Hover preview size multiplier.");
     cairo_move_to(cr, left_x, ly + 86);
     cairo_show_text(cr, "Applies in real time to image previews.");
+
+    // Click-to-preview: clicking a text-like file (TXT/SRT/LUA, ...) slides
+    // open the info panel's Preview tab with the file contents.
+    int py2 = ly + 134;
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_set_font_size(cr, 13);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                           CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_move_to(cr, left_x, py2 + 14);
+    cairo_show_text(cr, "Open preview panel on click");
+
+    double toggle_x = left_x + 220;
+    double toggle_y = py2 - 2;
+    app.settings_hit_click_preview_toggle[0] = toggle_x;
+    app.settings_hit_click_preview_toggle[1] = toggle_y;
+    app.settings_hit_click_preview_toggle[2] = 40;
+    app.settings_hit_click_preview_toggle[3] = 22;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings,
+                                          hui::Hit::kSettingsClickPreviewToggle),
+                         static_cast<int>(toggle_x), static_cast<int>(toggle_y), 40, 22);
+    hui::design::draw_switch(cr, app, toggle_x, toggle_y,
+                             app.settings_click_preview);
   }
   if (app.settings_tab == 3) {
     if (app.settings_accounts_stale) refresh_settings_accounts(app);

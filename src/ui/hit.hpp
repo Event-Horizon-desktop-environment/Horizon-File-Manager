@@ -179,6 +179,7 @@ inline constexpr int kSettingsNcUserClear = 50;
 inline constexpr int kSettingsDriveSecret = 51;
 inline constexpr int kSettingsDriveSecretClear = 52;
 inline constexpr int kSettingsTabTags = 53;
+inline constexpr int kSettingsClickPreviewToggle = 54;
 inline constexpr int kSettingsTagSwatchBase = 70; // +swatch index (0..9)
 inline constexpr int kSettingsTagRowBase = 80;    // +tag index (0..7)
 inline constexpr int kSettingsDriveDiscBase = 60; // +account index (0..7)

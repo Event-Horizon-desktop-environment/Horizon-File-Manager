@@ -291,6 +291,7 @@ FileBrowserSettings read_file_browser_toml() {
     fbs.statusbar_opacity_pct = tbl["statusbar_opacity_pct"].value_or(100);
     fbs.preview_opacity_pct = tbl["preview_opacity_pct"].value_or(100);
     fbs.preview_scale = tbl["preview_scale"].value_or(1.0);
+    fbs.click_preview = tbl["click_preview"].value_or(false);
     fbs.dialog_opacity_pct = tbl["dialog_opacity_pct"].value_or(100);
     fbs.properties_opacity_pct = tbl["properties_opacity_pct"].value_or(100);
     fbs.trash_auto_purge = tbl["trash_auto_purge"].value_or(false);
@@ -399,6 +400,7 @@ bool write_file_browser_toml(const FileBrowserSettings& fbs) {
     tbl.emplace("statusbar_opacity_pct", fbs.statusbar_opacity_pct);
     tbl.emplace("preview_opacity_pct", fbs.preview_opacity_pct);
     tbl.emplace("preview_scale", fbs.preview_scale);
+    tbl.emplace("click_preview", fbs.click_preview);
     tbl.emplace("dialog_opacity_pct", fbs.dialog_opacity_pct);
     tbl.emplace("properties_opacity_pct", fbs.properties_opacity_pct);
     tbl.emplace("trash_auto_purge", fbs.trash_auto_purge);

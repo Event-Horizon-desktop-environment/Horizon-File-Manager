@@ -378,6 +378,7 @@ struct FileBrowserSettings {
   int trash_max_days = 30; // keep trash entries newer than this
   int trash_max_mb = 0;    // trash quota; 0 = unlimited
   double preview_scale = 1.0;    // 1.0–10.0; hover preview size multiplier
+  bool click_preview = false;    // side panel opens on clicking a text-like file
   std::string default_terminal;  // empty = use system default
   int view_mode = 0;             // 0=List, 1=Grid
   int sort_field = 0;            // 0=Name, 1=Size, 2=Modified, 3=Type

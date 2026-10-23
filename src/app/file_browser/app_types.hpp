@@ -1031,6 +1031,22 @@ struct AppState {
   mode_t info_panel_mode = 0;
   // Hit rects (set during draw, queried by click handler)
   double info_panel_hit_tabs[3][4]{};
+  // Shoot-open slide factor (0..1, eased toward open/closed every frame).
+  double info_panel_slide = 0.0;
+  // Text preview for the panel's Preview tab. Loaded when the selected
+  // path changes (see paint()'s info-panel metadata refresh), capped in
+  // size; rendered as cached wrapped rows so repaints stay cheap.
+  bool info_panel_is_text = false;
+  std::string info_panel_text;
+  std::string info_panel_text_path;   // path the cached text was read for
+  bool info_panel_text_truncated = false;
+  std::vector<std::string> info_panel_text_rows;   // wrapped display rows
+  int info_panel_text_rows_w = -1;    // body width the cache was built for
+  double info_panel_text_rows_zf = -1.0;
+  int info_panel_preview_scroll_px = 0;
+  int info_panel_preview_content_h = 0;  // total wrapped height (set at draw)
+  int info_panel_preview_body_h = 0;     // visible text body height (set at draw)
+  double info_panel_hit_close[4]{};
 
   std::vector<std::string> precache_paths;   // image file paths to pre-cache
   size_t precache_idx = 0;                   // next index to process; SIZE_MAX = done
@@ -1080,6 +1096,8 @@ struct AppState {
   int settings_dialog_opacity_pct = 100;
   int settings_properties_opacity_pct = 100;
   double settings_preview_scale = 1.0;
+  // Preview tab: open the side preview panel when clicking a text-like file.
+  bool settings_click_preview = false;
   int settings_default_term_idx = -1;
   std::vector<std::string> settings_term_opts;
   double settings_x = 0, settings_y = 0;
@@ -1093,6 +1111,7 @@ struct AppState {
   bool settings_zoom_editing = false;
   std::string settings_zoom_buf;
   double settings_hit_folders_toggle[4]{};
+  double settings_hit_click_preview_toggle[4]{};
   double settings_hit_indep_views_toggle[4]{};
   double settings_hit_recent_toggle[4]{};
   bool settings_recent_enabled = true;
@@ -1423,6 +1442,7 @@ struct AppState {
   int statusbar_opacity_pct = 100;
   int preview_opacity_pct = 100;
   double preview_scale = 1.0;   // hover preview size multiplier (1.0-10.0)
+  bool click_preview = false;   // side panel opens on clicking text-like files
   int dialog_opacity_pct = 100;
   int properties_opacity_pct = 100;
   // Disk-usage opacities (live; edited via the DU-local settings panel).

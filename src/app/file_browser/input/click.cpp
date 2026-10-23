@@ -165,6 +165,7 @@ int settings_hit_test(AppState& app, int x, int y) {
     case hui::Hit::kSettingsIndepToggle: return -21;
     case hui::Hit::kSettingsRecentToggle: return -25;
     case hui::Hit::kSettingsRestoreSessionToggle: return -75;
+    case hui::Hit::kSettingsClickPreviewToggle: return -76;
     case hui::Hit::kSettingsAcctGoogle: return -27;
     case hui::Hit::kSettingsAcctNcConnect: return -28;
     case hui::Hit::kSettingsAcctNcServer: return -29;

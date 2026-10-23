@@ -46,9 +46,12 @@ static int measure_label_line_height_px() {
 
 PaneViewRect pane_view_rect_at(const AppState& app, int px) {
   int sidebar_w = app.sidebar_w();
+  // Info panel width is precomputed (and slide-animated) by paint(); read
+  // it instead of re-deriving so the panel, content column and clicks all
+  // agree mid-animation.
   int info_w = 0;
-  if (app.info_panel_open)
-    info_w = std::max(200, static_cast<int>(280.0 * app.zoom_pct / 100.0));
+  if (app.info_panel_open || app.info_panel_slide > 0.01)
+    info_w = app.info_panel_width;
   // Info panel must never squeeze the content column to nothing.
   if (info_w > 0) {
     int max_info = std::max(160, app.width - sidebar_w - 240);

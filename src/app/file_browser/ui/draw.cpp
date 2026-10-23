@@ -12,6 +12,8 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <ctime>
 #include <filesystem>
@@ -136,8 +138,252 @@ int hit_test_grid(AppState& app, int x, int y) {
 
 
 
+// -------- Info panel text preview (single-click preview sidebar) ---------
+// Clicking a text-like file (.txt/.srt/.lua, markdown, source...) slides
+// open the info panel's Preview tab with the file's contents rendered as
+// wrapped monospace rows. Subtitles get their cue scaffolding stripped so
+// the dialogue reads cleanly (same cleanup as the preview popup).
+
+// Clean SubRip/WebVTT/ASS/SSA/SubViewer text in place: drop cue sequence
+// numbers and "-->" timestamp lines, strip inline markup tags (<b>, ...),
+// and collapse blank runs into single separators.
+static void clean_subtitle_preview(std::string& src_text) {
+  std::string cleaned;
+  cleaned.reserve(src_text.size());
+  bool last_blank = true;   // swallow leading blanks
+  size_t p = 0;
+  while (p < src_text.size()) {
+    size_t nl = src_text.find('\n', p);
+    std::string ln = (nl == std::string::npos)
+                         ? src_text.substr(p)
+                         : src_text.substr(p, nl - p);
+    p = (nl == std::string::npos) ? src_text.size() : nl + 1;
+    // strip BOM/CR
+    if (!ln.empty() && ln.back() == '\r') ln.pop_back();
+    if (!ln.empty() && static_cast<unsigned char>(ln.front()) == 0xEF) {
+      size_t skip = (ln.size() >= 3 &&
+                     (unsigned char)ln[0] == 0xEF &&
+                     (unsigned char)ln[1] == 0xBB &&
+                     (unsigned char)ln[2] == 0xBF) ? 3 : 0;
+      ln.erase(0, skip);
+    }
+    bool ts = ln.find("-->") != std::string::npos;
+    bool digits_only = !ln.empty() &&
+                       ln.find_first_not_of("0123456789 \t") == std::string::npos;
+    bool blank_like = ln.find_first_not_of(" \t") == std::string::npos;
+    if (blank_like) {
+      if (!last_blank && !cleaned.empty()) {
+        cleaned += '\n';
+        last_blank = true;
+      }
+      continue;
+    }
+    if (ts || digits_only) continue;   // cue metadata
+    std::string plain;
+    plain.reserve(ln.size());
+    for (size_t q = 0; q < ln.size();) {
+      if (ln[q] == '<') {
+        size_t close = ln.find('>', q);
+        if (close == std::string::npos) break;   // stray '<' → drop rest
+        q = close + 1;
+        continue;
+      }
+      plain += ln[q++];
+    }
+    if (plain.find_first_not_of(" \t") == std::string::npos) continue;
+    cleaned += plain;
+    cleaned += '\n';
+    last_blank = false;
+  }
+  src_text.swap(cleaned);
+}
+
+// Word-wrap one logical line into display rows no wider than avail_w,
+// breaking after the last space that fits; a single over-long word
+// hard-breaks at the character boundary that fits. Same algorithm as the
+// preview popup renderer (draw_hover_preview's wrap_line).
+static void wrap_mono_line(cairo_t* cr, const std::string& s, double avail_w,
+                           std::vector<std::string>& out) {
+  if (s.empty()) { out.emplace_back(); return; }
+  // b[i] = byte offset where character i starts; b.back() = s.size().
+  // All loop state below is a CHARACTER INDEX into b — mixing indices
+  // with byte offsets here can walk backwards on multibyte lines and spin
+  // the paint thread forever.
+  std::vector<size_t> b;
+  b.reserve(s.size());
+  for (size_t i = 0; i < s.size();) {
+    b.push_back(i);
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    int len = c < 0x80            ? 1
+              : (c & 0xE0) == 0xC0 ? 2
+              : (c & 0xF0) == 0xE0 ? 3
+              : (c & 0xF8) == 0xF0 ? 4
+                                   : 1;
+    i += static_cast<size_t>(len);
+  }
+  b.push_back(s.size());
+  const size_t last = b.size() - 1;   // sentinel index
+
+  cairo_text_extents_t wte;
+  size_t from = 0;
+  size_t guard = 0;
+  while (from < last && ++guard <= 4096) {
+    // Largest character index whose span from `from` fits the width.
+    size_t lo = from + 1, hi = last, fit = from + 1;
+    while (lo <= hi) {
+      const size_t mid = (lo + hi) / 2;
+      cairo_text_extents(cr, s.substr(b[from], b[mid] - b[from]).c_str(), &wte);
+      if (wte.width <= avail_w) { fit = mid; lo = mid + 1; }
+      else hi = mid - 1;
+    }
+    // Prefer breaking after the last space inside the fit window.
+    if (fit < last) {
+      size_t cut = fit;
+      while (cut > from + 1 && s[b[cut] - 1] != ' ') --cut;
+      if (cut > from + 1) fit = cut;
+    }
+    out.push_back(s.substr(b[from], b[fit] - b[from]));
+    from = fit;
+    if (from < last && s[b[from]] == ' ') ++from;   // rows never start indented
+  }
+}
+
+// (Re)build the panel's wrapped display-row cache. Runs only when the
+// text, wrap width, or zoom changed — the extents-based wrap is not free,
+// and paint() runs on every frame while the panel slide animates.
+static void refresh_info_panel_text_rows(AppState& app, cairo_t* cr,
+                                         double avail_w, double zf) {
+  if (static_cast<int>(avail_w) == app.info_panel_text_rows_w &&
+      zf == app.info_panel_text_rows_zf && !app.info_panel_text_rows.empty())
+    return;
+  app.info_panel_text_rows_w = static_cast<int>(avail_w);
+  app.info_panel_text_rows_zf = zf;
+  app.info_panel_text_rows.clear();
+
+  bool is_subtitle = false;
+  {
+    std::string lower_name = app.info_panel_name;
+    for (auto& c : lower_name)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (lower_name.size() > 4) {
+      const std::string e4 = lower_name.substr(lower_name.size() - 4);
+      is_subtitle = e4 == ".srt" || e4 == ".vtt" || e4 == ".ass" ||
+                    e4 == ".ssa" || e4 == ".sub";
+    }
+  }
+  std::string src_text = app.info_panel_text;
+  if (is_subtitle) clean_subtitle_preview(src_text);
+
+  // Normalize tabs/CR/control bytes the same way the popup renderer does.
+  std::string norm;
+  norm.reserve(src_text.size());
+  {
+    int col = 0;
+    for (char ch : src_text) {
+      if (ch == '\t') { do { norm += ' '; } while ((++col) % 4); continue; }
+      if (ch == '\r') continue;
+      if (static_cast<unsigned char>(ch) < 32 && ch != '\n') continue;
+      if (ch == '\n') col = 0; else ++col;
+      norm += ch;
+    }
+  }
+
+  size_t lp = 0;
+  while (lp < norm.size()) {
+    size_t nl = norm.find('\n', lp);
+    std::string logical =
+        (nl == std::string::npos) ? norm.substr(lp) : norm.substr(lp, nl - lp);
+    lp = (nl == std::string::npos) ? norm.size() : nl + 1;
+    wrap_mono_line(cr, logical, avail_w, app.info_panel_text_rows);
+  }
+  if (app.info_panel_text_rows.empty()) app.info_panel_text_rows.emplace_back();
+}
+
+// Paint the Preview-tab body for a text-like file: clipped wrapped rows at
+// the current wheel scroll offset, a thin scrollbar, and a truncation note
+// for files past the 128 KB preview cap. Recomputes geometry, clamps the
+// scroll, and records body/content heights each frame (scroll input reads
+// them back).
+static void draw_info_panel_text(AppState& app, cairo_t* cr, int px, int pw,
+                                 int content_y, int content_h) {
+  double zf = app.zoom_pct / 100.0;
+  const double line_h = 16.0 * zf;
+  const int body_x = px + 12;
+  const int body_y = content_y + 8;
+  const int body_w = pw - 32;      // text wrap width (right gutter for thumb)
+  const int body_h = content_h - 66 - 8;   // leave the name/meta block below
+  if (body_w < 24 || body_h < 24) return;
+
+  app.info_panel_preview_body_h = body_h;
+
+  cairo_select_font_face(cr, "monospace", CAIRO_FONT_SLANT_NORMAL,
+                         CAIRO_FONT_WEIGHT_NORMAL);
+  cairo_set_font_size(cr, 11 * zf);
+  cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+
+  refresh_info_panel_text_rows(app, cr, static_cast<double>(body_w), zf);
+
+  const int total_rows = static_cast<int>(app.info_panel_text_rows.size());
+  app.info_panel_preview_content_h = static_cast<int>(total_rows * line_h);
+
+  const int max_scroll =
+      std::max(0, app.info_panel_preview_content_h - body_h);
+  app.info_panel_preview_scroll_px =
+      std::clamp(app.info_panel_preview_scroll_px, 0, max_scroll);
+
+  cairo_save(cr);
+  cairo_rectangle(cr, static_cast<double>(px), static_cast<double>(body_y),
+                  static_cast<double>(pw), static_cast<double>(body_h));
+  cairo_clip(cr);
+
+  const double top_pad = 4.0 * zf;
+  const int first_row =
+      static_cast<int>(app.info_panel_preview_scroll_px / line_h);
+  double ty = body_y + top_pad + first_row * line_h -
+              app.info_panel_preview_scroll_px;
+  for (int i = first_row; i < total_rows; ++i) {
+    if (ty > static_cast<double>(body_y + body_h)) break;
+    cairo_move_to(cr, static_cast<double>(body_x), ty + (line_h - 5.0 * zf));
+    cairo_show_text(cr, app.info_panel_text_rows[i].c_str());
+    ty += line_h;
+  }
+
+  // Truncation note pinned inside the bottom edge of the body.
+  if (app.info_panel_text_truncated) {
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                           CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 9.5 * zf);
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                          app.text_secondary_b, 0.8);
+    const char* note = "\u2026 truncated at 128 KB \u2014 open to read the rest";
+    cairo_text_extents_t nte;
+    cairo_text_extents(cr, note, &nte);
+    cairo_move_to(cr, px + (pw - nte.x_advance) / 2.0,
+                  static_cast<double>(body_y + body_h) - 5.0 * zf);
+    cairo_show_text(cr, note);
+  }
+
+  // Thin scrollbar thumb (wheel input handled in handle_scroll).
+  if (app.info_panel_preview_content_h > body_h) {
+    const double track_h = static_cast<double>(body_h);
+    const double thumb_h =
+        std::max(20.0, track_h * static_cast<double>(body_h) /
+                           app.info_panel_preview_content_h);
+    const double thumb_y =
+        static_cast<double>(body_y) +
+        (track_h - thumb_h) *
+            (static_cast<double>(app.info_panel_preview_scroll_px) / max_scroll);
+    cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.4);
+    draw_rounded_rect(cr, static_cast<double>(px + pw - 8), thumb_y, 3, thumb_h,
+                      1.5);
+    cairo_fill(cr);
+  }
+
+  cairo_restore(cr);
+}
+
 void draw_info_panel(AppState& app, cairo_t* cr) {
-  if (!app.info_panel_open) return;
+  if (app.info_panel_slide <= 0.01) return;
 
   double zf = app.zoom_pct / 100.0;
   int pw = app.info_panel_width;
@@ -156,9 +402,15 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
   cairo_rectangle(cr, px, py, 1, ph);
   cairo_fill(cr);
 
+  // The close (×) button reserves the right end of the tab strip. During
+  // the first/last squeeze frames of the slide animation the strip has no
+  // room — draw the bare sheet only.
+  int close_strip = static_cast<int>(30 * zf);
+  if (pw < close_strip + 60) return;
+
   static const char* kTabNames[] = {"Preview", "Properties", "Terminal"};
   int tab_h = static_cast<int>(38 * zf);
-  int tab_w = pw / 3;
+  int tab_w = (pw - close_strip) / 3;
 
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 12 * zf);
@@ -196,6 +448,38 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
     }
   }
 
+  // Close (×) button on the right end of the tab strip (visual twin of the
+  // settings window's close control). Hit rect published for the click
+  // handler, which flips info_panel_open and lets the slide ease shut.
+  {
+    int cx0 = px + pw - close_strip;
+    app.info_panel_hit_close[0] = static_cast<double>(cx0);
+    app.info_panel_hit_close[1] = static_cast<double>(py);
+    app.info_panel_hit_close[2] = static_cast<double>(close_strip);
+    app.info_panel_hit_close[3] = static_cast<double>(tab_h);
+    bool close_hov = app.pointerX >= cx0 && app.pointerX < cx0 + close_strip &&
+                     app.pointerY >= py && app.pointerY < py + tab_h;
+    if (close_hov) {
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.08);
+      draw_rounded_rect(cr, static_cast<double>(cx0 + 3),
+                        static_cast<double>(py + 3),
+                        static_cast<double>(close_strip - 6),
+                        static_cast<double>(tab_h - 6), 7);
+      cairo_fill(cr);
+    }
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b,
+                          close_hov ? 0.9 : 0.55);
+    cairo_set_line_width(cr, 1.6);
+    const double ccx = cx0 + close_strip / 2.0;
+    const double ccy = py + tab_h / 2.0;
+    cairo_move_to(cr, ccx - 4.5, ccy - 4.5);
+    cairo_line_to(cr, ccx + 4.5, ccy + 4.5);
+    cairo_stroke(cr);
+    cairo_move_to(cr, ccx + 4.5, ccy - 4.5);
+    cairo_line_to(cr, ccx - 4.5, ccy + 4.5);
+    cairo_stroke(cr);
+  }
+
   // Tab underline
   cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.15);
   cairo_rectangle(cr, static_cast<double>(px), static_cast<double>(py + tab_h),
@@ -206,44 +490,9 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
   int content_h = ph - tab_h - 1;
 
   if (app.info_panel_tab == 0) {
-    if (app.info_panel_path.empty() || app.info_panel_is_dir) {
-      cairo_set_font_size(cr, 12 * zf);
-      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
-                            app.text_secondary_b, 0.55);
-      const char* msg = app.info_panel_path.empty() ? "No file selected"
-                       : app.info_panel_is_dir ? "(folder)"
-                       : "";
-      if (*msg) {
-        cairo_text_extents_t te;
-        cairo_text_extents(cr, msg, &te);
-        cairo_move_to(cr, px + (pw - te.x_advance) / 2.0,
-                      content_y + content_h / 2.0);
-        cairo_show_text(cr, msg);
-      }
-    } else {
-      int thumb_px = pw - 24;
-      cairo_surface_t* thumb = get_thumbnail(app, app.info_panel_path, thumb_px);
-      if (thumb) {
-        int tw = cairo_image_surface_get_width(thumb);
-        int th = cairo_image_surface_get_height(thumb);
-        if (tw > 0 && th > 0) {
-          int avail_h = content_h - 96;
-          double s = std::min(1.0, std::min(static_cast<double>(thumb_px) / tw,
-                                            static_cast<double>(avail_h) / th));
-          int dw = static_cast<int>(tw * s);
-          int dh = static_cast<int>(th * s);
-          int dx = px + (pw - dw) / 2;
-          int dy = content_y + (avail_h - dh) / 2;
-          cairo_save(cr);
-          cairo_rectangle(cr, static_cast<double>(dx), static_cast<double>(dy),
-                          static_cast<double>(dw), static_cast<double>(dh));
-          cairo_clip(cr);
-          cairo_set_source_surface(cr, thumb, static_cast<double>(dx),
-                                   static_cast<double>(dy));
-          cairo_paint(cr);
-          cairo_restore(cr);
-        }
-      }
+    // Name/type/size·modified strip under the preview — shared by the
+    // thumbnail and text-render paths.
+    auto draw_meta = [&]() {
       // File name below preview
       cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.85);
       cairo_set_font_size(cr, 11 * zf);
@@ -280,6 +529,52 @@ void draw_info_panel(AppState& app, cairo_t* cr) {
       cairo_text_extents(cr, meta_line.c_str(), &te);
       cairo_move_to(cr, px + (pw - te.x_advance) / 2.0, py + ph - 33);
       cairo_show_text(cr, meta_line.c_str());
+    };
+
+    if (app.info_panel_path.empty() || app.info_panel_is_dir) {
+      cairo_set_font_size(cr, 12 * zf);
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                            app.text_secondary_b, 0.55);
+      const char* msg = app.info_panel_path.empty() ? "No file selected"
+                       : app.info_panel_is_dir ? "(folder)"
+                       : "";
+      if (*msg) {
+        cairo_text_extents_t te;
+        cairo_text_extents(cr, msg, &te);
+        cairo_move_to(cr, px + (pw - te.x_advance) / 2.0,
+                      content_y + content_h / 2.0);
+        cairo_show_text(cr, msg);
+      }
+    } else if (app.info_panel_is_text && !app.info_panel_text.empty()) {
+      // Text-like file (TXT/SRT/LUA/...): render the contents — wrapped,
+      // wheel-scrollable, subtitles cue-stripped — instead of a thumbnail.
+      draw_info_panel_text(app, cr, px, pw, content_y, content_h);
+      draw_meta();
+    } else {
+      int thumb_px = pw - 24;
+      cairo_surface_t* thumb = get_thumbnail(app, app.info_panel_path, thumb_px);
+      if (thumb) {
+        int tw = cairo_image_surface_get_width(thumb);
+        int th = cairo_image_surface_get_height(thumb);
+        if (tw > 0 && th > 0) {
+          int avail_h = content_h - 96;
+          double s = std::min(1.0, std::min(static_cast<double>(thumb_px) / tw,
+                                            static_cast<double>(avail_h) / th));
+          int dw = static_cast<int>(tw * s);
+          int dh = static_cast<int>(th * s);
+          int dx = px + (pw - dw) / 2;
+          int dy = content_y + (avail_h - dh) / 2;
+          cairo_save(cr);
+          cairo_rectangle(cr, static_cast<double>(dx), static_cast<double>(dy),
+                          static_cast<double>(dw), static_cast<double>(dh));
+          cairo_clip(cr);
+          cairo_set_source_surface(cr, thumb, static_cast<double>(dx),
+                                   static_cast<double>(dy));
+          cairo_paint(cr);
+          cairo_restore(cr);
+        }
+      }
+      draw_meta();
     }
   }
 
