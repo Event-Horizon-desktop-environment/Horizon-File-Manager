@@ -3,10 +3,13 @@
 
 #include <cairo/cairo.h>
 
+#include <algorithm>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <vector>
 
 #include "stb/stb_image.h"
 #include "nanosvg/src/nanosvg.h"
@@ -20,43 +23,62 @@ static bool file_exists(const std::string& path) {
   return false;
 }
 
+static void add_root(std::vector<std::string>& roots, std::string path) {
+  if (path.empty()) return;
+  if (std::find(roots.begin(), roots.end(), path) == roots.end())
+    roots.push_back(std::move(path));
+}
+
+// Candidate asset roots, most specific first. Besides the system install dirs
+// this covers running straight out of a build tree:
+//   build-release/horizon-files -> ../assets
+//   build-debug/horizon-files   -> ../assets
+// and running from the repo root (assets/). Without these, a dev build shows
+// the text placeholders ("F", "S", ...) because every UI SVG fails to load.
+static const std::vector<std::string>& asset_roots() {
+  static const std::vector<std::string> roots = [] {
+    std::vector<std::string> r;
+
+    if (const char* env = std::getenv("EH_ASSETS_DIR"); env && *env)
+      add_root(r, env);
+
+    std::error_code ec;
+    const auto exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+    if (!ec) {
+      const std::string exe_dir = exe.parent_path().string();
+      add_root(r, exe_dir + "/assets");
+      add_root(r, exe_dir + "/../assets");
+      // Installed layout: <prefix>/bin/horizon-files + <prefix>/share/...
+      add_root(r, exe_dir + "/../share/horizon-files/assets");
+      // Legacy install location, shared with the Event Horizon desktop files.
+      add_root(r, exe_dir + "/../share/event-horizon/assets");
+    }
+
+    add_root(r, "assets");
+    add_root(r, "src/assets");
+
+    add_root(r, "/usr/local/share/horizon-files/assets");
+    add_root(r, "/usr/share/horizon-files/assets");
+    add_root(r, "/usr/local/share/event-horizon/assets");
+    add_root(r, "/usr/share/event-horizon/assets");
+    return r;
+  }();
+  return roots;
+}
+
 static std::string find_asset(const char* subdir, const char* filename) {
-  const char* env = std::getenv("EH_ASSETS_DIR");
-  if (env) {
-    std::string p = std::string(env) + "/" + subdir + "/" + filename;
+  for (const auto& dir : asset_roots()) {
+    std::string p = dir + "/" + subdir + "/" + filename;
     if (file_exists(p)) return p;
   }
-
-  const char* search_dirs[] = {
-    "/usr/local/share/event-horizon/assets",
-    "/usr/share/event-horizon/assets",
-  };
-
-  for (auto* dir : search_dirs) {
-    std::string p = std::string(dir) + "/" + subdir + "/" + filename;
-    if (file_exists(p)) return p;
-  }
-
   return {};
 }
 
 static std::string find_asset_root(const char* filename) {
-  const char* env = std::getenv("EH_ASSETS_DIR");
-  if (env) {
-    std::string p = std::string(env) + "/" + filename;
+  for (const auto& dir : asset_roots()) {
+    std::string p = dir + "/" + filename;
     if (file_exists(p)) return p;
   }
-
-  const char* search_dirs[] = {
-    "/usr/local/share/event-horizon/assets",
-    "/usr/share/event-horizon/assets",
-  };
-
-  for (auto* dir : search_dirs) {
-    std::string p = std::string(dir) + "/" + filename;
-    if (file_exists(p)) return p;
-  }
-
   return {};
 }
 

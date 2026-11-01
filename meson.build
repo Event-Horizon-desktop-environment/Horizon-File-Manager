@@ -388,11 +388,13 @@ install_data(
 )
 
 # ── UI icon assets (top-bar buttons, folder glyphs, etc.) ───────────
-# Installed to <prefix>/share/event-horizon/assets/UI — one of the paths
-# eh::shell::asset::find_asset() searches at runtime.
+# Installed to <prefix>/share/horizon-files/assets/UI — one of the paths
+# eh::shell::asset::find_asset() searches at runtime. Keep these out of
+# /usr/share/event-horizon: desktop-wide installers replace that whole tree,
+# which used to wipe the file manager's icons.
 install_subdir(
   join_paths(meson.project_source_root(), 'assets', 'UI'),
-  install_dir: join_paths(get_option('datadir'), 'event-horizon', 'assets'),
+  install_dir: join_paths(get_option('datadir'), 'horizon-files', 'assets'),
 )
 
 
