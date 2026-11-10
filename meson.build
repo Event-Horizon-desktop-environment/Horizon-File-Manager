@@ -163,6 +163,7 @@ sources = files(
   'src/app/file_browser/features/compress/engine/engine_extract.cpp',
   'src/app/file_browser/features/compress/engine/engine.cpp',
   'src/app/file_browser/features/compare/compare.cpp',
+  'src/app/file_browser/features/appimage/appimage.cpp',
   'src/app/file_browser/features/desktop_icon_parser/desktop_icon_parser.cpp',
   'src/app/file_browser/features/drag/drag.cpp',
   'src/app/file_browser/features/preview/preview_types.cpp',
@@ -224,6 +225,7 @@ sources = files(
   'src/app/file_browser/ui/draw_contextmenu.cpp',
   'src/app/file_browser/ui/draw_dropchooser.cpp',
   'src/app/file_browser/ui/draw_openwith.cpp',
+  'src/app/file_browser/ui/draw_popup_surfaces.cpp',
   'src/app/file_browser/input/events.cpp',
   'src/app/file_browser/input/click.cpp',
   'src/app/file_browser/input/click_dialogs.cpp',
@@ -289,6 +291,7 @@ sources = files(
   'protocol/fractional-scale-v1-client-protocol.c',
   'protocol/tearing-control-v1-client-protocol.c',
   'protocol/ext-data-control-v1-client-protocol.c',
+  'protocol/ext-background-effect-v1-client-protocol.c',
   'protocol/wlr-data-control-unstable-v1-client-protocol.c',
 )
 

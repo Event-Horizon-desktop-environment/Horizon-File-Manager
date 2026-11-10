@@ -286,6 +286,10 @@ FileBrowserSettings read_file_browser_toml() {
     fbs.zoom_pct = tbl["zoom_pct"].value_or(100.0);
     fbs.folders_before_files = tbl["folders_before_files"].value_or(true);
     fbs.surface_opacity_pct = tbl["surface_opacity_pct"].value_or(100);
+    fbs.context_menu_opacity_pct =
+        std::clamp(tbl["context_menu_opacity_pct"].value_or(100), 0, 100);
+    fbs.open_with_opacity_pct =
+        std::clamp(tbl["open_with_opacity_pct"].value_or(100), 0, 100);
     fbs.sidebar_opacity_pct = tbl["sidebar_opacity_pct"].value_or(100);
     fbs.topbar_opacity_pct = tbl["topbar_opacity_pct"].value_or(100);
     fbs.statusbar_opacity_pct = tbl["statusbar_opacity_pct"].value_or(100);
@@ -395,6 +399,8 @@ bool write_file_browser_toml(const FileBrowserSettings& fbs) {
     tbl.emplace("zoom_pct", fbs.zoom_pct);
     tbl.emplace("folders_before_files", fbs.folders_before_files);
     tbl.emplace("surface_opacity_pct", fbs.surface_opacity_pct);
+    tbl.emplace("context_menu_opacity_pct", fbs.context_menu_opacity_pct);
+    tbl.emplace("open_with_opacity_pct", fbs.open_with_opacity_pct);
     tbl.emplace("sidebar_opacity_pct", fbs.sidebar_opacity_pct);
     tbl.emplace("topbar_opacity_pct", fbs.topbar_opacity_pct);
     tbl.emplace("statusbar_opacity_pct", fbs.statusbar_opacity_pct);

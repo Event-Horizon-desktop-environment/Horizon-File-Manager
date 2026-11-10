@@ -260,6 +260,19 @@ struct ScanParams {
   bool operator!=(const ScanParams& o) const { return !(*this == o); }
 };
 
+struct OverlayPopupSurface {
+  wl_surface* surface = nullptr;
+  xdg_surface* xdgSurface = nullptr;
+  xdg_popup* xdgPopup = nullptr;
+  ext_background_effect_surface_v1* blur = nullptr;
+  void* ctx = nullptr;
+  bool configured = false;
+  eh::wayland::ShmBuffer buf{};
+  int req_x = 0, req_y = 0;             // requested surface origin
+  int x = 0, y = 0, w = 0, h = 0;       // surface origin + buffer size
+  int card_x = 0, card_y = 0;           // card rect in main-window coords
+};
+
 struct AppState {
   AppState();
   ~AppState();
@@ -1016,6 +1029,11 @@ struct AppState {
   std::string tooltip_title;
   std::vector<std::string> tooltip_rows;
 
+  // Context menu and Open With are composited as dedicated subsurface popups
+  // so repainting them never repaints the file view behind them.
+  OverlayPopupSurface contextMenuPopup;
+  OverlayPopupSurface openWithPopup;
+
   bool info_panel_open = false;
   int info_panel_tab = 0;       // 0=Preview, 1=Properties, 2=Terminal
   int info_panel_width = 0;     // computed from zoom_pct
@@ -1056,14 +1074,21 @@ struct AppState {
     std::string desktop_id;
     std::string desktop_path;
     std::string name;
+    std::string icon;  // desktop entry Icon= value (theme name or absolute path)
   };
   bool open_with_open = false;
   std::string open_with_file_path;
   std::string open_with_mime;
   std::vector<OpenWithEntry> open_with_apps;
+  std::vector<int> open_with_visible;  // filtered indices into open_with_apps
+  int open_with_visible_exact_count = 0;
+  std::string open_with_query;
+  std::string open_with_default_id;
   int open_with_hover = -1;
   int open_with_selected = -1;
   int open_with_scroll = 0;
+  double open_with_scroll_smooth_current = 0.0;
+  double open_with_scroll_smooth_target = 0.0;
   int open_with_exact_count = 0;
   bool open_with_set_default = false;
   // Layout / hit rects (set during draw)
@@ -1073,6 +1098,7 @@ struct AppState {
   double open_with_hit_cancel[4]{};
   double open_with_hit_open[4]{};
   double open_with_hit_default[4]{};
+  double open_with_hit_search[4]{};
 
   bool checksum_open = false;
   std::string checksum_path;
@@ -1089,6 +1115,8 @@ struct AppState {
   double settings_zoom_pct = 100.0;
   bool settings_folders_before_files = true;
   int settings_opacity_pct = 0;
+  int settings_context_menu_opacity_pct = 100;
+  int settings_open_with_opacity_pct = 100;
   int settings_sidebar_opacity_pct = 100;
   int settings_topbar_opacity_pct = 100;
   int settings_statusbar_opacity_pct = 100;
@@ -1129,6 +1157,8 @@ struct AppState {
   std::map<std::string, std::string> settings_tag_colors;
   int settings_tag_selected = -1; // registry index getting recolored
   double settings_hit_opacity_slider[4]{};
+  double settings_hit_context_menu_opacity_slider[4]{};
+  double settings_hit_open_with_opacity_slider[4]{};
   double settings_hit_sidebar_opacity_slider[4]{};
   double settings_hit_topbar_opacity_slider[4]{};
   double settings_hit_statusbar_opacity_slider[4]{};
@@ -1437,6 +1467,8 @@ struct AppState {
   bool sort_case_sensitive = false;
   bool sort_hidden_last = false;     // hidden entries sort after visible ones
   int surface_opacity_pct = 100;
+  int context_menu_opacity_pct = 100;
+  int open_with_opacity_pct = 100;
   int sidebar_opacity_pct = 100;
   int topbar_opacity_pct = 100;
   int statusbar_opacity_pct = 100;

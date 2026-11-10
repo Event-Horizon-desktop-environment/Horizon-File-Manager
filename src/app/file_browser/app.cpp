@@ -269,7 +269,35 @@ void advance_scroll_render(AppState& app) {
     tab_scrolling = tab_scrolling ||
       std::abs(app.right_pane.scroll_smooth_current - app.right_pane.scroll_smooth_target) > 0.5;
 
-  if (!tab_scrolling && !comp_scrolling) {
+  // Smooth scroll for the Open With dialog list.
+  bool ow_scrolling = app.open_with_open &&
+      std::abs(app.open_with_scroll_smooth_current -
+               app.open_with_scroll_smooth_target) > 0.5;
+  if (ow_scrolling) {
+    timespec ts{};
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    auto now_ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
+                  static_cast<uint64_t>(ts.tv_nsec);
+    double elapsed_ms =
+        static_cast<double>(now_ns - app.scroll_anim_start_ns) / 1000000.0;
+    constexpr double kTau = 40.0;
+    double factor = 1.0 - std::exp(-elapsed_ms / kTau);
+    double diff = app.open_with_scroll_smooth_target -
+                  app.open_with_scroll_smooth_current;
+    app.open_with_scroll_smooth_current += diff * factor;
+    if (std::abs(app.open_with_scroll_smooth_target -
+                 app.open_with_scroll_smooth_current) <= 0.5)
+      app.open_with_scroll_smooth_current = app.open_with_scroll_smooth_target;
+    app.open_with_scroll =
+        static_cast<int>(std::lround(app.open_with_scroll_smooth_current));
+    app.scroll_needs_redraw = true;
+  } else if (app.open_with_open) {
+    app.open_with_scroll_smooth_current = app.open_with_scroll_smooth_target;
+    app.open_with_scroll =
+        static_cast<int>(std::lround(app.open_with_scroll_smooth_target));
+  }
+
+  if (!tab_scrolling && !comp_scrolling && !ow_scrolling) {
     app.scroll_needs_redraw = false;
   }
 }
@@ -771,7 +799,8 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
   if (app.password_dialog_open) draw_password_dialog(app, cr);
   if (app.compress_dialog_open) draw_compress_dialog(app, cr);
   if (app.term_chooser_open) draw_terminal_chooser(app, cr);
-  if (app.open_with_open) draw_open_with(app, cr);
+  if (app.open_with_open) draw_open_with_backdrop(app, cr);
+  sync_open_with_popup(app);
   if (app.checksum_open) draw_checksum_dialog(app, cr);
   if (app.connect_open) draw_connect_dialog(app, cr);
   if (app.remote_auth_open) draw_remote_auth_dialog(app, cr);
@@ -795,8 +824,7 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
   }
 
   // Context menu
-  if (app.context_menu_open)
-    draw_context_menu(app, cr);
+  sync_context_menu_popup(app);
 
   // Preview popup (skipped when a separate layer‑shell surface is active)
   // and never painted over the right-click context menu.
@@ -940,6 +968,9 @@ void schedule_frame(AppState& app) {
   if (!need_anim && app.split_view)
     need_anim =
       std::abs(app.right_pane.scroll_smooth_current - app.right_pane.scroll_smooth_target) > 0.5;
+  if (!need_anim && app.open_with_open)
+    need_anim = std::abs(app.open_with_scroll_smooth_current -
+                         app.open_with_scroll_smooth_target) > 0.5;
 
   // Operations panel slide animation
   if (!need_anim) {

@@ -380,7 +380,19 @@ void insert_scripts_submenu(AppState& app, std::size_t pos);
 
 void open_with_open(AppState& app, const std::string& file_path);
 void open_with_close(AppState& app);
+void open_with_apply_filter(AppState& app);
+void open_with_launch(AppState& app, int app_index);
+void open_with_set_default_app(const std::string& mime_type,
+                               const std::string& desktop_id);
 void draw_open_with(AppState& app, cairo_t* cr);
+void draw_open_with_backdrop(AppState& app, cairo_t* cr);
+void open_with_popup_rect(AppState& app, int& x, int& y, int& w, int& h);
+
+void context_menu_popup_bounds(AppState& app, int& x, int& y, int& w, int& h);
+void sync_context_menu_popup(AppState& app);
+void sync_open_with_popup(AppState& app);
+void destroy_context_menu_popup(AppState& app);
+void destroy_open_with_popup(AppState& app);
 
 void open_checksums(AppState& app, const std::string& file_path);
 void draw_checksum_dialog(AppState& app, cairo_t* cr);

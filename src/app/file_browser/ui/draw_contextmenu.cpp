@@ -101,6 +101,30 @@ SubmenuGeometry submenu_geometry(AppState& app, int hover) {
 
 } // namespace
 
+void context_menu_popup_bounds(AppState& app, int& x, int& y, int& w, int& h) {
+  const ContextMenuGeometry m = context_menu_geometry(app);
+  x = m.cm_x;
+  y = m.cm_y;
+  w = m.cm_w;
+  h = m.cm_h;
+
+  // A hovered submenu is drawn by the same popup layer, so the layer must
+  // cover the union of both cards.
+  if (app.context_menu_hover >= 0 &&
+      static_cast<size_t>(app.context_menu_hover) <
+          app.context_menu_items.size() &&
+      !app.context_menu_items[static_cast<size_t>(app.context_menu_hover)]
+           .sub_items.empty()) {
+    const SubmenuGeometry s = submenu_geometry(app, app.context_menu_hover);
+    const int right = std::max(x + w, s.sub_x + s.sm_w);
+    const int bottom = std::max(y + h, s.sub_y + s.sm_h);
+    x = std::min(x, s.sub_x);
+    y = std::min(y, s.sub_y);
+    w = right - x;
+    h = bottom - y;
+  }
+}
+
 static void draw_submenu_popup(AppState& app, cairo_t* cr, const std::vector<AppState::ContextMenuItem>& items,
                                 int px, int py, int* out_w, int* out_h) {
   int sm_w = 200;
@@ -114,7 +138,8 @@ static void draw_submenu_popup(AppState& app, cairo_t* cr, const std::vector<App
   if (sm_y + sm_h > app.height - 8) sm_y = app.height - sm_h - 8;
   if (sm_y < 8) sm_y = 8;
 
-  draw_dialog_card(app, cr, sm_x, sm_y, sm_w, sm_h, 12);
+  draw_dialog_card(app, cr, sm_x, sm_y, sm_w, sm_h, 12,
+                   app.context_menu_opacity_pct / 100.0);
 
   int ry = sm_y;
   for (size_t i = 0; i < items.size(); ++i) {
@@ -200,7 +225,8 @@ void draw_context_menu(AppState& app, cairo_t* cr) {
   int cm_w = g.cm_w;
   int cm_h = g.cm_h;
 
-  draw_dialog_card(app, cr, cm_x, cm_y, cm_w, cm_h, 12);
+  draw_dialog_card(app, cr, cm_x, cm_y, cm_w, cm_h, 12,
+                   app.context_menu_opacity_pct / 100.0);
 
   int ry = cm_y;
   for (int i = 0; i < static_cast<int>(app.context_menu_items.size()); ++i) {

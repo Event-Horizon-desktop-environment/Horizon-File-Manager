@@ -203,6 +203,9 @@ inline constexpr int kSettingsPropsSlider = 28;
 inline constexpr int kSettingsScaleSlider = 29;
 inline constexpr int kSettingsMatugen = 30;
 inline constexpr int kSettingsColorEng = 31;
+// Popup background opacity (context menu / Open With, content stays opaque).
+inline constexpr int kSettingsCtxMenuSlider = 39;
+inline constexpr int kSettingsOpenWithSlider = 55;
 // Trash auto-maintenance (General tab).
 inline constexpr int kSettingsTrashAutoToggle = 33;
 inline constexpr int kSettingsTrashDaysDown = 34;

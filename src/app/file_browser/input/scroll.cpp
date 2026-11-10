@@ -56,19 +56,33 @@ void handle_scroll(AppState& app, int x, int, double, double dy) {
   }
 
   if (app.open_with_open) {
-    int total = static_cast<int>(app.open_with_apps.size());
-    int rec_count = app.open_with_exact_count;
-    int entry_h = 40, section_h = 26;
+    int total = static_cast<int>(app.open_with_visible.size());
+    int rec_count = app.open_with_visible_exact_count;
+    int entry_h = 48, section_h = 28;
     int total_content_h = total * entry_h;
     if (rec_count > 0) total_content_h += section_h;
     if (rec_count < total) total_content_h += section_h;
-    int list_h = std::min(total_content_h, 320);
+    int list_h = std::min(total_content_h, 360);
     int max_scroll = std::max(0, total_content_h - list_h);
     if (max_scroll > 0) {
-      int delta = static_cast<int>(-dy * 1.5);
-      int new_scroll = std::clamp(app.open_with_scroll + delta, 0, max_scroll);
-      if (new_scroll != app.open_with_scroll) {
-        app.open_with_scroll = new_scroll;
+      // Wheel/touchpad deltas can be large; clamp each event to roughly one
+      // row so the list never leaps over entries, then let the animated
+      // target easing (advance_scroll_render) smooth the motion.
+      const bool settled =
+          std::abs(app.open_with_scroll_smooth_current -
+                   app.open_with_scroll_smooth_target) <= 0.5;
+      if (settled)
+        app.open_with_scroll_smooth_current =
+            static_cast<double>(app.open_with_scroll);
+      double step = std::clamp(-dy * 1.25, -58.0, 58.0);
+      double target = std::clamp(app.open_with_scroll_smooth_target + step,
+                                 0.0, static_cast<double>(max_scroll));
+      if (target != app.open_with_scroll_smooth_target) {
+        app.open_with_scroll_smooth_target = target;
+        timespec ts{};
+        clock_gettime(CLOCK_MONOTONIC, &ts);
+        app.scroll_anim_start_ns = static_cast<uint64_t>(ts.tv_sec) * 1000000000ull +
+                                   static_cast<uint64_t>(ts.tv_nsec);
         draw(app);
       }
     }

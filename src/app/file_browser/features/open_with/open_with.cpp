@@ -1,6 +1,7 @@
 // open_with.cpp — Exported from features/menu.cpp as part of the Step 5 file split.
 
 #include "../../app.hpp"
+#include "app/file_browser/features/appimage/appimage.hpp"
 #include "app/file_browser/features/compare/compare.hpp"
 #include "app/file_browser/features/compress/compress.hpp"
 #include "app/file_browser/features/dirprops/dirprops.hpp"
@@ -11,6 +12,7 @@
 #include "app/file_browser/features/view_zoom/view_zoom.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -32,6 +34,7 @@
 
 #include "config/shell_config.hpp"
 #include "base/thread/thread_dispatch.hpp"
+#include "platform/common/icon_cache/icon_cache.hpp"
 #include "platform/common/palette/matugen_palette.hpp"
 #include "platform/desktop/entries/desktop_xdg_ops.hpp"
 #include "dialog/file_chooser_dialog.hpp"
@@ -45,6 +48,10 @@ namespace eh::file_browser {
 
 
 static std::string detect_mime_type(const std::string& file_path) {
+  // xdg-mime reports AppImages as a generic executable on many systems, which
+  // hides every AppImage-aware entry from the Open With list.
+  if (is_appimage_path(file_path)) return "application/x-appimage";
+
   const std::string quoted = "'" + file_path + "'";
   const std::string cmd = "xdg-mime query filetype " + quoted + " 2>/dev/null || "
                           "file -b --mime-type " + quoted + " 2>/dev/null";
@@ -150,6 +157,193 @@ static std::vector<std::string> get_mime_associations(const std::string& mime_ty
   return all;
 }
 
+// First entry from [Default Applications] for this MIME type, if any.
+static std::string read_default_app_id(const std::string& mime_type) {
+  if (mime_type.empty()) return {};
+  std::vector<std::string> paths;
+  const char* xdg = std::getenv("XDG_CONFIG_HOME");
+  const char* home = std::getenv("HOME");
+  if (xdg && *xdg)
+    paths.push_back(std::string(xdg) + "/mimeapps.list");
+  else if (home && *home)
+    paths.push_back(std::string(home) + "/.config/mimeapps.list");
+  if (home && *home) {
+    paths.push_back(std::string(home) + "/.local/share/applications/mimeapps.list");
+    paths.push_back(std::string(home) + "/.local/share/applications/defaults.list");
+  }
+  paths.push_back("/usr/share/applications/mimeapps.list");
+  paths.push_back("/usr/share/applications/defaults.list");
+
+  const std::string prefix = mime_type + "=";
+  for (const auto& path : paths) {
+    std::ifstream in(path);
+    if (!in) continue;
+    std::string line;
+    bool in_defaults = false;
+    while (std::getline(in, line)) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      if (line == "[Default Applications]") { in_defaults = true; continue; }
+      if (!line.empty() && line[0] == '[') { in_defaults = false; continue; }
+      if (!in_defaults || line.compare(0, prefix.size(), prefix) != 0) continue;
+      std::string ids = line.substr(prefix.size());
+      auto semi = ids.find(';');
+      if (semi != std::string::npos) ids.resize(semi);
+      while (!ids.empty() && (ids.front() == ' ' || ids.front() == '\t'))
+        ids.erase(ids.begin());
+      while (!ids.empty() && (ids.back() == ' ' || ids.back() == '\t'))
+        ids.pop_back();
+      if (!ids.empty()) return ids;
+    }
+  }
+  return {};
+}
+
+void open_with_apply_filter(AppState& app) {
+  app.open_with_visible.clear();
+  std::string query = app.open_with_query;
+  for (char& c : query)
+    c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+
+  for (int i = 0; i < static_cast<int>(app.open_with_apps.size()); ++i) {
+    if (query.empty()) {
+      app.open_with_visible.push_back(i);
+      continue;
+    }
+    std::string name = app.open_with_apps[i].name;
+    std::string id = app.open_with_apps[i].desktop_id;
+    for (char& c : name)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    for (char& c : id)
+      c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    if (name.find(query) != std::string::npos ||
+        id.find(query) != std::string::npos)
+      app.open_with_visible.push_back(i);
+  }
+
+  app.open_with_visible_exact_count = 0;
+  for (int idx : app.open_with_visible) {
+    if (idx < app.open_with_exact_count)
+      ++app.open_with_visible_exact_count;
+    else
+      break;
+  }
+
+  const bool selected_visible =
+      app.open_with_selected >= 0 &&
+      std::find(app.open_with_visible.begin(), app.open_with_visible.end(),
+                app.open_with_selected) != app.open_with_visible.end();
+  if (!selected_visible)
+    app.open_with_selected =
+        app.open_with_visible.empty() ? -1 : app.open_with_visible.front();
+
+  if (app.open_with_hover >= 0 &&
+      std::find(app.open_with_visible.begin(), app.open_with_visible.end(),
+                app.open_with_hover) == app.open_with_visible.end())
+    app.open_with_hover = -1;
+}
+
+void open_with_set_default_app(const std::string& mime_type,
+                               const std::string& desktop_id_raw) {
+  if (mime_type.empty() || desktop_id_raw.empty()) return;
+
+  std::string desktop_id = desktop_id_raw;
+  if (desktop_id.size() < 8 ||
+      desktop_id.compare(desktop_id.size() - 8, 8, ".desktop") != 0)
+    desktop_id += ".desktop";
+
+  const char* xdg_config = std::getenv("XDG_CONFIG_HOME");
+  const char* home = std::getenv("HOME");
+  std::string config_dir;
+  if (xdg_config && *xdg_config)
+    config_dir = xdg_config;
+  else if (home && *home)
+    config_dir = std::string(home) + "/.config";
+  if (config_dir.empty()) return;
+
+  std::error_code ec;
+  fs::create_directories(config_dir, ec);
+  const fs::path path = fs::path(config_dir) / "mimeapps.list";
+
+  std::vector<std::string> mime_types{mime_type};
+  if (mime_type == "application/x-appimage" ||
+      mime_type == "application/vnd.appimage") {
+    mime_types = {"application/x-appimage", "application/vnd.appimage",
+                  "application/x-executable"};
+  }
+
+  std::vector<std::string> lines;
+  {
+    std::ifstream in(path);
+    std::string line;
+    while (std::getline(in, line)) {
+      if (!line.empty() && line.back() == '\r') line.pop_back();
+      lines.push_back(line);
+    }
+  }
+
+  std::vector<std::string> out;
+  bool in_defaults = false;
+  size_t defaults_pos = std::string::npos;
+  for (const auto& line : lines) {
+    if (line == "[Default Applications]") {
+      in_defaults = true;
+      out.push_back(line);
+      defaults_pos = out.size() - 1;
+      continue;
+    }
+    if (!line.empty() && line[0] == '[') in_defaults = false;
+    if (in_defaults) {
+      bool replaces = false;
+      for (const auto& mt : mime_types) {
+        if (line.rfind(mt + "=", 0) == 0) { replaces = true; break; }
+      }
+      if (replaces) continue;
+    }
+    out.push_back(line);
+  }
+
+  if (defaults_pos == std::string::npos) {
+    if (!out.empty() && !out.back().empty()) out.push_back("");
+    out.push_back("[Default Applications]");
+    defaults_pos = out.size() - 1;
+  }
+
+  std::vector<std::string> additions;
+  for (const auto& mt : mime_types)
+    additions.push_back(mt + "=" + desktop_id + ";");
+  out.insert(out.begin() + static_cast<std::ptrdiff_t>(defaults_pos + 1),
+             additions.begin(), additions.end());
+
+  const fs::path tmp = path.string() + ".tmp." + std::to_string(::getpid());
+  {
+    std::ofstream f(tmp, std::ios::trunc);
+    if (!f) return;
+    for (const auto& line : out) f << line << '\n';
+    if (!f) { f.close(); fs::remove(tmp, ec); return; }
+  }
+  fs::rename(tmp, path, ec);
+  if (ec) fs::remove(tmp, ec);
+}
+
+void open_with_launch(AppState& app, int app_index) {
+  if (app_index < 0 ||
+      app_index >= static_cast<int>(app.open_with_apps.size()))
+    return;
+  const auto& entry = app.open_with_apps[app_index];
+  if (app.open_with_set_default)
+    open_with_set_default_app(app.open_with_mime, entry.desktop_id);
+
+  std::string desktop = entry.desktop_path;
+  std::string file = app.open_with_file_path;
+  for (size_t p = 0; (p = desktop.find('\'', p)) != std::string::npos; p += 4)
+    desktop.replace(p, 1, "'\\''");
+  for (size_t p = 0; (p = file.find('\'', p)) != std::string::npos; p += 4)
+    file.replace(p, 1, "'\\''");
+  std::string cmd = "gio launch '" + desktop + "' '" + file + "' &";
+  (void)std::system(cmd.c_str());
+  open_with_close(app);
+}
+
 void open_with_open(AppState& app, const std::string& file_path) {
   open_with_close(app);
 
@@ -159,6 +353,13 @@ void open_with_open(AppState& app, const std::string& file_path) {
   // Build a set of MIME types to search: the exact type, its parent, and wildcard
   std::vector<std::string> mime_variants;
   mime_variants.push_back(mime_type);
+  if (is_appimage_path(file_path)) {
+    // Different desktops/tools use different AppImage MIME spellings.
+    mime_variants.push_back("application/x-appimage");
+    mime_variants.push_back("application/vnd.appimage");
+    mime_variants.push_back("application/x-executable");
+    mime_variants.push_back("application/vnd.appimage+elf");
+  }
   {
     // "text/x-diff" → "text/plain" (subtype parent)
     auto slash = mime_type.find('/');
@@ -263,6 +464,7 @@ void open_with_open(AppState& app, const std::string& file_path) {
     ae.desktop_id = fs::path(ent.path).stem().string();
     ae.desktop_path = ent.path;
     ae.name = ent.name;
+    ae.icon = ent.icon;
     if (rec_set.count(ae.desktop_id) || rec_set.count(ae.desktop_id + ".desktop"))
       recommended.push_back(std::move(ae));
     else
@@ -275,24 +477,49 @@ void open_with_open(AppState& app, const std::string& file_path) {
                              std::make_move_iterator(other.begin()),
                              std::make_move_iterator(other.end()));
 
+  // Prefetch every row icon up front at the size the dialog actually paints
+  // (48px bucket for a 34px tile). Without this, offscreen rows would only
+  // decode when scrolled into view, which shows up as icons popping in while
+  // scrolling. Enqueue only — decoding happens on the icon-cache worker, so
+  // opening the dialog never blocks the UI thread.
+  for (const auto& entry : app.open_with_apps) {
+    if (!entry.icon.empty())
+      app.icons.app_icon(entry.icon, 48);
+    if (!entry.desktop_id.empty() && entry.desktop_id != entry.icon)
+      app.icons.app_icon(entry.desktop_id, 48);
+  }
+  // Keep repainting while the worker drains so icons pop in promptly.
+  app.icon_catchup_frames = 120;
+
   app.open_with_open = true;
   app.open_with_file_path = file_path;
   app.open_with_mime = mime_type;
+  app.open_with_query.clear();
+  app.open_with_default_id = read_default_app_id(mime_type);
   app.open_with_hover = -1;
   app.open_with_selected = -1;
   app.open_with_scroll = 0;
+  app.open_with_scroll_smooth_current = 0.0;
+  app.open_with_scroll_smooth_target = 0.0;
   app.open_with_set_default = false;
+  open_with_apply_filter(app);
 }
 
 void open_with_close(AppState& app) {
   app.open_with_open = false;
   app.open_with_apps.clear();
+  app.open_with_visible.clear();
   app.open_with_file_path.clear();
   app.open_with_mime.clear();
+  app.open_with_query.clear();
+  app.open_with_default_id.clear();
   app.open_with_hover = -1;
   app.open_with_selected = -1;
   app.open_with_scroll = 0;
+  app.open_with_scroll_smooth_current = 0.0;
+  app.open_with_scroll_smooth_target = 0.0;
   app.open_with_exact_count = 0;
+  app.open_with_visible_exact_count = 0;
   app.open_with_set_default = false;
 }
 

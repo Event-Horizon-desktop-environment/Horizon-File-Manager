@@ -1226,37 +1226,88 @@ void apply_scan_result(AppState& app, bool is_progress) {
         tab.selected_by_kbd = false;
         tab.tree_selected_path = want;
         reveal_path_for_tree = want;
-        // Scroll the row to the top of the content column so the selection
-        // is on screen when the new window paints (otherwise the folder
-        // opens at scroll 0 and the highlight sits invisibly below the fold).
+        // Centre the row when possible, but clamp to the real content extent:
+        // pushing a near-end row to the very top leaves the viewport almost
+        // empty (the "folder looks empty after reveal" bug).
         int target_scroll = 0;
+        PaneViewRect pr = pane_view_rect_for_index(app, app.active_pane);
+        const int view_h = std::max(1, pr.h);
         if (tab.view_mode == ViewMode::Grid) {
-          PaneViewRect pr = pane_view_rect_for_index(app, app.active_pane);
           int content_w = pr.w > 0 ? pr.w : app.width;
           GridLayout gl = compute_grid_layout(content_w, app.zoom_pct / 100.0);
-          int cols = std::max(1, gl.cols);
-          target_scroll = gl.row_gap_at_top + (vi / cols) * gl.row_h;
+          const int cols = std::max(1, gl.cols);
+          const int rows =
+              (static_cast<int>(tab.visible_entries.size()) + cols - 1) / cols;
+          const int row = vi / cols;
+          const int gheader_h = static_cast<int>(22.0 * app.zoom_pct / 100.0);
+          auto group_label_at = [&](int idx) -> std::string {
+            if (idx < 0 || idx >= static_cast<int>(tab.visible_entries.size()))
+              return {};
+            int ri = tab.visible_entries[idx];
+            if (ri < 0 || ri >= static_cast<int>(tab.entries.size())) return {};
+            return group_label_for(app, tab.entries[ri]);
+          };
+          int headers_before = 0, headers_total = 0;
+          if (tab.group_field > 0) {
+            std::string prev;
+            bool first = true;
+            for (int r = 0; r < rows; ++r) {
+              std::string label = group_label_at(r * cols);
+              bool changed = first || label != prev;
+              if (changed) {
+                ++headers_total;
+                if (r < row) ++headers_before;
+              }
+              prev = label;
+              first = false;
+            }
+          }
+          const int row_top =
+              gl.row_gap_at_top + row * gl.row_h + headers_before * gheader_h;
+          target_scroll = row_top - (view_h - gl.row_h) / 2;
+          const int content_h = gl.row_gap_at_top + rows * gl.row_h +
+                                headers_total * gheader_h + gl.row_gap;
+          const int max_scroll = std::max(0, content_h - view_h);
+          target_scroll = std::clamp(target_scroll, 0, max_scroll);
         } else if (tab.view_mode == ViewMode::Tree) {
           double zf = app.zoom_pct / 100.0;
           int entry_h = static_cast<int>(28.0 * zf);
-          // Tree rows are resolved after build_tree_entries() below; scroll
-          // then. Approximate here with the list offset.
+          // Tree rows are resolved after build_tree_entries() below; the
+          // final clamp happens there. Approximate here with the list offset.
           target_scroll = vi * std::max(1, entry_h);
         } else {
-          int count = 0, prev = -1;
-          if (tab.group_by_type) {
-            for (int i = 0; i <= vi; ++i) {
-              int r = tab.visible_entries[i];
-              if (r < 0 || r >= static_cast<int>(tab.entries.size())) continue;
-              int t = static_cast<int>(tab.entries[r].type);
-              if (t != prev) {
-                ++count;
-                prev = t;
+          const int entry_h = std::max(1, app.entry_height);
+          const int header_h = static_cast<int>(entry_h * 0.55);
+          auto group_label_at = [&](int idx) -> std::string {
+            if (idx < 0 || idx >= static_cast<int>(tab.visible_entries.size()))
+              return {};
+            int ri = tab.visible_entries[idx];
+            if (ri < 0 || ri >= static_cast<int>(tab.entries.size())) return {};
+            return group_label_for(app, tab.entries[ri]);
+          };
+          int headers_before = 0, headers_total = 0;
+          if (tab.group_field > 0) {
+            std::string prev;
+            bool first = true;
+            for (int i = 0; i < static_cast<int>(tab.visible_entries.size());
+                 ++i) {
+              std::string label = group_label_at(i);
+              bool changed = first || label != prev;
+              if (changed) {
+                ++headers_total;
+                if (i <= vi) ++headers_before;
               }
+              prev = label;
+              first = false;
             }
           }
-          int header_h = static_cast<int>(app.entry_height * 0.55);
-          target_scroll = vi * app.entry_height + count * header_h;
+          const int row_top = entry_h + vi * entry_h + headers_before * header_h;
+          target_scroll = row_top - (view_h - entry_h) / 2;
+          const int content_h = static_cast<int>(tab.visible_entries.size()) *
+                                    entry_h +
+                                headers_total * header_h;
+          const int max_scroll = std::max(0, content_h - view_h);
+          target_scroll = std::clamp(target_scroll, 0, max_scroll);
         }
         if (target_scroll < 0) target_scroll = 0;
         tab.scroll_px = target_scroll;
@@ -1347,8 +1398,14 @@ void apply_scan_result(AppState& app, bool is_progress) {
           tab.multi_selected = {ti};
           tab.sel_anchor = ti;
           double zf = app.zoom_pct / 100.0;
-          int entry_h = static_cast<int>(28.0 * zf);
-          int target_scroll = ti * std::max(1, entry_h);
+          int entry_h = std::max(1, static_cast<int>(28.0 * zf));
+          PaneViewRect pr = pane_view_rect_for_index(app, app.active_pane);
+          const int view_h = std::max(1, pr.h);
+          int target_scroll = ti * entry_h - (view_h - entry_h) / 2;
+          const int content_h =
+              static_cast<int>(tab.tree_entries.size()) * entry_h;
+          const int max_scroll = std::max(0, content_h - view_h);
+          target_scroll = std::clamp(target_scroll, 0, max_scroll);
           tab.scroll_px = target_scroll;
           tab.scroll_smooth_current = static_cast<double>(target_scroll);
           tab.scroll_smooth_target = static_cast<double>(target_scroll);

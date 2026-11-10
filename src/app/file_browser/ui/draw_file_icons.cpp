@@ -3,6 +3,7 @@
 
 #include "../app.hpp"
 #include "../features/sidebar/sidebar.hpp"
+#include "app/file_browser/features/appimage/appimage.hpp"
 #include "app/file_browser/features/tags/tags.hpp"
 #include "app/file_browser/features/thumbnails/thumb_pool.hpp"
 #include "draw_file_icons.hpp"
@@ -185,6 +186,41 @@ static void draw_file_icon_body(AppState& app, cairo_t* cr, int x, int y,
       cairo_paint(cr);
       cairo_restore(cr);
       return;
+    }
+  }
+
+  // AppImages carry their own icon at the squashfs root. Use the extracted
+  // copy when it is already cached; extraction itself happens off the paint
+  // path (see prewarm_tab_icons).
+  if (file_path && is_appimage_path(*file_path)) {
+    const std::string appimage_icon = appimage_icon_cached(*file_path);
+    if (!appimage_icon.empty()) {
+      const auto* ic = app.icons.tray_icon(appimage_icon, size);
+      if (ic && ic->surface) {
+        double iw = static_cast<double>(ic->width);
+        double ih = static_cast<double>(ic->height);
+        if (iw > 0 && ih > 0) {
+          if (fabs(size - std::max(iw, ih)) < 0.5) {
+            if (bb && bb->add(ic->surface, x + static_cast<int>((size - iw) / 2.0),
+                              y + static_cast<int>((size - ih) / 2.0)))
+              return;
+            cairo_set_source_surface(cr, ic->surface, x + (size - iw) / 2.0,
+                                     y + (size - ih) / 2.0);
+            cairo_paint(cr);
+            return;
+          }
+          double scale = size / std::max(1.0, std::max(iw, ih));
+          cairo_save(cr);
+          cairo_translate(cr, x, y);
+          cairo_scale(cr, scale, scale);
+          cairo_set_source_surface(cr, ic->surface,
+                                   (size / scale - iw) / 2,
+                                   (size / scale - ih) / 2);
+          cairo_paint(cr);
+          cairo_restore(cr);
+          return;
+        }
+      }
     }
   }
 

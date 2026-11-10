@@ -81,7 +81,7 @@ install_deps_arch() {
     libarchive
     libsoup3 json-glib libsecret
     poppler-glib librsvg
-    liburing zlib xz libpng
+    liburing xz libpng
     ffmpeg
     gtk4 libadwaita gnome-online-accounts
     udisks2 xdg-utils

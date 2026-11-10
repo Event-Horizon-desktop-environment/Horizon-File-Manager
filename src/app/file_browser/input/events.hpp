@@ -111,6 +111,8 @@ bool key_rename_ui(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
                    const char* utf8, int utf8_len);
 bool key_batch_rename(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
                       const char* utf8, int utf8_len);
+bool key_open_with(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
+                   const char* utf8, int utf8_len);
 bool key_term_chooser(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
                       const char* utf8, int utf8_len);
 bool key_checksum(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,

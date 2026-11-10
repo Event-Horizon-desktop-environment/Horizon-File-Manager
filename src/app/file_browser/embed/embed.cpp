@@ -718,6 +718,12 @@ static void settings_apply_slider(AppState& app, int hit, int x) {
   if (hit == -11) {
     app.settings_opacity_pct = val;
     app.surface_opacity_pct = val;
+  } else if (hit == -77) {
+    app.settings_context_menu_opacity_pct = val;
+    app.context_menu_opacity_pct = val;
+  } else if (hit == -78) {
+    app.settings_open_with_opacity_pct = val;
+    app.open_with_opacity_pct = val;
   } else if (hit == -13) {
     app.settings_sidebar_opacity_pct = val;
     app.sidebar_opacity_pct = val;
@@ -786,9 +792,9 @@ static int settings_content_height(const AppState& app) {
       return h;
     }
     case 1:
-      // seven opacity slider rows + matugen + color engine toggles;
-      // last row top at content_top + 8*52 = 512 from card top
-      return 438;
+      // context menu + Open With + seven opacity slider rows + matugen +
+      // color engine toggles; last row top at content_top + 10*52
+      return 542;
     case 3:
       // Accounts tab: Drive section (title, status, client-ID field, hint,
       // secret field, note, connect, one row per account) + gap + Online
@@ -1087,7 +1093,7 @@ void handle_settings_click(AppState& app, int x, int y, int button) {
     app.settings_pendingRedraw = true;
     return;
   }
-  if (hit == -11 || hit == -13 || hit == -14 || hit == -15 || hit == -17 || hit == -19 || hit == -20 || hit == -23) {
+  if (hit == -11 || hit == -13 || hit == -14 || hit == -15 || hit == -17 || hit == -19 || hit == -20 || hit == -23 || hit == -77 || hit == -78) {
     settings_apply_slider(app, hit, x);
     app.settings_slider_dragging = hit;
     app.settings_pendingRedraw = true;
@@ -1516,6 +1522,20 @@ static bool create_window(AppState& app) {
             app.props_pointerX = static_cast<int>(x);
             app.props_pointerY = static_cast<int>(y);
             app.props_pendingRedraw = true;
+          } else if (app.contextMenuPopup.surface &&
+                     surface == app.contextMenuPopup.surface) {
+            // Popup subsurfaces receive surface-local coordinates; translate
+            // back into main-window space for the shared hit registry.
+            app.pointerX = x + app.contextMenuPopup.x;
+            app.pointerY = y + app.contextMenuPopup.y;
+            handle_pointer_move(app, static_cast<int>(app.pointerX),
+                                static_cast<int>(app.pointerY));
+          } else if (app.openWithPopup.surface &&
+                     surface == app.openWithPopup.surface) {
+            app.pointerX = x + app.openWithPopup.x;
+            app.pointerY = y + app.openWithPopup.y;
+            handle_pointer_move(app, static_cast<int>(app.pointerX),
+                                static_cast<int>(app.pointerY));
           } else {
             app.pointerX = x;
             app.pointerY = y;
@@ -1860,14 +1880,16 @@ static bool create_window(AppState& app) {
     bool search_pending = ((app.search_active || app.recursive_search_active) && !app.search_query.empty()) || ((app.r_search_active || app.r_recursive_search_active) && !app.r_search_query.empty());
     bool mount_wake = app.mount_poll_wake.exchange(false, std::memory_order_acq_rel);
     bool op_active = app.op_progress && app.op_progress->active.load();
-    if (app.icon_catchup_frames > 0) {
-      --app.icon_catchup_frames;
+    bool ow_icons_pending =
+        app.open_with_open && app.icons.pending_count() > 0;
+    if (app.icon_catchup_frames > 0 || ow_icons_pending) {
+      if (app.icon_catchup_frames > 0) --app.icon_catchup_frames;
       app.pendingRedraw = true;
       // Catchup exists so background-resolved icons pop in; once nothing is
       // pending the remaining forced frames are pure waste — stop early.
       if (app.icons.pending_count() == 0) app.icon_catchup_frames = 0;
     }
-    int poll_ms = (!app.thumb_pending_queue.empty() || search_pending || app.key_repeat_sym != 0 || mount_wake || op_active || app.icon_catchup_frames > 0) ? 0 : kPollMs;
+    int poll_ms = (!app.thumb_pending_queue.empty() || search_pending || app.key_repeat_sym != 0 || mount_wake || op_active || app.icon_catchup_frames > 0 || ow_icons_pending) ? 0 : kPollMs;
     // A deferred scan apply must never sit on a 200 ms poll nap.
     if (poll_ms > 5 && app.scan_apply_deferred) poll_ms = 5;
     int pr = poll(pfds, nfds, poll_ms);
@@ -2392,6 +2414,20 @@ static bool create_window(AppState& app) {
             app.props_pointerX = static_cast<int>(x);
             app.props_pointerY = static_cast<int>(y);
             app.props_pendingRedraw = true;
+          } else if (app.contextMenuPopup.surface &&
+                     surface == app.contextMenuPopup.surface) {
+            // Popup subsurfaces receive surface-local coordinates; translate
+            // back into main-window space for the shared hit registry.
+            app.pointerX = x + app.contextMenuPopup.x;
+            app.pointerY = y + app.contextMenuPopup.y;
+            handle_pointer_move(app, static_cast<int>(app.pointerX),
+                                static_cast<int>(app.pointerY));
+          } else if (app.openWithPopup.surface &&
+                     surface == app.openWithPopup.surface) {
+            app.pointerX = x + app.openWithPopup.x;
+            app.pointerY = y + app.openWithPopup.y;
+            handle_pointer_move(app, static_cast<int>(app.pointerX),
+                                static_cast<int>(app.pointerY));
           } else {
             app.pointerX = x;
             app.pointerY = y;
@@ -2682,6 +2718,20 @@ static bool create_window(AppState& app) {
             app.props_pointerX = static_cast<int>(x);
             app.props_pointerY = static_cast<int>(y);
             app.props_pendingRedraw = true;
+          } else if (app.contextMenuPopup.surface &&
+                     surface == app.contextMenuPopup.surface) {
+            // Popup subsurfaces receive surface-local coordinates; translate
+            // back into main-window space for the shared hit registry.
+            app.pointerX = x + app.contextMenuPopup.x;
+            app.pointerY = y + app.contextMenuPopup.y;
+            handle_pointer_move(app, static_cast<int>(app.pointerX),
+                                static_cast<int>(app.pointerY));
+          } else if (app.openWithPopup.surface &&
+                     surface == app.openWithPopup.surface) {
+            app.pointerX = x + app.openWithPopup.x;
+            app.pointerY = y + app.openWithPopup.y;
+            handle_pointer_move(app, static_cast<int>(app.pointerX),
+                                static_cast<int>(app.pointerY));
           } else {
             app.pointerX = x;
             app.pointerY = y;

@@ -190,6 +190,10 @@ public:
   static int bucket_down(int px);
 
   const IconEntry* app_icon(const std::string& appId);
+  // Size-aware asynchronous variant for the Open With list. Returns nullptr
+  // while the worker decodes; the surface appears on a later frame. Enqueuing
+  // every row at dialog-open time means scrolling never triggers a decode.
+  const IconEntry* app_icon(const std::string& appId, int pixelSize);
 
   const IconEntry* tray_icon(const std::string& iconName);
 

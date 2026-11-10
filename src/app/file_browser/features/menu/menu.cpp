@@ -1,4 +1,5 @@
 #include "../../app.hpp"
+#include "app/file_browser/features/appimage/appimage.hpp"
 #include "app/file_browser/features/compare/compare.hpp"
 #include "app/file_browser/features/compress/compress.hpp"
 #include "app/file_browser/features/dirprops/dirprops.hpp"
@@ -921,6 +922,7 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
 
   bool is_dir = false;
   bool is_executable = false;
+  bool is_appimage = false;
   if (tree_row) {
     const auto& te = app.cur_tab().tree_entries[item_idx];
     FileEntry& ov = app.context_menu_tree_entry;
@@ -936,6 +938,7 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
     }
     is_dir = te.is_dir;
     is_executable = te.type == FileType::Executable;
+    is_appimage = is_appimage_path(te.path);
     app.cur_tab().selected_idx = item_idx;
     app.cur_tab().tree_selected_path = te.path;
     app.cur_tab().multi_selected.clear();
@@ -960,12 +963,33 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
                   app.cur_tab().entries[real_idx].is_dir;
     is_executable = real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
                   app.cur_tab().entries[real_idx].type == FileType::Executable;
+    is_appimage = real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
+                  is_appimage_path(app.cur_tab().entries[real_idx].path);
   }
   // Shared item construction for both entry-backed and tree-row targets.
   {
-    if (is_executable) {
+    // Archives are common enough that extracting them should not require
+    // digging through a submenu. Keep these right below Open/Open With.
+    if (!is_dir && !tree_row) {
+      const std::string* archive_path = nullptr;
+      if (item_idx >= 0 &&
+          item_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
+        int real_idx = app.cur_tab().visible_entries[item_idx];
+        if (real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()))
+          archive_path = &app.cur_tab().entries[real_idx].path;
+      }
+      if (archive_path && is_archive_extension(*archive_path)) {
+        app.context_menu_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::Extract, "Extract Here"));
+        app.context_menu_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::ExtractTo, "Extract to..."));
+      }
+    }
+    if (is_executable || is_appimage) {
+      // AppImages may arrive without the executable bit; launch_program()
+      // fixes that. The plain "Run" label is what users expect for a program.
       app.context_menu_items.push_back(
-        AppState::menu_item(AppState::ContextMenuAction::RunProgram, "Run as Program"));
+        AppState::menu_item(AppState::ContextMenuAction::RunProgram, "Run"));
     }
     if (is_dir) {
       app.context_menu_items.push_back(

@@ -368,6 +368,16 @@ static std::string negative_key_of(const std::string& key) {
 
 static std::vector<std::string> icon_name_candidates(const std::string& icon_name) {
   std::vector<std::string> out{icon_name};
+  // Some desktop entries include a file extension in Icon=; the theme index
+  // stores bare stems, so try the stripped name as well.
+  for (const char* ext : {".svg", ".png", ".xpm"}) {
+    if (icon_name.size() > std::strlen(ext) &&
+        icon_name.compare(icon_name.size() - std::strlen(ext),
+                          std::strlen(ext), ext) == 0) {
+      out.push_back(icon_name.substr(0, icon_name.size() - std::strlen(ext)));
+      break;
+    }
+  }
   auto add = [&](const std::string& s) {
     if (s != icon_name && std::find(out.begin(), out.end(), s) == out.end())
       out.push_back(s);
@@ -439,6 +449,82 @@ static std::vector<std::string> icon_name_candidates(const std::string& icon_nam
     add("text-x-generic");
   }
   return out;
+}
+
+// Fallback search used only when the active theme chain misses an icon: some
+// .desktop files reference icons that exist only in another installed theme
+// (for example nwg-look lives in Papirus/EventHorizon but not Adwaita).
+//
+// This is deliberately path-probing, not a recursive scan. A machine can hold
+// a million icon files across themes; listing all of them once per miss froze
+// the UI. The icon-theme layout is fixed, so probing the only two legal
+// depths (theme/<size>/<name>, theme/<category>/<size>/<name>) for the exact
+// candidate name costs a handful of stat calls per theme.
+static std::string find_icon_in_any_theme(const std::string& icon_name) {
+  const auto names = icon_name_candidates(icon_name);
+  std::vector<std::string> pixmap_dirs{"/usr/share/pixmaps",
+                                       "/usr/local/share/pixmaps"};
+  if (const char* home = std::getenv("HOME"))
+    pixmap_dirs.push_back(std::string(home) + "/.local/share/pixmaps");
+
+  auto file_exists = [](const fs::path& p) {
+    std::error_code ec;
+    return fs::is_regular_file(p, ec);
+  };
+
+  for (const char* ext : {".svg", ".png"}) {
+    for (const auto& dir : pixmap_dirs) {
+      for (const auto& name : names)
+        if (file_exists(fs::path(dir) / (name + ext)))
+          return (fs::path(dir) / (name + ext)).string();
+    }
+
+    for (const auto& base : icon_base_dirs()) {
+      std::error_code ec;
+      fs::directory_iterator theme_it(
+          base, fs::directory_options::skip_permission_denied, ec);
+      fs::directory_iterator end;
+      for (; !ec && theme_it != end; theme_it.increment(ec)) {
+        std::error_code fec;
+        if (!theme_it->is_directory(fec)) continue;
+        const fs::path theme = theme_it->path();
+
+        // theme/<name>
+        for (const auto& name : names)
+          if (file_exists(theme / (name + ext)))
+            return (theme / (name + ext)).string();
+
+        std::error_code e1;
+        fs::directory_iterator d1_it(
+            theme, fs::directory_options::skip_permission_denied, e1);
+        for (; !e1 && d1_it != end; d1_it.increment(e1)) {
+          std::error_code d1ec;
+          if (!d1_it->is_directory(d1ec)) continue;
+          const fs::path d1 = d1_it->path();
+
+          // theme/<size>/<name>
+          for (const auto& name : names)
+            if (file_exists(d1 / (name + ext)))
+              return (d1 / (name + ext)).string();
+
+          std::error_code e2;
+          fs::directory_iterator d2_it(
+              d1, fs::directory_options::skip_permission_denied, e2);
+          for (; !e2 && d2_it != end; d2_it.increment(e2)) {
+            std::error_code d2ec;
+            if (!d2_it->is_directory(d2ec)) continue;
+            const fs::path d2 = d2_it->path();
+            // theme/<size>/<category>/<name> and
+            // theme/<category>/<size>/<name>
+            for (const auto& name : names)
+              if (file_exists(d2 / (name + ext)))
+                return (d2 / (name + ext)).string();
+          }
+        }
+      }
+    }
+  }
+  return {};
 }
 
 static std::vector<std::string> read_inherited_themes(const fs::path& theme_dir) {
@@ -883,6 +969,13 @@ static void resolve_and_insert(IconCacheData& d, const std::string& key,
     }
   }
 
+  // Active theme chain missed: scan other installed themes before giving up.
+  // Only for application keys — file-type icons should stay on the active
+  // theme chain and never pay for a full cross-theme scan.
+  if (path.empty() &&
+      (key.starts_with("app:") || key.starts_with("exec:")))
+    path = find_icon_in_any_theme(icon_name);
+
   cairo_surface_t* surf = nullptr;
   if (!path.empty()) {
     surf = path.ends_with(".svg") ? load_svg(path, load_size)
@@ -1071,6 +1164,28 @@ const IconEntry* IconCache::tray_icon(const std::string& icon_name, int pixel_si
 const IconEntry* IconCache::app_icon(const std::string& app_id) {
   std::string key = "app:" + app_id;
   return resolve_and_cache(key, app_id, false);
+}
+
+const IconEntry* IconCache::app_icon(const std::string& app_id,
+                                     int pixel_size) {
+  int px = bucket_for(pixel_size);
+  std::string key = "app:" + app_id + "@" + std::to_string(px);
+  {
+    std::lock_guard<std::mutex> lk(d_->mtx);
+    auto it = d_->cache.find(key);
+    if (it != d_->cache.end()) {
+      touch_lru_locked(*d_, key);
+      d_->stCacheHits.fetch_add(1, std::memory_order_relaxed);
+      return &it->second;
+    }
+    if (d_->negativeKeys.count(negative_key_of(key))) {
+      d_->stNegativeHits.fetch_add(1, std::memory_order_relaxed);
+      return nullptr;
+    }
+    // Never build theme indexes on the paint thread; the worker owns that.
+  }
+  enqueue_async(key, app_id, px);
+  return nullptr;  // prefetch in progress; caller keeps drawing placeholders
 }
 
 const IconEntry* IconCache::app_icon_from_exec_basename(const std::string& exec_basename) {

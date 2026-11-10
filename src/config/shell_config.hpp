@@ -368,6 +368,8 @@ struct FileBrowserSettings {
   double zoom_pct = 100.0;       // 50–200
   bool folders_before_files = true;
   int surface_opacity_pct = 100; // 0–100
+  int context_menu_opacity_pct = 100; // 0–100; popup background only
+  int open_with_opacity_pct = 100;    // 0–100; popup background only
   int sidebar_opacity_pct = 100; // 0–100
   int topbar_opacity_pct = 100; // 0–100
   int statusbar_opacity_pct = 100; // 0–100

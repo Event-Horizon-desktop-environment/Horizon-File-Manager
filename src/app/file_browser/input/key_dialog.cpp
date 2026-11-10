@@ -1329,6 +1329,89 @@ bool key_batch_rename(AppState& app, uint32_t sym, bool ctrl, bool shift, bool a
 }
 
 
+bool key_open_with(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
+                   const char* utf8, int utf8_len) {
+  if (!app.open_with_open) return false;
+
+  if (sym == XKB_KEY_Escape) {
+    open_with_close(app);
+    draw(app);
+    return true;
+  }
+  if (sym == XKB_KEY_Return || sym == XKB_KEY_KP_Enter) {
+    open_with_launch(app, app.open_with_selected);
+    draw(app);
+    return true;
+  }
+
+  const int visible = static_cast<int>(app.open_with_visible.size());
+  auto move_selection = [&](int delta) {
+    if (visible == 0) return;
+    int pos = 0;
+    for (int i = 0; i < visible; ++i) {
+      if (app.open_with_visible[i] == app.open_with_selected) { pos = i; break; }
+    }
+    pos = std::clamp(pos + delta, 0, visible - 1);
+    app.open_with_selected = app.open_with_visible[pos];
+
+    // Keep the keyboard selection inside the 360px list viewport.
+    const int entry_h = 48;
+    const int section_h = 28;
+    const int list_h = 360;
+    const bool has_other = visible > app.open_with_visible_exact_count;
+    const int top = (app.open_with_visible_exact_count > 0 ? section_h : 0) +
+                    (has_other && pos >= app.open_with_visible_exact_count
+                         ? section_h : 0) +
+                    pos * entry_h;
+    if (top < app.open_with_scroll)
+      app.open_with_scroll = top;
+    else if (top + entry_h > app.open_with_scroll + list_h)
+      app.open_with_scroll = top + entry_h - list_h;
+    app.open_with_scroll_smooth_current =
+        static_cast<double>(app.open_with_scroll);
+    app.open_with_scroll_smooth_target =
+        static_cast<double>(app.open_with_scroll);
+    draw(app);
+  };
+  if (sym == XKB_KEY_Up) { move_selection(-1); return true; }
+  if (sym == XKB_KEY_Down) { move_selection(1); return true; }
+
+  if (ctrl && (sym == XKB_KEY_U || sym == XKB_KEY_u)) {
+    app.open_with_query.clear();
+    open_with_apply_filter(app);
+    app.open_with_scroll = 0;
+    app.open_with_scroll_smooth_current = 0.0;
+    app.open_with_scroll_smooth_target = 0.0;
+    draw(app);
+    return true;
+  }
+  if (sym == XKB_KEY_BackSpace) {
+    while (!app.open_with_query.empty() &&
+           (static_cast<unsigned char>(app.open_with_query.back()) & 0xC0) == 0x80)
+      app.open_with_query.pop_back();
+    if (!app.open_with_query.empty()) app.open_with_query.pop_back();
+    open_with_apply_filter(app);
+    app.open_with_scroll = 0;
+    app.open_with_scroll_smooth_current = 0.0;
+    app.open_with_scroll_smooth_target = 0.0;
+    draw(app);
+    return true;
+  }
+  if (utf8 && utf8_len > 0 && utf8_len <= 4 && !ctrl && !alt) {
+    const unsigned char c0 = static_cast<unsigned char>(utf8[0]);
+    if (c0 < 0x20 || c0 == 0x7f) return true;
+    if (app.open_with_query.size() + static_cast<size_t>(utf8_len) < 128)
+      app.open_with_query.append(utf8, static_cast<size_t>(utf8_len));
+    open_with_apply_filter(app);
+    app.open_with_scroll = 0;
+    app.open_with_scroll_smooth_current = 0.0;
+    app.open_with_scroll_smooth_target = 0.0;
+    draw(app);
+    return true;
+  }
+  return true;  // modal: swallow everything else
+}
+
 bool key_term_chooser(AppState& app, uint32_t sym, bool ctrl, bool shift, bool alt,
                     const char* utf8, int utf8_len) {
   if (app.term_chooser_open) {

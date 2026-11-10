@@ -65,6 +65,8 @@ void open_settings(AppState& app) {
   app.settings_nc_editing = 0;
   app.settings_accounts_stale = true;
   app.settings_opacity_pct = app.surface_opacity_pct;
+  app.settings_context_menu_opacity_pct = app.context_menu_opacity_pct;
+  app.settings_open_with_opacity_pct = app.open_with_opacity_pct;
   app.settings_sidebar_opacity_pct = app.sidebar_opacity_pct;
   app.settings_topbar_opacity_pct = app.topbar_opacity_pct;
   app.settings_statusbar_opacity_pct = app.statusbar_opacity_pct;
@@ -183,6 +185,8 @@ void save_file_browser_settings(AppState& app) {
   fbs.sort_hidden_last = app.sort_hidden_last;
   fbs.filter_bar_open = app.filter_bar_open_by_default;
   fbs.surface_opacity_pct = app.surface_opacity_pct;
+  fbs.context_menu_opacity_pct = app.context_menu_opacity_pct;
+  fbs.open_with_opacity_pct = app.open_with_opacity_pct;
   fbs.sidebar_opacity_pct = app.sidebar_opacity_pct;
   fbs.topbar_opacity_pct = app.topbar_opacity_pct;
   fbs.statusbar_opacity_pct = app.statusbar_opacity_pct;
@@ -257,6 +261,8 @@ void settings_apply(AppState& app) {
   fbs.sort_hidden_last = app.sort_hidden_last;
   fbs.filter_bar_open = app.filter_bar_open_by_default;
   fbs.surface_opacity_pct = app.settings_opacity_pct;
+  fbs.context_menu_opacity_pct = app.settings_context_menu_opacity_pct;
+  fbs.open_with_opacity_pct = app.settings_open_with_opacity_pct;
   fbs.sidebar_opacity_pct = app.settings_sidebar_opacity_pct;
   fbs.topbar_opacity_pct = app.settings_topbar_opacity_pct;
   fbs.statusbar_opacity_pct = app.settings_statusbar_opacity_pct;
@@ -406,6 +412,8 @@ void reload_settings_from_config(AppState& app) {
   apply_zoom_pct(app, fbs.zoom_pct);
   app.folders_before_files = fbs.folders_before_files;
   app.surface_opacity_pct = fbs.surface_opacity_pct;
+  app.context_menu_opacity_pct = fbs.context_menu_opacity_pct;
+  app.open_with_opacity_pct = fbs.open_with_opacity_pct;
   app.sidebar_opacity_pct = fbs.sidebar_opacity_pct;
   app.topbar_opacity_pct = fbs.topbar_opacity_pct;
   app.statusbar_opacity_pct = fbs.statusbar_opacity_pct;

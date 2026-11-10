@@ -2,6 +2,7 @@
 #include "../trace.hpp"
 #include "../features/sidebar/sidebar.hpp"
 #include "../features/view_zoom/view_zoom.hpp"
+#include "app/file_browser/features/appimage/appimage.hpp"
 #include "app/file_browser/features/thumbnails/thumb_pool.hpp"
 #include "app/file_browser/features/dir_stats/dir_stats.hpp"
 
@@ -917,6 +918,15 @@ void prewarm_tab_icons(AppState& app) {
   for (int vi : tab.visible_entries) {
     if (vi < 0 || vi >= static_cast<int>(tab.entries.size())) continue;
     const auto& e = tab.entries[vi];
+    if (is_appimage_path(e.path)) {
+      // Extract once, on this (non-paint) path, so the very first frame can
+      // draw the AppImage's own icon instead of the generic executable.
+      const std::string ai_icon = appimage_icon_path(e.path);
+      if (!ai_icon.empty() && seen.insert(ai_icon).second) {
+        app.icons.tray_icon_sync(ai_icon, px);
+        if (--budget <= 0) return;
+      }
+    }
     if (!e.icon_name.empty() && seen.insert(e.icon_name).second) {
       app.icons.tray_icon_sync(e.icon_name, px);
       if (--budget <= 0) return;

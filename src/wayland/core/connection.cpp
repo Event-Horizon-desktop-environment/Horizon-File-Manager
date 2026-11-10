@@ -37,6 +37,8 @@ void WaylandConnection::disconnect() {
   extDataControlMgr_ = nullptr;
   if (wlrDataControlMgr_) zwlr_data_control_manager_v1_destroy(wlrDataControlMgr_);
   wlrDataControlMgr_ = nullptr;
+  if (backgroundEffectMgr_) ext_background_effect_manager_v1_destroy(backgroundEffectMgr_);
+  backgroundEffectMgr_ = nullptr;
   if (dataDeviceMgr_) wl_data_device_manager_destroy(dataDeviceMgr_);
   dataDeviceMgr_ = nullptr;
   if (tearingControlMgr_) wp_tearing_control_manager_v1_destroy(tearingControlMgr_);
@@ -90,6 +92,9 @@ void WaylandConnection::registry_global(void* data, wl_registry* registry, uint3
   } else if (std::strcmp(iface, zwlr_data_control_manager_v1_interface.name) == 0) {
     self->wlrDataControlMgr_ = static_cast<zwlr_data_control_manager_v1*>(
         wl_registry_bind(registry, name, &zwlr_data_control_manager_v1_interface, 1));
+  } else if (std::strcmp(iface, ext_background_effect_manager_v1_interface.name) == 0) {
+    self->backgroundEffectMgr_ = static_cast<ext_background_effect_manager_v1*>(
+        wl_registry_bind(registry, name, &ext_background_effect_manager_v1_interface, 1));
   } else if (std::strcmp(iface, wp_viewporter_interface.name) == 0) {
     self->viewporter_ = static_cast<wp_viewporter*>(
         wl_registry_bind(registry, name, &wp_viewporter_interface, 1));

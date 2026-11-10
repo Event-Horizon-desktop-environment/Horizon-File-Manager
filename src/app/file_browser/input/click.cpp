@@ -147,6 +147,8 @@ int settings_hit_test(AppState& app, int x, int y) {
     case hui::Hit::kSettingsZoomField: return -16;
     case hui::Hit::kSettingsFoldersToggle: return -10;
     case hui::Hit::kSettingsSurfSlider: return -11;
+    case hui::Hit::kSettingsCtxMenuSlider: return -77;
+    case hui::Hit::kSettingsOpenWithSlider: return -78;
     case hui::Hit::kSettingsSideSlider: return -13;
     case hui::Hit::kSettingsTopSlider: return -14;
     case hui::Hit::kSettingsStatusSlider: return -15;

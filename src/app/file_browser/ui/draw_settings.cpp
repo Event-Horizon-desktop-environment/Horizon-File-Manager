@@ -518,7 +518,57 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     int ly = content_y;
     int left_x = cx + pad + 8;
 
-    // Surface opacity label
+    // Context menu opacity: popup card background only; icons and text stay
+    // fully opaque.
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 13);
+    cairo_move_to(cr, left_x, ly + 14);
+    cairo_show_text(cr, "Context menu opacity");
+
+    char ctx_op_str[16];
+    snprintf(ctx_op_str, sizeof(ctx_op_str), "%d%%", app.settings_context_menu_opacity_pct);
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
+    cairo_move_to(cr, left_x + 200, ly + 14);
+    cairo_show_text(cr, ctx_op_str);
+
+    int slider_x = cx + pad + 8;
+    int slider_y = ly + 24;
+    int slider_w = card_w - 2 * pad - 16;
+    int slider_h = 6;
+    app.settings_hit_context_menu_opacity_slider[0] = slider_x;
+    app.settings_hit_context_menu_opacity_slider[1] = slider_y - 10;
+    app.settings_hit_context_menu_opacity_slider[2] = slider_w;
+    app.settings_hit_context_menu_opacity_slider[3] = slider_h + 20;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsCtxMenuSlider), static_cast<int>(app.settings_hit_context_menu_opacity_slider[0]), static_cast<int>(app.settings_hit_context_menu_opacity_slider[1]), static_cast<int>(app.settings_hit_context_menu_opacity_slider[2]), static_cast<int>(app.settings_hit_context_menu_opacity_slider[3]));
+
+    ds_slider(slider_x, slider_y, slider_w, app.settings_context_menu_opacity_pct / 100.0);
+
+    // Open With opacity: card background only; app icons and text stay fully
+    // opaque.
+    ly += 52;
+    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
+    cairo_set_font_size(cr, 13);
+    cairo_move_to(cr, left_x, ly + 14);
+    cairo_show_text(cr, "Open With opacity");
+
+    char ow_op_str[16];
+    snprintf(ow_op_str, sizeof(ow_op_str), "%d%%", app.settings_open_with_opacity_pct);
+    cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g, app.text_secondary_b, 1.0);
+    cairo_move_to(cr, left_x + 200, ly + 14);
+    cairo_show_text(cr, ow_op_str);
+
+    slider_y = ly + 24;
+    app.settings_hit_open_with_opacity_slider[0] = slider_x;
+    app.settings_hit_open_with_opacity_slider[1] = slider_y - 10;
+    app.settings_hit_open_with_opacity_slider[2] = slider_w;
+    app.settings_hit_open_with_opacity_slider[3] = slider_h + 20;
+    app.hit_settings.add(hui::Hit::dialog(hui::Hit::kDlgSettings, hui::Hit::kSettingsOpenWithSlider), static_cast<int>(app.settings_hit_open_with_opacity_slider[0]), static_cast<int>(app.settings_hit_open_with_opacity_slider[1]), static_cast<int>(app.settings_hit_open_with_opacity_slider[2]), static_cast<int>(app.settings_hit_open_with_opacity_slider[3]));
+
+    ds_slider(slider_x, slider_y, slider_w, app.settings_open_with_opacity_pct / 100.0);
+
+    // Surface opacity
+    ly += 52;
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
     cairo_set_font_size(cr, 13);
@@ -533,10 +583,7 @@ void draw_settings_dialog(AppState& app, cairo_t* cr) {
     cairo_show_text(cr, op_str);
 
     // Slider track
-    int slider_x = cx + pad + 8;
-    int slider_y = ly + 24;
-    int slider_w = card_w - 2 * pad - 16;
-    int slider_h = 6;
+    slider_y = ly + 24;
     app.settings_hit_opacity_slider[0] = slider_x;
     app.settings_hit_opacity_slider[1] = slider_y - 10;
     app.settings_hit_opacity_slider[2] = slider_w;

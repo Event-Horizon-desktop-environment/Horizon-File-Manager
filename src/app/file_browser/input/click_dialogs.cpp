@@ -26,6 +26,7 @@
 
 #include <pwd.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 #include <xkbcommon/xkbcommon-keysyms.h>
 
@@ -800,63 +801,6 @@ bool click_batch_rename(AppState& app, int x, int y, int button) {
 }
 
 bool click_open_with(AppState& app, int x, int y, int button) {
-  auto set_mime_default_app = [](const std::string& mime_type, const std::string& desktop_id) {
-    if (mime_type.empty() || desktop_id.empty()) return;
-    const char* home = std::getenv("HOME");
-    if (!home) return;
-    std::string path = std::string(home) + "/.config/mimeapps.list";
-
-    // Read existing file
-    std::vector<std::string> lines;
-    bool in_defaults = false;
-    bool found = false;
-    {
-      FILE* f = fopen(path.c_str(), "r");
-      if (f) {
-        char buf[1024];
-        std::string prefix = mime_type + "=";
-        while (fgets(buf, sizeof(buf), f)) {
-          std::string line = buf;
-          if (!line.empty() && line.back() == '\n') line.pop_back();
-          if (line == "[Default Applications]") { in_defaults = true; lines.push_back(line); continue; }
-          if (!line.empty() && line[0] == '[') { in_defaults = false; }
-          if (in_defaults && line.size() >= prefix.size() &&
-              line.compare(0, prefix.size(), prefix) == 0) {
-            std::string existing = line.substr(prefix.size());
-            if (existing.find(desktop_id) == std::string::npos) {
-              line = prefix + existing + ";" + desktop_id;
-            }
-            found = true;
-          }
-          lines.push_back(line);
-        }
-        fclose(f);
-      }
-    }
-
-    if (!found) {
-      // Ensure [Default Applications] section exists
-      bool has_section = false;
-      for (const auto& l : lines) {
-        if (l == "[Default Applications]") { has_section = true; break; }
-      }
-      if (!has_section) {
-        if (!lines.empty()) lines.push_back("");
-        lines.push_back("[Default Applications]");
-      }
-      // Append at end (after [Default Applications] header or at file end)
-      lines.push_back(mime_type + "=" + desktop_id);
-    }
-
-    FILE* f = fopen(path.c_str(), "w");
-    if (f) {
-      for (const auto& l : lines) {
-        fprintf(f, "%s\n", l.c_str());
-      }
-      fclose(f);
-    }
-  };
-
   if (app.open_with_open) {
     if (button == 0x110) {
       double dx = static_cast<double>(x), dy = static_cast<double>(y);
@@ -893,28 +837,17 @@ bool click_open_with(AppState& app, int x, int y, int button) {
         return true;
       }
 
-      auto launch = [&](const AppState::OpenWithEntry& e) {
-        std::string desktop = e.desktop_path;
-        std::string file = app.open_with_file_path;
-        for (size_t p = 0; (p = desktop.find('\'', p)) != std::string::npos; p += 4)
-          desktop.replace(p, 1, "'\\''");
-        for (size_t p = 0; (p = file.find('\'', p)) != std::string::npos; p += 4)
-          file.replace(p, 1, "'\\''");
-        std::string cmd = "gio launch '" + desktop + "' '" + file + "' &";
-        (void)std::system(cmd.c_str());
-      };
+      // Search field: keyboard input is always routed here while the dialog
+      // is open, so a click just keeps the dialog alive.
+      if (dx >= app.open_with_hit_search[0] && dx < app.open_with_hit_search[0] + app.open_with_hit_search[2] &&
+          dy >= app.open_with_hit_search[1] && dy < app.open_with_hit_search[1] + app.open_with_hit_search[3]) {
+        return true;
+      }
 
       // Open button
       if (dx >= app.open_with_hit_open[0] && dx < app.open_with_hit_open[0] + app.open_with_hit_open[2] &&
           dy >= app.open_with_hit_open[1] && dy < app.open_with_hit_open[1] + app.open_with_hit_open[3]) {
-        if (app.open_with_selected >= 0 &&
-            app.open_with_selected < static_cast<int>(app.open_with_apps.size())) {
-          if (app.open_with_set_default) {
-            set_mime_default_app(app.open_with_mime, app.open_with_apps[app.open_with_selected].desktop_id);
-          }
-          launch(app.open_with_apps[app.open_with_selected]);
-        }
-        open_with_close(app);
+        open_with_launch(app, app.open_with_selected);
         draw(app);
         return true;
       }
@@ -927,12 +860,10 @@ bool click_open_with(AppState& app, int x, int y, int button) {
         int row = ctrl - hui::Hit::kOpenRowBase;
         if (row >= 0 && row < total &&
             (list_hid & 0xFFFFC00) == hui::Hit::dialog(hui::Hit::kDlgOpenWith, 0)) {
+          // Clicking a row only changes the selection; the dialog stays open
+          // until the user presses Open. This also lets "Set as Default" be
+          // applied to the chosen app rather than whichever row was clicked.
           app.open_with_selected = row;
-          if (app.open_with_set_default) {
-            set_mime_default_app(app.open_with_mime, app.open_with_apps[row].desktop_id);
-          }
-          launch(app.open_with_apps[row]);
-          open_with_close(app);
           draw(app);
           return true;
         }
@@ -955,16 +886,19 @@ bool click_term_chooser(AppState& app, int x, int y, int button) {
   const uint32_t hid = app.hit_main.query(x, y);
   const int total = static_cast<int>(app.term_chooser_apps.size());
 
-  if (hid == dialog(kDlgTerm, kTermClose) || hid != dialog(kDlgTerm, 0)) {
-    // Close button or outside the card: dismiss.
+  if (hid == dialog(kDlgTerm, kTermClose)) {
     app.term_chooser_open = false;
     draw(app);
     return true;
   }
 
+  // Rows carry their own hit IDs, so resolve them before the generic
+  // "anything that is not the card" dismissal below. Treating every row as
+  // outside the card closed the chooser without ever launching the terminal.
   int ctrl = hui::Hit::dialog_ctrl(hid);
   int item_idx = ctrl - kTermRowBase;
-  if (item_idx >= 0 && item_idx < total) {
+  if (item_idx >= 0 && item_idx < total &&
+      (hid & 0xFFFFC00) == dialog(kDlgTerm, 0)) {
     auto& chosen = app.term_chooser_apps[item_idx];
     std::string chosen_id = chosen.desktop_id;
     auto dot = chosen_id.rfind('.');
@@ -977,6 +911,13 @@ bool click_term_chooser(AppState& app, int x, int y, int button) {
     eh::config::shell_config_apply_from_memory(std::move(sc));
     app.term_chooser_open = false;
     open_terminal_at(app, app.term_chooser_target_dir);
+    draw(app);
+    return true;
+  }
+
+  if (hid != dialog(kDlgTerm, 0)) {
+    // Outside the card: dismiss.
+    app.term_chooser_open = false;
     draw(app);
     return true;
   }

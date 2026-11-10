@@ -89,6 +89,7 @@ bool handle_key(AppState& app, uint32_t, uint32_t state,
   if (key_password(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
   if (key_rename_ui(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
   if (key_batch_rename(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
+  if (key_open_with(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
   if (key_term_chooser(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
   if (key_checksum(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;
   if (key_connect(app, sym, ctrl, shift, alt, utf8, utf8_len)) return true;

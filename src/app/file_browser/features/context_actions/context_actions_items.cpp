@@ -2,6 +2,7 @@
 
 #include "../../app.hpp"
 #include "app/file_browser/features/compare/compare.hpp"
+#include "app/file_browser/features/appimage/appimage.hpp"
 #include "app/file_browser/features/compress/compress.hpp"
 #include "app/file_browser/features/dirprops/dirprops.hpp"
 #include "app/file_browser/features/progress/progress.hpp"
@@ -67,6 +68,13 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
     case AppState::ContextMenuAction::Open:
       if (entry.is_dir) {
         navigate_to(app, entry.path);
+      } else if (is_appimage_path(entry.path)) {
+        // AppImages are programs, not documents: opening one should run it,
+        // not hand it to xdg-open (which may route it to an archive tool).
+        if (!launch_appimage(entry.path)) {
+          app.operation_status = "Could not run AppImage";
+          app.operation_status_expires_ms = menu_expiry_3s();
+        }
       } else {
         xdg::open_path_in_default_application(entry.path);
       }
@@ -79,11 +87,9 @@ void execute_item_action(AppState& app, FileEntry& entry, AppState::ContextMenuA
 
     case AppState::ContextMenuAction::RunProgram: {
       if (remote_refused(app, entry.path)) { draw(app); return; }
-      pid_t pid = fork();
-      if (pid == 0) {
-        setsid();
-        execlp(entry.path.c_str(), entry.path.c_str(), nullptr);
-        _exit(1);
+      if (!launch_program(entry.path)) {
+        app.operation_status = "Could not run program";
+        app.operation_status_expires_ms = menu_expiry_3s();
       }
       break;
     }
