@@ -1,56 +1,47 @@
-// draw_popup_surfaces.cpp — dedicated xdg-popup surfaces for the context menu
+// draw_popup_surfaces.cpp — dedicated layer-shell popups for the context menu
 // and the Open With dialog. They used to be painted straight into the main
-// window buffer; a popup surface lets us repaint them (hover, scroll, search)
-// without repainting the file view, and lets Hyprland blur them via
-// decoration:blur:popups.
+// window buffer; a layer surface lets us repaint them (hover, scroll, search)
+// without repainting the file view, and gives Hyprland a namespace it can
+// match with `layerrule = blur, horizon-popup-surface`.
 
 #include "../app.hpp"
 
+#include "app/file_browser/features/popup_position/hyprland_position.hpp"
 #include "platform/common/ns/namespaces.hpp"
 
 #include <algorithm>
+#include <cstdio>
 #include <functional>
 
 namespace eh::file_browser {
 
 namespace {
 
-constexpr int kPopupPad = 12;  // room for the card drop shadow
+constexpr int kPopupPad = 0;  // layer surface matches the card exactly
 
-// xdg popups deliver configure asynchronously; this links the protocol
-// callbacks back to the owning AppState and popup slot.
 struct PopupCtx {
   AppState* app = nullptr;
   OverlayPopupSurface* p = nullptr;
 };
 
-void popup_xdg_surface_configure(void* data, xdg_surface* surface,
-                                 uint32_t serial) {
+void popup_layer_configure(void* data, zwlr_layer_surface_v1* surface,
+                           uint32_t serial, uint32_t, uint32_t) {
   auto* ctx = static_cast<PopupCtx*>(data);
-  xdg_surface_ack_configure(surface, serial);
-  ctx->app->pendingRedraw = true;
-}
-
-void popup_configure(void* data, xdg_popup*, int32_t x, int32_t y, int32_t,
-                     int32_t) {
-  auto* ctx = static_cast<PopupCtx*>(data);
-  OverlayPopupSurface& p = *ctx->p;
-  if (x != p.x || y != p.y) {
-    p.x = x;
-    p.y = y;
-  }
-  if (!p.configured) {
-    p.configured = true;
+  zwlr_layer_surface_v1_ack_configure(surface, serial);
+  if (!ctx->p->configured) {
+    ctx->p->configured = true;
     ctx->app->pendingRedraw = true;
   }
 }
 
-void popup_done(void* data, xdg_popup*) {
+void popup_layer_closed(void* data, zwlr_layer_surface_v1*) {
   auto* ctx = static_cast<PopupCtx*>(data);
   AppState& app = *ctx->app;
   if (ctx->p == &app.contextMenuPopup) {
     app.context_menu_open = false;
     app.context_menu_hover = -1;
+    app.context_menu_sub_hover = -1;
+  } else if (ctx->p == &app.contextSubmenuPopup) {
     app.context_menu_sub_hover = -1;
   } else if (ctx->p == &app.openWithPopup) {
     app.open_with_open = false;
@@ -58,33 +49,29 @@ void popup_done(void* data, xdg_popup*) {
   app.pendingRedraw = true;
 }
 
-constexpr xdg_surface_listener kPopupXdgSurfaceListener{
-    .configure = popup_xdg_surface_configure,
-};
-
-constexpr xdg_popup_listener kPopupListener{
-    .configure = popup_configure,
-    .popup_done = popup_done,
-    .repositioned = [](void*, xdg_popup*, uint32_t) {},
+constexpr zwlr_layer_surface_v1_listener kLayerListener{
+    .configure = popup_layer_configure,
+    .closed = popup_layer_closed,
 };
 
 void destroy_popup(AppState&, OverlayPopupSurface& p) {
+  // Unmap while the layer role is still alive. Attaching a null buffer and
+  // committing is what tells the compositor to drop the surface (and with it
+  // the blur); destroying the role first leaves the last frame on screen.
+  if (p.surface) {
+    wl_surface_attach(p.surface, nullptr, 0, 0);
+    wl_surface_commit(p.surface);
+  }
   p.buf.destroy();
-  if (p.xdgPopup) {
-    xdg_popup_destroy(p.xdgPopup);
-    p.xdgPopup = nullptr;
-  }
-  if (p.xdgSurface) {
-    xdg_surface_destroy(p.xdgSurface);
-    p.xdgSurface = nullptr;
-  }
   if (p.blur) {
     ext_background_effect_surface_v1_destroy(p.blur);
     p.blur = nullptr;
   }
+  if (p.layer) {
+    zwlr_layer_surface_v1_destroy(p.layer);
+    p.layer = nullptr;
+  }
   if (p.surface) {
-    wl_surface_attach(p.surface, nullptr, 0, 0);
-    wl_surface_commit(p.surface);
     wl_surface_destroy(p.surface);
     p.surface = nullptr;
   }
@@ -95,75 +82,95 @@ void destroy_popup(AppState&, OverlayPopupSurface& p) {
   p.x = p.y = p.w = p.h = 0;
 }
 
-// Surface geometry is fixed for the lifetime of one popup position: moving
-// or resizing recreates the popup, which is cheap and avoids stale buffer
-// coordinates.
+// Layer surfaces are output-anchored, so convert the window-relative popup
+// origin into an absolute screen position using Hyprland's IPC.
 bool ensure_popup(AppState& app, OverlayPopupSurface& p, int x, int y, int w,
                   int h, int card_w, int card_h) {
-  if (!app.wl.compositor() || !app.wl.xdg_base() || !app.xdgSurface ||
-      !app.surface || !app.shm)
+  if (!app.wl.compositor() || !app.wl.layer_shell() || !app.surface ||
+      !app.shm)
     return false;
   if (w < 1 || h < 1) return false;
 
-  if (p.surface && (p.req_x != x || p.req_y != y || p.w != w || p.h != h))
-    destroy_popup(app, p);
+  const bool have_surface = p.surface != nullptr;
+  const bool geometry_changed =
+      have_surface && (p.req_x != x || p.req_y != y || p.w != w || p.h != h);
 
-  if (!p.surface) {
-    wl_surface* surf = wl_compositor_create_surface(app.wl.compositor());
-    if (!surf) return false;
+  // Reuse the existing surface and just update its layer state. Recreating it
+  // on every submenu change leaves the previous surface's blur on screen for
+  // a frame or two, which made a large submenu's backdrop bleed under the
+  // next one.
+  if (!have_surface || geometry_changed) {
+    WindowRect win{};
+    WindowRect mon{};
+    const bool have_win = hyprland_window_rect(win);
+    if (!have_win) {
+      static bool warned = false;
+      if (!warned) {
+        std::fprintf(stderr,
+                     "[horizon-files] warning: could not read window position "
+                     "from Hyprland IPC; popups may be misplaced\n");
+        warned = true;
+      }
+      win = WindowRect{0, 0, app.width, app.height};
+    }
+    if (!hyprland_monitor_for_point(win.x + win.w / 2, win.y + win.h / 2,
+                                    mon))
+      mon = WindowRect{0, 0, win.w, win.h};
 
-    xdg_surface* xdg =
-        xdg_wm_base_get_xdg_surface(app.wl.xdg_base(), surf);
-    if (!xdg) {
-      wl_surface_destroy(surf);
-      return false;
+    const int abs_x = win.x + x;
+    const int abs_y = win.y + y;
+    const int margin_left = abs_x - mon.x;
+    const int margin_top = abs_y - mon.y;
+
+    if (!have_surface) {
+      wl_surface* surf = wl_compositor_create_surface(app.wl.compositor());
+      if (!surf) return false;
+
+      zwlr_layer_surface_v1* layer =
+          zwlr_layer_shell_v1_get_layer_surface(
+              app.wl.layer_shell(), surf, nullptr,
+              ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY,
+              eh::shell::kFileManagerPopupNamespace);
+      if (!layer) {
+        wl_surface_destroy(surf);
+        return false;
+      }
+
+      auto* ctx = new PopupCtx{&app, &p};
+      zwlr_layer_surface_v1_add_listener(layer, &kLayerListener, ctx);
+      zwlr_layer_surface_v1_set_anchor(
+          layer, ZWLR_LAYER_SURFACE_V1_ANCHOR_TOP |
+                     ZWLR_LAYER_SURFACE_V1_ANCHOR_LEFT);
+      // -1: ignore bars/reserved areas, so margins are relative to the
+      // output origin and arbitrary popup positions are possible.
+      zwlr_layer_surface_v1_set_exclusive_zone(layer, -1);
+      zwlr_layer_surface_v1_set_keyboard_interactivity(
+          layer, ZWLR_LAYER_SURFACE_V1_KEYBOARD_INTERACTIVITY_NONE);
+
+      p.surface = surf;
+      p.layer = layer;
+      p.ctx = ctx;
+      p.configured = false;
+
+      // Blur region for compositors that honour ext-background-effect-v1 in
+      // addition to the layer rule: keep the shadow padding unblurred.
+      if (ext_background_effect_manager_v1* mgr =
+              app.wl.background_effect_manager()) {
+        p.blur =
+            ext_background_effect_manager_v1_get_background_effect(mgr, surf);
+      }
     }
 
-    auto* ctx = new PopupCtx{&app, &p};
-    xdg_surface_add_listener(xdg, &kPopupXdgSurfaceListener, ctx);
+    zwlr_layer_surface_v1_set_size(p.layer, static_cast<uint32_t>(w),
+                                   static_cast<uint32_t>(h));
+    zwlr_layer_surface_v1_set_margin(p.layer, margin_top, 0, 0, margin_left);
 
-    xdg_positioner* pos = xdg_wm_base_create_positioner(app.wl.xdg_base());
-    if (!pos) {
-      delete ctx;
-      xdg_surface_destroy(xdg);
-      wl_surface_destroy(surf);
-      return false;
-    }
-    // Anchor the popup's top-left corner exactly at (x, y) in the main
-    // window's coordinate space. No constraint adjustment: the card is
-    // already clamped to the window, and exact placement keeps our input
-    // translation and drawing coordinates identical.
-    xdg_positioner_set_size(pos, w, h);
-    xdg_positioner_set_anchor_rect(pos, 0, 0, 1, 1);
-    xdg_positioner_set_anchor(pos, XDG_POSITIONER_ANCHOR_TOP_LEFT);
-    xdg_positioner_set_gravity(pos, XDG_POSITIONER_GRAVITY_BOTTOM_RIGHT);
-    xdg_positioner_set_offset(pos, x, y);
-    xdg_positioner_set_constraint_adjustment(pos, 0);
-
-    xdg_popup* popup =
-        xdg_surface_get_popup(xdg, app.xdgSurface, pos);
-    xdg_positioner_destroy(pos);
-    if (!popup) {
-      delete ctx;
-      xdg_surface_destroy(xdg);
-      wl_surface_destroy(surf);
-      return false;
-    }
-    xdg_popup_add_listener(popup, &kPopupListener, ctx);
-
-    xdg_surface_set_window_geometry(xdg, 0, 0, w, h);
-
-    p.surface = surf;
-    p.xdgSurface = xdg;
-    p.xdgPopup = popup;
-    p.ctx = ctx;
     p.req_x = x;
     p.req_y = y;
     p.x = x;
     p.y = y;
     p.w = w;
     p.h = h;
-    p.configured = false;
 
     // Only the card itself should receive input; the transparent shadow pad
     // lets clicks through to the main window.
@@ -171,30 +178,24 @@ bool ensure_popup(AppState& app, OverlayPopupSurface& p, int x, int y, int w,
       wl_region* region = wl_compositor_create_region(comp);
       if (region) {
         wl_region_add(region, kPopupPad, kPopupPad, card_w, card_h);
-        wl_surface_set_input_region(surf, region);
+        wl_surface_set_input_region(p.surface, region);
         wl_region_destroy(region);
       }
     }
 
-    // Ask the compositor to blur whatever is behind the popup card. Hyprland
-    // supports this on xdg popups, and the region keeps the blur off the
-    // transparent shadow padding.
-    if (ext_background_effect_manager_v1* mgr =
-            app.wl.background_effect_manager()) {
-      p.blur = ext_background_effect_manager_v1_get_background_effect(mgr, surf);
-      if (p.blur) {
-        wl_region* blur_region =
-            wl_compositor_create_region(app.wl.compositor());
-        if (blur_region) {
-          wl_region_add(blur_region, kPopupPad, kPopupPad, card_w, card_h);
-          ext_background_effect_surface_v1_set_blur_region(p.blur, blur_region);
-          wl_region_destroy(blur_region);
-        }
+    if (p.blur) {
+      wl_region* blur_region =
+          wl_compositor_create_region(app.wl.compositor());
+      if (blur_region) {
+        wl_region_add(blur_region, kPopupPad, kPopupPad, card_w, card_h);
+        ext_background_effect_surface_v1_set_blur_region(p.blur, blur_region);
+        wl_region_destroy(blur_region);
       }
     }
 
-    // Initial commit with no buffer: asks the compositor for a configure.
-    wl_surface_commit(p.surface);
+    // An initial buffer-less commit asks the compositor for a configure. When
+    // only resizing, the buffer commit that follows applies the new state.
+    if (!p.configured) wl_surface_commit(p.surface);
   }
   return true;
 }
@@ -214,8 +215,8 @@ void commit_popup(AppState& app, OverlayPopupSurface& p, int card_x,
   p.card_x = card_x;
   p.card_y = card_y;
 
-  // Draw only after the compositor has configured the popup; the configure
-  // callback schedules another frame.
+  // Draw only after the compositor has configured the layer surface; the
+  // configure callback schedules another frame.
   if (!p.configured) return;
 
   p.buf.ensure(app.shm, eh::shell::kPopupNamespace, w, h);
@@ -246,6 +247,10 @@ void destroy_context_menu_popup(AppState& app) {
   destroy_popup(app, app.contextMenuPopup);
 }
 
+void destroy_context_submenu_popup(AppState& app) {
+  destroy_popup(app, app.contextSubmenuPopup);
+}
+
 void destroy_open_with_popup(AppState& app) {
   destroy_popup(app, app.openWithPopup);
 }
@@ -253,12 +258,24 @@ void destroy_open_with_popup(AppState& app) {
 void sync_context_menu_popup(AppState& app) {
   if (!app.context_menu_open) {
     destroy_context_menu_popup(app);
+    destroy_context_submenu_popup(app);
     return;
   }
   int x = 0, y = 0, w = 0, h = 0;
   context_menu_popup_bounds(app, x, y, w, h);
   commit_popup(app, app.contextMenuPopup, x, y, w, h,
                [&](cairo_t* cr) { draw_context_menu(app, cr); });
+}
+
+void sync_context_submenu_popup(AppState& app) {
+  int x = 0, y = 0, w = 0, h = 0;
+  context_submenu_popup_bounds(app, x, y, w, h);
+  if (!app.context_menu_open || w <= 0 || h <= 0) {
+    destroy_context_submenu_popup(app);
+    return;
+  }
+  commit_popup(app, app.contextSubmenuPopup, x, y, w, h,
+               [&](cairo_t* cr) { draw_context_submenu(app, cr); });
 }
 
 void sync_open_with_popup(AppState& app) {

@@ -63,9 +63,9 @@ SidebarLayout sidebar_layout(const std::vector<SidebarLocation>& locs) {
     l.searches_start = i;
   }
   const double zf = kSidebarZf;
-  l.header_h = static_cast<int>(24.0 * zf);
-  l.div_h = static_cast<int>(16.0 * zf) + 1 + static_cast<int>(16.0 * zf);
-  l.top_pad = static_cast<int>(24.0 * zf);
+  l.header_h = static_cast<int>(30.0 * zf);
+  l.div_h = static_cast<int>(10.0 * zf) + 1 + static_cast<int>(10.0 * zf);
+  l.top_pad = static_cast<int>(12.0 * zf);
   // Mirror the paint order exactly: top pad, PLACES header always, then
   // each non-empty section with a divider + header first.
   int y = l.top_pad + l.header_h;
@@ -198,7 +198,7 @@ void size_sidebar_to_content(AppState& app, cairo_t* cr) {
   cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                          CAIRO_FONT_WEIGHT_NORMAL);
   cairo_set_font_size(cr, 13.0 * kSbZf);
-  double label_x = (16 + 20 + 12) * kSbZf;
+  double label_x = static_cast<double>(kSidebarZf) * (18.0 + 22.0 + 11.0);
   double widest = 0;
   for (const auto& loc : app.sidebar_locations) {
     cairo_text_extents_t te;
@@ -206,7 +206,7 @@ void size_sidebar_to_content(AppState& app, cairo_t* cr) {
     widest = std::max(widest, static_cast<double>(te.x_advance));
   }
   // icon + gap + widest label + mount-indicator/usage reserve + edge padding
-  int needed = static_cast<int>(label_x + widest + 40.0 * kSbZf + 16.0 * kSbZf);
+  int needed = static_cast<int>(label_x + widest + 34.0 * kSbZf + 12.0 * kSbZf);
   // Leave room for the info panel and a usable content column so the two can
   // never combine into an overlap on narrow windows. The ops panel is an
   // overlay, so it does not reserve content width.
@@ -255,7 +255,7 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
   zf = 1.2;
 
   // HTML has py-6 (24px) padding at top of sidebar
-  int y = top_y - app.sidebar_scroll_px + static_cast<int>(24.0 * zf);
+  int y = top_y - app.sidebar_scroll_px + static_cast<int>(12.0 * zf);
 
   auto draw_item = [&](int idx) {
     const auto& loc = app.sidebar_locations[idx];
@@ -265,7 +265,25 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
     bool hovered = (idx == app.sidebar_hover_idx);
     bool drop_target = app.drop_target_is_sidebar && idx == app.drop_target_sidebar_idx;
 
-    int sb_margin = static_cast<int>(8.0 * zf); // px-4 in HTML
+    // Row is active when the current tab points at this location. Virtual
+    // schemes compare exactly; real paths tolerate a trailing slash.
+    const std::string& cp = app.cur_tab().current_path;
+    bool active = false;
+    switch (loc.kind) {
+      case SidebarLocation::Kind::Computer: active = cp == "computer://"; break;
+      case SidebarLocation::Kind::Recent:   active = cp == "recent://"; break;
+      case SidebarLocation::Kind::Starred:  active = cp == "starred://"; break;
+      case SidebarLocation::Kind::Network:  active = cp == "network://"; break;
+      case SidebarLocation::Kind::Trash:    active = cp == "trash://"; break;
+      default:
+        active = !loc.path.empty() &&
+                 (cp == loc.path ||
+                  (cp.size() == loc.path.size() + 1 && cp.back() == '/' &&
+                   cp.compare(0, loc.path.size(), loc.path) == 0));
+        break;
+    }
+
+    int sb_margin = static_cast<int>(10.0 * zf); // px-2.5 in the design
 
     // Retained hit region (single source of truth for input; the rect is
     // the row's full width so edge-to-edge clicks work — see hit_registry).
@@ -277,19 +295,20 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
               std::chrono::steady_clock::now().time_since_epoch()).count() * 0.006);
       cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, pulse);
       draw_rounded_rect(cr, sb_margin, y, sidebar_w - sb_margin * 2, item_h,
-                        static_cast<int>(12.0 * zf)); // rounded-2xl
+                        static_cast<int>(12.0 * zf));
       cairo_fill(cr);
       app.pendingRedraw = true;
+    } else if (active) {
+      hui::design::selection_fill(cr, app, sb_margin, y,
+                                  sidebar_w - sb_margin * 2, item_h, 12);
     } else if (hovered) {
-      cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.14);
-      draw_rounded_rect(cr, sb_margin, y, sidebar_w - sb_margin * 2, item_h,
-                        static_cast<int>(12.0 * zf)); // rounded-2xl
-      cairo_fill(cr);
+      hui::design::hover_fill(cr, app, sb_margin, y,
+                              sidebar_w - sb_margin * 2, item_h, 12);
     }
 
-    // Icon (w-5 = 20px)
-    int icon_sz = static_cast<int>(20.0 * zf);
-    int icon_x = static_cast<int>(16.0 * zf); // px-4
+    // Icon (22px in the design)
+    int icon_sz = static_cast<int>(22.0 * zf);
+    int icon_x = static_cast<int>(18.0 * zf); // sidebar pad + row pad
 
     cairo_surface_t* cs = nullptr;
     switch (loc.kind) {
@@ -364,8 +383,8 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
       cairo_show_text(cr, fallback);
     };
 
-    // For items with extra usage row, center icon in the main row (top 36px)
-    int main_row_h = static_cast<int>(36.0 * zf);
+    // For items with extra usage row, center icon in the main row
+    int main_row_h = static_cast<int>(34.0 * zf);
     {
       auto mi0 = std::chrono::steady_clock::now();
       draw_icon_at(icon_x, y + (main_row_h - icon_sz) / 2);
@@ -381,11 +400,11 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
 
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                             CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 13.0 * zf); // text-sm = 14px, close enough
+    cairo_set_font_size(cr, 14.0 * zf);
     cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
 
     // gap-3 = 12px between icon and label
-    int label_x = icon_x + icon_sz + static_cast<int>(12.0 * zf);
+    int label_x = icon_x + icon_sz + static_cast<int>(11.0 * zf);
 
     bool is_drive_kind =
         loc.kind == SidebarLocation::Kind::Drive ||
@@ -434,19 +453,19 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
     // Usage progress bar for drives with data
     if (sidebar_has_usage(loc)) {
       int usage_y = y + main_row_h;
-      int bar_x = icon_x;
-      int bar_w = sidebar_w - bar_x - static_cast<int>(12.0 * zf);
-      int bar_h = static_cast<int>(4.0 * zf);
-      int bar_y = usage_y + static_cast<int>(10.0 * zf);
+      int bar_x = label_x;
+      int bar_w = sidebar_w - bar_x - static_cast<int>(14.0 * zf);
+      int bar_h = static_cast<int>(5.0 * zf);
+      int bar_y = usage_y + static_cast<int>(15.0 * zf);
 
       // Usage text (elided to the bar width)
       uint64_t used = loc.total_bytes - loc.free_bytes;
-      cairo_set_font_size(cr, 10.0 * zf);
+      cairo_set_font_size(cr, 11.0 * zf);
       std::string usage_text = hui::design::clip_end(
           cr, format_size(used) + " / " + format_size(loc.total_bytes), bar_w);
       cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
                              app.text_secondary_b, 0.8);
-      cairo_move_to(cr, bar_x, bar_y - static_cast<int>(4.0 * zf));
+      cairo_move_to(cr, bar_x, bar_y - static_cast<int>(5.0 * zf));
       cairo_show_text(cr, usage_text.c_str());
 
       double frac = std::min(1.0, static_cast<double>(used) /
@@ -460,22 +479,22 @@ void draw_sidebar(AppState& app, cairo_t* cr, int sidebar_w, int top_y,
 
   auto draw_header = [&](const char* text) {
     cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
-                           app.text_secondary_b, 1.0);
+                           app.text_secondary_b, 0.75);
     cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
                              CAIRO_FONT_WEIGHT_BOLD);
-    cairo_set_font_size(cr, 11.0 * zf); // text-xs
-    cairo_move_to(cr, static_cast<int>(16.0 * zf), y + static_cast<int>(14.0 * zf));
+    cairo_set_font_size(cr, 11.0 * zf);
+    cairo_move_to(cr, static_cast<int>(12.0 * zf), y + static_cast<int>(20.0 * zf));
     cairo_show_text(cr, text);
-    y += static_cast<int>(24.0 * zf);
+    y += static_cast<int>(30.0 * zf);
   };
 
   auto draw_divider = [&]() {
-    y += static_cast<int>(16.0 * zf);
+    y += static_cast<int>(10.0 * zf);
     cairo_set_source_rgba(cr, app.outline_r, app.outline_g, app.outline_b, 0.15);
-    int div_margin = static_cast<int>(16.0 * zf);
+    int div_margin = static_cast<int>(10.0 * zf);
     cairo_rectangle(cr, div_margin, y, sidebar_w - div_margin * 2, 1);
     cairo_fill(cr);
-    y += 1 + static_cast<int>(16.0 * zf);
+    y += 1 + static_cast<int>(10.0 * zf);
   };
 
   sub("pre");

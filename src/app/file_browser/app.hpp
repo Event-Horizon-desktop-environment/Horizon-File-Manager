@@ -288,6 +288,7 @@ void draw_password_dialog(AppState& app, cairo_t* cr);
 void draw_compress_dialog(AppState& app, cairo_t* cr);
 void draw_terminal_chooser(AppState& app, cairo_t* cr);
 void draw_context_menu(AppState& app, cairo_t* cr);
+void draw_context_submenu(AppState& app, cairo_t* cr);
 void draw_marquee(AppState& app, cairo_t* cr);
 
 
@@ -389,9 +390,12 @@ void draw_open_with_backdrop(AppState& app, cairo_t* cr);
 void open_with_popup_rect(AppState& app, int& x, int& y, int& w, int& h);
 
 void context_menu_popup_bounds(AppState& app, int& x, int& y, int& w, int& h);
+void context_submenu_popup_bounds(AppState& app, int& x, int& y, int& w, int& h);
 void sync_context_menu_popup(AppState& app);
+void sync_context_submenu_popup(AppState& app);
 void sync_open_with_popup(AppState& app);
 void destroy_context_menu_popup(AppState& app);
+void destroy_context_submenu_popup(AppState& app);
 void destroy_open_with_popup(AppState& app);
 
 void open_checksums(AppState& app, const std::string& file_path);

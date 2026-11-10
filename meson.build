@@ -167,6 +167,7 @@ sources = files(
   'src/app/file_browser/features/desktop_icon_parser/desktop_icon_parser.cpp',
   'src/app/file_browser/features/drag/drag.cpp',
   'src/app/file_browser/features/preview/preview_types.cpp',
+  'src/app/file_browser/features/popup_position/hyprland_position.cpp',
   'src/app/file_browser/features/filetype/filetype.cpp',
   'src/app/file_browser/features/scan/scan.cpp',
   'src/app/file_browser/features/sidebar/sidebar.cpp',
@@ -292,6 +293,7 @@ sources = files(
   'protocol/tearing-control-v1-client-protocol.c',
   'protocol/ext-data-control-v1-client-protocol.c',
   'protocol/ext-background-effect-v1-client-protocol.c',
+  'protocol/wlr-layer-shell-unstable-v1-client-protocol.c',
   'protocol/wlr-data-control-unstable-v1-client-protocol.c',
 )
 

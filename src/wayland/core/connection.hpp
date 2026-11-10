@@ -38,6 +38,7 @@ public:
   [[nodiscard]] ext_data_control_manager_v1* ext_data_control_manager() const { return extDataControlMgr_; }
   [[nodiscard]] zwlr_data_control_manager_v1* wlr_data_control_manager() const { return wlrDataControlMgr_; }
   [[nodiscard]] ext_background_effect_manager_v1* background_effect_manager() const { return backgroundEffectMgr_; }
+  [[nodiscard]] zwlr_layer_shell_v1* layer_shell() const { return layerShell_; }
   [[nodiscard]] wp_viewporter* viewporter() const { return viewporter_; }
   [[nodiscard]] wp_fractional_scale_manager_v1* fractional_scale_manager() const { return fractionalScaleMgr_; }
   [[nodiscard]] wp_tearing_control_manager_v1* tearing_control_manager() const { return tearingControlMgr_; }
@@ -69,6 +70,7 @@ private:
   ext_data_control_manager_v1* extDataControlMgr_ = nullptr;
   zwlr_data_control_manager_v1* wlrDataControlMgr_ = nullptr;
   ext_background_effect_manager_v1* backgroundEffectMgr_ = nullptr;
+  zwlr_layer_shell_v1* layerShell_ = nullptr;
 };
 
 }

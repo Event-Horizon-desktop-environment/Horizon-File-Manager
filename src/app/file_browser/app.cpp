@@ -825,6 +825,7 @@ void paint(AppState& app, cairo_t* cr, ContentReuseHint* reuse) {
 
   // Context menu
   sync_context_menu_popup(app);
+  sync_context_submenu_popup(app);
 
   // Preview popup (skipped when a separate layer‑shell surface is active)
   // and never painted over the right-click context menu.

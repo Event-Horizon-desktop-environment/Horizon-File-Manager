@@ -271,6 +271,34 @@ inline void row_hover(cairo_t* cr, const eh::file_browser::AppState& app, double
   cairo_fill(cr);
 }
 
+// Tahoe interaction fills shared by sidebar rows, view cells and list rows.
+// Hover is a neutral white wash; selection is the accent at 30% plus a
+// hairline inset stroke so the pill reads against any wallpaper.
+inline void hover_fill(cairo_t* cr, const eh::file_browser::AppState& app, double x,
+                       double y, double w, double h, double r = 12) {
+  cairo_set_source_rgba(cr, 1, 1, 1, 0.07);
+  draw_rounded_rect(cr, x, y, w, h, r);
+  cairo_fill(cr);
+}
+
+inline void inset_stroke(cairo_t* cr, const eh::file_browser::AppState& app, double x,
+                         double y, double w, double h, double r,
+                         double alpha = 0.14) {
+  cairo_set_source_rgba(cr, 1, 1, 1, alpha);
+  cairo_set_line_width(cr, 1);
+  draw_rounded_rect(cr, x + 0.5, y + 0.5, std::max(0.0, w - 1),
+                    std::max(0.0, h - 1), r);
+  cairo_stroke(cr);
+}
+
+inline void selection_fill(cairo_t* cr, const eh::file_browser::AppState& app, double x,
+                           double y, double w, double h, double r = 12) {
+  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.30);
+  draw_rounded_rect(cr, x, y, w, h, r);
+  cairo_fill(cr);
+  inset_stroke(cr, app, x, y, w, h, r);
+}
+
 // Buttons: primary (accent fill, white bold label) or ghost.
 inline void button(cairo_t* cr, const eh::file_browser::AppState& app, double x, double y, double w,
                    double h, const char* label, bool primary, bool hovered) {

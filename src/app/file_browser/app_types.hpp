@@ -262,8 +262,7 @@ struct ScanParams {
 
 struct OverlayPopupSurface {
   wl_surface* surface = nullptr;
-  xdg_surface* xdgSurface = nullptr;
-  xdg_popup* xdgPopup = nullptr;
+  zwlr_layer_surface_v1* layer = nullptr;
   ext_background_effect_surface_v1* blur = nullptr;
   void* ctx = nullptr;
   bool configured = false;
@@ -1032,6 +1031,7 @@ struct AppState {
   // Context menu and Open With are composited as dedicated subsurface popups
   // so repainting them never repaints the file view behind them.
   OverlayPopupSurface contextMenuPopup;
+  OverlayPopupSurface contextSubmenuPopup;
   OverlayPopupSurface openWithPopup;
 
   bool info_panel_open = false;

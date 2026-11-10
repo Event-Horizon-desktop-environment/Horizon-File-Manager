@@ -943,10 +943,7 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
     app.cur_tab().tree_selected_path = te.path;
     app.cur_tab().multi_selected.clear();
     app.context_menu_file_idx = -9;   // tree-path target sentinel
-    app.context_menu_items = {
-      AppState::menu_item(AppState::ContextMenuAction::Open, "Open"),
-      AppState::menu_item(AppState::ContextMenuAction::OpenWith, "Open With..."),
-    };
+    app.context_menu_items.clear();
   } else if (item_idx >= 0 &&
       item_idx < static_cast<int>(app.cur_tab().visible_entries.size())) {
     app.cur_tab().selected_idx = item_idx;
@@ -954,10 +951,7 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
     if (std::find(app.cur_tab().multi_selected.begin(), app.cur_tab().multi_selected.end(), item_idx) == app.cur_tab().multi_selected.end()) {
       app.cur_tab().multi_selected = {item_idx};
     }
-    app.context_menu_items = {
-      AppState::menu_item(AppState::ContextMenuAction::Open, "Open"),
-      AppState::menu_item(AppState::ContextMenuAction::OpenWith, "Open With..."),
-    };
+    app.context_menu_items.clear();
     int real_idx = app.cur_tab().visible_entries[item_idx];
     is_dir = real_idx >= 0 && real_idx < static_cast<int>(app.cur_tab().entries.size()) &&
                   app.cur_tab().entries[real_idx].is_dir;
@@ -968,6 +962,38 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
   }
   // Shared item construction for both entry-backed and tree-row targets.
   {
+    // Group every "open" variant under one submenu so the top level stays
+    // short. The parent row itself is not an action; the first child is.
+    {
+      AppState::ContextMenuItem open_item;
+      open_item.action = AppState::ContextMenuAction::Open;
+      open_item.label = "Open";
+      open_item.sub_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::Open, "Open"));
+      open_item.sub_items.push_back(
+          AppState::menu_item(AppState::ContextMenuAction::OpenWith, "Open With..."));
+      if (is_executable || is_appimage)
+        open_item.sub_items.push_back(
+            AppState::menu_item(AppState::ContextMenuAction::RunProgram, "Run"));
+      if (is_dir) {
+        open_item.sub_items.push_back(AppState::menu_separator());
+        open_item.sub_items.push_back(AppState::menu_item(
+            AppState::ContextMenuAction::OpenInNewTab, "Open in new tab"));
+        open_item.sub_items.push_back(AppState::menu_item(
+            AppState::ContextMenuAction::OpenInNewWindow, "Open in new window"));
+        open_item.sub_items.push_back(AppState::menu_item(
+            AppState::ContextMenuAction::OpenInTerminal, term_label));
+        if (::geteuid() != 0)
+          open_item.sub_items.push_back(AppState::menu_item(
+              AppState::ContextMenuAction::OpenAsAdmin,
+              "Open as Administrator"));
+      }
+      open_item.sub_items.push_back(AppState::menu_separator());
+      open_item.sub_items.push_back(AppState::menu_item(
+          AppState::ContextMenuAction::OpenFileLocation, "Open File Location"));
+      app.context_menu_items.push_back(std::move(open_item));
+    }
+
     // Archives are common enough that extracting them should not require
     // digging through a submenu. Keep these right below Open/Open With.
     if (!is_dir && !tree_row) {
@@ -985,22 +1011,7 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
           AppState::menu_item(AppState::ContextMenuAction::ExtractTo, "Extract to..."));
       }
     }
-    if (is_executable || is_appimage) {
-      // AppImages may arrive without the executable bit; launch_program()
-      // fixes that. The plain "Run" label is what users expect for a program.
-      app.context_menu_items.push_back(
-        AppState::menu_item(AppState::ContextMenuAction::RunProgram, "Run"));
-    }
     if (is_dir) {
-      app.context_menu_items.push_back(
-        AppState::menu_item(AppState::ContextMenuAction::OpenInNewTab, "Open in new tab"));
-      app.context_menu_items.push_back(
-        AppState::menu_item(AppState::ContextMenuAction::OpenInNewWindow, "Open in new window"));
-      app.context_menu_items.push_back(
-        AppState::menu_item(AppState::ContextMenuAction::OpenInTerminal, term_label));
-      if (::geteuid() != 0)
-        app.context_menu_items.push_back(
-          AppState::menu_item(AppState::ContextMenuAction::OpenAsAdmin, "Open as Administrator"));
       app.context_menu_items.push_back(
         AppState::menu_item(AppState::ContextMenuAction::AddToFavorites, "Add to Favorites"));
       // Default startup folder toggle (local directories only).
@@ -1087,7 +1098,6 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
         app.context_menu_items.push_back(
           AppState::menu_item(AppState::ContextMenuAction::HideFile, "Hide"));
     }
-    app.context_menu_items.push_back(AppState::menu_item(AppState::ContextMenuAction::OpenFileLocation, "Open File Location"));
     app.context_menu_items.push_back(AppState::menu_separator());
 
     // Copy To / Move To submenus (quick targets + browse)
@@ -1357,15 +1367,19 @@ void open_context_menu(AppState& app, int item_idx, int x, int y) {
       }
       return;
     }
+    AppState::ContextMenuItem open_bg;
+    open_bg.action = AppState::ContextMenuAction::Open;
+    open_bg.label = "Open";
+    open_bg.sub_items.push_back(
+        AppState::menu_item(AppState::ContextMenuAction::OpenInTerminal, term_label));
+    if (::geteuid() != 0)
+      open_bg.sub_items.push_back(AppState::menu_item(
+          AppState::ContextMenuAction::OpenAsAdmin, "Open as Administrator"));
     app.context_menu_items = {
       AppState::menu_item(AppState::ContextMenuAction::NewFolder, "New Folder"),
       AppState::menu_item(AppState::ContextMenuAction::NewDocument, "New Document"),
       AppState::menu_separator(),
-      AppState::menu_item(AppState::ContextMenuAction::OpenInTerminal, term_label),
-      (::geteuid() != 0
-           ? AppState::menu_item(AppState::ContextMenuAction::OpenAsAdmin,
-                                 "Open as Administrator")
-           : AppState::menu_separator()),
+      open_bg,
       AppState::menu_separator(),
       AppState::menu_item(AppState::ContextMenuAction::Paste, "Paste"),
       AppState::menu_item(AppState::ContextMenuAction::SelectAll, "Select All"),

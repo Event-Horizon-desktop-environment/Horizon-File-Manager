@@ -1530,6 +1530,12 @@ static bool create_window(AppState& app) {
             app.pointerY = y + app.contextMenuPopup.y;
             handle_pointer_move(app, static_cast<int>(app.pointerX),
                                 static_cast<int>(app.pointerY));
+          } else if (app.contextSubmenuPopup.surface &&
+                     surface == app.contextSubmenuPopup.surface) {
+            app.pointerX = x + app.contextSubmenuPopup.x;
+            app.pointerY = y + app.contextSubmenuPopup.y;
+            handle_pointer_move(app, static_cast<int>(app.pointerX),
+                                static_cast<int>(app.pointerY));
           } else if (app.openWithPopup.surface &&
                      surface == app.openWithPopup.surface) {
             app.pointerX = x + app.openWithPopup.x;
@@ -2422,6 +2428,12 @@ static bool create_window(AppState& app) {
             app.pointerY = y + app.contextMenuPopup.y;
             handle_pointer_move(app, static_cast<int>(app.pointerX),
                                 static_cast<int>(app.pointerY));
+          } else if (app.contextSubmenuPopup.surface &&
+                     surface == app.contextSubmenuPopup.surface) {
+            app.pointerX = x + app.contextSubmenuPopup.x;
+            app.pointerY = y + app.contextSubmenuPopup.y;
+            handle_pointer_move(app, static_cast<int>(app.pointerX),
+                                static_cast<int>(app.pointerY));
           } else if (app.openWithPopup.surface &&
                      surface == app.openWithPopup.surface) {
             app.pointerX = x + app.openWithPopup.x;
@@ -2724,6 +2736,12 @@ static bool create_window(AppState& app) {
             // back into main-window space for the shared hit registry.
             app.pointerX = x + app.contextMenuPopup.x;
             app.pointerY = y + app.contextMenuPopup.y;
+            handle_pointer_move(app, static_cast<int>(app.pointerX),
+                                static_cast<int>(app.pointerY));
+          } else if (app.contextSubmenuPopup.surface &&
+                     surface == app.contextSubmenuPopup.surface) {
+            app.pointerX = x + app.contextSubmenuPopup.x;
+            app.pointerY = y + app.contextSubmenuPopup.y;
             handle_pointer_move(app, static_cast<int>(app.pointerX),
                                 static_cast<int>(app.pointerY));
           } else if (app.openWithPopup.surface &&

@@ -51,8 +51,12 @@ namespace eh::file_browser {
 
 namespace {
 
-constexpr int kMenuRowH = 34;
-constexpr int kMenuSepH = 9;
+constexpr int kMenuRowH = 36;
+constexpr int kMenuSepH = 13;
+constexpr int kMenuPad = 8;
+constexpr int kMenuRadius = 22;
+constexpr int kMenuRowRadius = 12;
+constexpr int kMenuItemPadX = 12;
 
 int menu_items_height(const std::vector<AppState::ContextMenuItem>& items) {
   int h = 0;
@@ -65,30 +69,31 @@ int menu_items_height(const std::vector<AppState::ContextMenuItem>& items) {
 }
 
 struct ContextMenuGeometry {
-  int cm_x = 0, cm_y = 0, cm_w = 240, cm_h = 0;
+  int cm_x = 0, cm_y = 0, cm_w = 248, cm_h = 0;
 };
 
 ContextMenuGeometry context_menu_geometry(AppState& app) {
   ContextMenuGeometry g;
   g.cm_x = app.context_menu_x;
   g.cm_y = app.context_menu_y;
-  g.cm_h = menu_items_height(app.context_menu_items);
+  g.cm_h = menu_items_height(app.context_menu_items) + kMenuPad * 2;
   clamp_popup_rect(app, g.cm_x, g.cm_y, g.cm_w, g.cm_h);
   return g;
 }
 
 struct SubmenuGeometry {
-  int sub_x = 0, sub_y = 0, sm_w = 200, sm_h = 0;
+  int sub_x = 0, sub_y = 0, sm_w = 216, sm_h = 0;
 };
 
 SubmenuGeometry submenu_geometry(AppState& app, int hover) {
   SubmenuGeometry g;
   const auto& items = app.context_menu_items;
   const ContextMenuGeometry m = context_menu_geometry(app);
-  g.sm_h = menu_items_height(items[static_cast<size_t>(hover)].sub_items);
-  g.sub_x = m.cm_x + m.cm_w + 3;
-  if (g.sub_x + g.sm_w > app.width - 8) g.sub_x = m.cm_x - g.sm_w - 3;
-  g.sub_y = m.cm_y;
+  g.sm_h = menu_items_height(items[static_cast<size_t>(hover)].sub_items) +
+           kMenuPad * 2;
+  g.sub_x = m.cm_x + m.cm_w + 4;
+  if (g.sub_x + g.sm_w > app.width - 8) g.sub_x = m.cm_x - g.sm_w - 4;
+  g.sub_y = m.cm_y + kMenuPad;
   for (int j = 0; j < hover; ++j) {
     g.sub_y += (items[static_cast<size_t>(j)].action == AppState::ContextMenuAction::Separator &&
                 items[static_cast<size_t>(j)].sub_items.empty())
@@ -99,89 +104,162 @@ SubmenuGeometry submenu_geometry(AppState& app, int hover) {
   return g;
 }
 
-} // namespace
+// Tahoe glass card: translucent wallpaper-tinted fill, hairline stroke and a
+// top inset highlight. No drop shadow: the compositor blurs the whole layer,
+// so any painted shadow becomes a visible halo.
+void draw_menu_card(AppState& app, cairo_t* cr, double x, double y, double w,
+                    double h, double alpha) {
+  double tr, tg, tb;
+  wallpaper_tint_surface(app, kPopupWallpaperTint, tr, tg, tb);
+  cairo_set_source_rgba(cr, tr, tg, tb, 0.80 * alpha);
+  draw_rounded_rect(cr, x, y, w, h, kMenuRadius);
+  cairo_fill(cr);
 
-void context_menu_popup_bounds(AppState& app, int& x, int& y, int& w, int& h) {
-  const ContextMenuGeometry m = context_menu_geometry(app);
-  x = m.cm_x;
-  y = m.cm_y;
-  w = m.cm_w;
-  h = m.cm_h;
+  cairo_set_source_rgba(cr, 1, 1, 1, 0.14 * alpha + 0.05);
+  cairo_set_line_width(cr, 1.0);
+  draw_rounded_rect(cr, x + 0.5, y + 0.5, w - 1, h - 1, kMenuRadius - 0.5);
+  cairo_stroke(cr);
 
-  // A hovered submenu is drawn by the same popup layer, so the layer must
-  // cover the union of both cards.
-  if (app.context_menu_hover >= 0 &&
-      static_cast<size_t>(app.context_menu_hover) <
-          app.context_menu_items.size() &&
-      !app.context_menu_items[static_cast<size_t>(app.context_menu_hover)]
-           .sub_items.empty()) {
-    const SubmenuGeometry s = submenu_geometry(app, app.context_menu_hover);
-    const int right = std::max(x + w, s.sub_x + s.sm_w);
-    const int bottom = std::max(y + h, s.sub_y + s.sm_h);
-    x = std::min(x, s.sub_x);
-    y = std::min(y, s.sub_y);
-    w = right - x;
-    h = bottom - y;
+  cairo_save(cr);
+  draw_rounded_rect(cr, x, y, w, h, kMenuRadius);
+  cairo_clip(cr);
+  cairo_set_source_rgba(cr, 1, 1, 1, 0.16 * alpha);
+  cairo_set_line_width(cr, 1.0);
+  cairo_move_to(cr, x + kMenuRadius, y + 1.0);
+  cairo_line_to(cr, x + w - kMenuRadius, y + 1.0);
+  cairo_stroke(cr);
+  cairo_restore(cr);
+}
+
+void draw_menu_row_hover(cairo_t* cr, const AppState& app, double x, double y,
+                         double w, double h, bool danger) {
+  if (danger) {
+    cairo_set_source_rgba(cr, 1.0, 0.39, 0.36, 0.20);
+    draw_rounded_rect(cr, x, y, w, h, kMenuRowRadius);
+    cairo_fill(cr);
+    cairo_set_source_rgba(cr, 1.0, 0.5, 0.46, 0.20);
+    cairo_set_line_width(cr, 1);
+    draw_rounded_rect(cr, x + 0.5, y + 0.5, w - 1, h - 1,
+                      kMenuRowRadius - 0.5);
+    cairo_stroke(cr);
+    return;
+  }
+  cairo_set_source_rgba(cr, app.accent_r, app.accent_g, app.accent_b, 0.24);
+  draw_rounded_rect(cr, x, y, w, h, kMenuRowRadius);
+  cairo_fill(cr);
+  cairo_set_source_rgba(cr, 1, 1, 1, 0.10);
+  cairo_set_line_width(cr, 1);
+  draw_rounded_rect(cr, x + 0.5, y + 0.5, w - 1, h - 1,
+                    kMenuRowRadius - 0.5);
+  cairo_stroke(cr);
+}
+
+void draw_menu_chevron(cairo_t* cr, const AppState& app, double cx,
+                       double cy) {
+  cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                        app.text_secondary_b, 0.85);
+  cairo_set_line_width(cr, 1.8);
+  cairo_set_line_cap(cr, CAIRO_LINE_CAP_ROUND);
+  cairo_set_line_join(cr, CAIRO_LINE_JOIN_ROUND);
+  cairo_move_to(cr, cx - 2.0, cy - 4.0);
+  cairo_line_to(cr, cx + 2.0, cy);
+  cairo_line_to(cr, cx - 2.0, cy + 4.0);
+  cairo_stroke(cr);
+}
+
+const char* menu_shortcut(AppState::ContextMenuAction action) {
+  switch (action) {
+    case AppState::ContextMenuAction::Copy: return "Ctrl+C";
+    case AppState::ContextMenuAction::Paste: return "Ctrl+V";
+    case AppState::ContextMenuAction::Rename: return "F2";
+    case AppState::ContextMenuAction::HideFile: return "Ctrl+H";
+    case AppState::ContextMenuAction::MoveToTrash: return "Del";
+    case AppState::ContextMenuAction::PermanentDelete: return "Shift+Del";
+    default: return nullptr;
   }
 }
 
-static void draw_submenu_popup(AppState& app, cairo_t* cr, const std::vector<AppState::ContextMenuItem>& items,
-                                int px, int py, int* out_w, int* out_h) {
-  int sm_w = 200;
-  int sm_h = 0;
-  for (const auto& item : items) {
-    sm_h += (item.action == AppState::ContextMenuAction::Separator && item.sub_items.empty()) ? 9 : 34;
-  }
+void draw_menu_rows(AppState& app, cairo_t* cr,
+                    const std::vector<AppState::ContextMenuItem>& items,
+                    int card_x, int card_y, int card_w, int hover,
+                    bool submenu) {
+  const int row_x = card_x + kMenuPad;
+  const int row_w = card_w - kMenuPad * 2;
+  int ry = card_y + kMenuPad;
 
-  int sm_x = px;
-  int sm_y = py;
-  if (sm_y + sm_h > app.height - 8) sm_y = app.height - sm_h - 8;
-  if (sm_y < 8) sm_y = 8;
-
-  draw_dialog_card(app, cr, sm_x, sm_y, sm_w, sm_h, 12,
-                   app.context_menu_opacity_pct / 100.0);
-
-  int ry = sm_y;
-  for (size_t i = 0; i < items.size(); ++i) {
+  for (int i = 0; i < static_cast<int>(items.size()); ++i) {
     const auto& item = items[i];
-    if (item.action == AppState::ContextMenuAction::Separator && item.sub_items.empty()) {
-      app.hit_main.add(hui::Hit::menu(hui::Hit::kMenuCtxSub, static_cast<int>(i)), sm_x, ry, sm_w, 9);
-      ry += 4;
-      hui::design::hairline(cr, app, sm_x, ry, sm_w);
-      ry += 5;
+    const bool separator =
+        item.action == AppState::ContextMenuAction::Separator &&
+        item.sub_items.empty();
+
+    if (separator) {
+      app.hit_main.add(
+          hui::Hit::menu(submenu ? hui::Hit::kMenuCtxSub : hui::Hit::kMenuCtx, i),
+          row_x, ry, row_w, kMenuSepH);
+      hui::design::hairline(cr, app, row_x, ry + kMenuSepH / 2, row_w, 8);
+      ry += kMenuSepH;
       continue;
     }
 
-    int row_h = 34;
-    bool hovered = (static_cast<int>(i) == app.context_menu_sub_hover);
+    const bool danger =
+        item.action == AppState::ContextMenuAction::MoveToTrash ||
+        item.action == AppState::ContextMenuAction::PermanentDelete;
+    const bool has_sub = !item.sub_items.empty();
+    const bool hovered = (i == hover);
+    const char* shortcut = has_sub ? nullptr : menu_shortcut(item.action);
 
-    app.hit_main.add(hui::Hit::menu(hui::Hit::kMenuCtxSub, static_cast<int>(i)), sm_x, ry, sm_w, row_h);
+    app.hit_main.add(
+        hui::Hit::menu(submenu ? hui::Hit::kMenuCtxSub : hui::Hit::kMenuCtx, i),
+        row_x, ry, row_w, kMenuRowH);
 
-    // Hover highlight
-    if (hovered) {
-      hui::design::row_hover(cr, app, sm_x + 6, ry + 2, sm_w - 12, row_h - 4);
+    if (hovered)
+      draw_menu_row_hover(cr, app, row_x, ry, row_w, kMenuRowH, danger);
+
+    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
+                           CAIRO_FONT_WEIGHT_NORMAL);
+    cairo_set_font_size(cr, 14);
+    if (danger)
+      cairo_set_source_rgba(cr, 0.96, 0.32, 0.32, 0.95);
+    else
+      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 0.98);
+
+    double right_reserve = 14;
+    if (has_sub) right_reserve = 34;
+    if (shortcut) {
+      cairo_text_extents_t ke;
+      cairo_text_extents(cr, shortcut, &ke);
+      right_reserve = ke.x_advance + 18;
     }
 
-    // Label
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL, CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 13);
-    cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    std::string shown = hui::design::clip_end(cr, item.label, sm_w - 32);
+    const double avail = row_w - kMenuItemPadX - right_reserve;
+    std::string shown = hui::design::clip_end(cr, item.label, avail);
     cairo_text_extents_t te;
     cairo_text_extents(cr, shown.c_str(), &te);
-    double tx = sm_x + 16;
-    double ty = ry + (row_h - te.height) / 2.0 - te.y_bearing;
+    const double tx = row_x + kMenuItemPadX;
+    const double ty = ry + (kMenuRowH - te.height) / 2.0 - te.y_bearing;
     cairo_move_to(cr, tx, ty);
     cairo_show_text(cr, shown.c_str());
-    // Tag toggles: registry color dot at the right; filled when the
-    // target already carries the tag, outline when it does not.
+
+    if (has_sub) {
+      draw_menu_chevron(cr, app, row_x + row_w - 16, ry + kMenuRowH / 2.0);
+    } else if (shortcut) {
+      cairo_set_font_size(cr, 11.5);
+      cairo_set_source_rgba(cr, app.text_secondary_r, app.text_secondary_g,
+                            app.text_secondary_b, 0.72);
+      cairo_text_extents_t ke;
+      cairo_text_extents(cr, shortcut, &ke);
+      cairo_move_to(cr, row_x + row_w - 12 - ke.x_advance,
+                    ry + (kMenuRowH - ke.height) / 2.0 - ke.y_bearing);
+      cairo_show_text(cr, shortcut);
+    }
+
+    // Tag toggles: filled when the target carries the tag, outline otherwise.
     if (item.action == AppState::ContextMenuAction::TagToggle) {
       double rr = 0.55, gg = 0.55, bb = 0.55;
       for (auto& t : tag_registry(app.tag_colors)) {
         if (t.name == item.data) {
-          rr = t.r;
-          gg = t.g;
-          bb = t.b;
+          rr = t.r; gg = t.g; bb = t.b;
           break;
         }
       }
@@ -189,16 +267,12 @@ static void draw_submenu_popup(AppState& app, cairo_t* cr, const std::vector<App
       if (app.context_menu_file_idx >= 0 &&
           app.context_menu_file_idx <
               static_cast<int>(app.cur_tab().visible_entries.size())) {
-        int ri = app.cur_tab()
-                     .visible_entries[static_cast<size_t>(
-                         app.context_menu_file_idx)];
-        if (ri >= 0 &&
-            ri < static_cast<int>(app.cur_tab().entries.size()))
+        int ri = app.cur_tab().visible_entries[static_cast<size_t>(
+            app.context_menu_file_idx)];
+        if (ri >= 0 && ri < static_cast<int>(app.cur_tab().entries.size()))
           on = has_tag(app.cur_tab().entries[ri].tags_csv, item.data);
       }
-      double dx = sm_x + sm_w - 20, dy = ry + row_h / 2.0;
-      // Fresh path: cairo_arc would otherwise connect a line from the
-      // label text's leftover current point to the circle (stray lines).
+      const double dx = row_x + row_w - 20, dy = ry + kMenuRowH / 2.0;
       cairo_new_path(cr);
       if (on) {
         cairo_set_source_rgba(cr, rr, gg, bb, 1.0);
@@ -211,90 +285,58 @@ static void draw_submenu_popup(AppState& app, cairo_t* cr, const std::vector<App
         cairo_stroke(cr);
       }
     }
-    ry += row_h;
-  }
 
-  if (out_w) *out_w = sm_w;
-  if (out_h) *out_h = sm_h;
+    ry += kMenuRowH;
+  }
+}
+
+} // namespace
+
+void context_menu_popup_bounds(AppState& app, int& x, int& y, int& w, int& h) {
+  const ContextMenuGeometry m = context_menu_geometry(app);
+  x = m.cm_x;
+  y = m.cm_y;
+  w = m.cm_w;
+  h = m.cm_h;
+}
+
+void context_submenu_popup_bounds(AppState& app, int& x, int& y, int& w, int& h) {
+  if (app.context_menu_hover < 0 ||
+      static_cast<size_t>(app.context_menu_hover) >=
+          app.context_menu_items.size() ||
+      app.context_menu_items[static_cast<size_t>(app.context_menu_hover)]
+          .sub_items.empty()) {
+    x = y = w = h = 0;
+    return;
+  }
+  const SubmenuGeometry s = submenu_geometry(app, app.context_menu_hover);
+  x = s.sub_x;
+  y = s.sub_y;
+  w = s.sm_w;
+  h = s.sm_h;
 }
 
 void draw_context_menu(AppState& app, cairo_t* cr) {
   const ContextMenuGeometry g = context_menu_geometry(app);
-  int cm_x = g.cm_x;
-  int cm_y = g.cm_y;
-  int cm_w = g.cm_w;
-  int cm_h = g.cm_h;
-
-  draw_dialog_card(app, cr, cm_x, cm_y, cm_w, cm_h, 12,
-                   app.context_menu_opacity_pct / 100.0);
-
-  int ry = cm_y;
-  for (int i = 0; i < static_cast<int>(app.context_menu_items.size()); ++i) {
-    const auto& item = app.context_menu_items[i];
-    if (item.action == AppState::ContextMenuAction::Separator && item.sub_items.empty()) {
-      app.hit_main.add(hui::Hit::menu(hui::Hit::kMenuCtx, i), cm_x, ry, cm_w, 9);
-      ry += 4;
-      hui::design::hairline(cr, app, cm_x, ry, cm_w);
-      ry += 5;
-      continue;
-    }
-
-    int row_h = 34;
-    bool has_sub = !item.sub_items.empty();
-    bool hovered = (i == app.context_menu_hover);
-
-    app.hit_main.add(hui::Hit::menu(hui::Hit::kMenuCtx, i), cm_x, ry, cm_w, row_h);
-
-    // Hover highlight
-    if (hovered) {
-      hui::design::row_hover(cr, app, cm_x + 6, ry + 2, cm_w - 12, row_h - 4);
-    }
-
-    // Label text with proper vertical centering
-    bool destructive = (item.action == AppState::ContextMenuAction::MoveToTrash ||
-                        item.action == AppState::ContextMenuAction::PermanentDelete);
-    cairo_select_font_face(cr, "Sans", CAIRO_FONT_SLANT_NORMAL,
-                            has_sub ? CAIRO_FONT_WEIGHT_BOLD : CAIRO_FONT_WEIGHT_NORMAL);
-    cairo_set_font_size(cr, 13);
-    if (destructive) {
-      cairo_set_source_rgba(cr, 0.96, 0.32, 0.32, 0.92);
-    } else {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, 1.0);
-    }
-    std::string shown = hui::design::clip_end(cr, item.label, cm_w - (has_sub ? 52 : 32));
-    cairo_text_extents_t te;
-    cairo_text_extents(cr, shown.c_str(), &te);
-    double tx = cm_x + 16;
-    double ty = ry + (row_h - te.height) / 2.0 - te.y_bearing;
-    cairo_move_to(cr, tx, ty);
-    cairo_show_text(cr, shown.c_str());
-
-    // Submenu arrow chevron
-    if (has_sub) {
-      cairo_set_source_rgba(cr, app.text_r, app.text_g, app.text_b, hovered ? 0.85 : 0.55);
-      cairo_set_line_width(cr, 1.6);
-      int ax = cm_x + cm_w - 18;
-      int ay = ry + row_h / 2;
-      cairo_move_to(cr, ax - 1, ay - 4);
-      cairo_line_to(cr, ax + 4, ay);
-      cairo_line_to(cr, ax - 1, ay + 4);
-      cairo_stroke(cr);
-    }
-
-    ry += row_h;
-  }
-
-  // Draw open submenu
-  if (app.context_menu_hover >= 0 &&
-      static_cast<size_t>(app.context_menu_hover) < app.context_menu_items.size()) {
-    const auto& item = app.context_menu_items[app.context_menu_hover];
-    if (!item.sub_items.empty()) {
-      const SubmenuGeometry sg = submenu_geometry(app, app.context_menu_hover);
-      draw_submenu_popup(app, cr, item.sub_items, sg.sub_x, sg.sub_y, nullptr, nullptr);
-    }
-  }
+  draw_menu_card(app, cr, g.cm_x, g.cm_y, g.cm_w, g.cm_h,
+                 app.context_menu_opacity_pct / 100.0);
+  draw_menu_rows(app, cr, app.context_menu_items, g.cm_x, g.cm_y, g.cm_w,
+                 app.context_menu_hover, false);
 }
 
+void draw_context_submenu(AppState& app, cairo_t* cr) {
+  if (app.context_menu_hover < 0 ||
+      static_cast<size_t>(app.context_menu_hover) >=
+          app.context_menu_items.size())
+    return;
+  const auto& item = app.context_menu_items[app.context_menu_hover];
+  if (item.sub_items.empty()) return;
+  const SubmenuGeometry sg = submenu_geometry(app, app.context_menu_hover);
+  draw_menu_card(app, cr, sg.sub_x, sg.sub_y, sg.sm_w, sg.sm_h,
+                 app.context_menu_opacity_pct / 100.0);
+  draw_menu_rows(app, cr, item.sub_items, sg.sub_x, sg.sub_y, sg.sm_w,
+                 app.context_menu_sub_hover, true);
+}
 
 int hit_test_context_menu(AppState& app, int x, int y) {
   // Resolved through the retained hit registry (row rects stored during

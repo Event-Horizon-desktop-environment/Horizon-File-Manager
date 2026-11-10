@@ -42,7 +42,7 @@ std::string format_size(uint64_t bytes);
 
 /// Pinned sidebar scale: paint, hit-testing and scroll math all derive
 /// from it, so rows can never drift out from under the scroll clamp.
-inline constexpr double kSidebarZf = 1.2;
+inline constexpr double kSidebarZf = 1.0;
 
 /// True for drive rows with a usage bar (taller rows).
 inline bool sidebar_has_usage(const SidebarLocation& loc) {
@@ -53,9 +53,9 @@ inline bool sidebar_has_usage(const SidebarLocation& loc) {
 
 /// Pixel height of one sidebar row (usage rows are taller).
 inline int sidebar_row_h(const SidebarLocation& loc) {
-  int item_h = static_cast<int>(36.0 * kSidebarZf);
+  int item_h = static_cast<int>(34.0 * kSidebarZf);
   if (sidebar_has_usage(loc))
-    item_h = static_cast<int>(52.0 * kSidebarZf);
+    item_h = static_cast<int>(56.0 * kSidebarZf);
   return item_h;
 }
 

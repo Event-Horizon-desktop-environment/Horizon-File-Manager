@@ -45,6 +45,7 @@ constexpr const char* kDesktopWidgetsNamespace = "event-horizon-desktop-widgets"
 constexpr const char* kDesktopMenusNamespace = "event-horizon-desktop-menus";
 
 constexpr const char* kPopupNamespace = "event-horizon-popup";
+constexpr const char* kFileManagerPopupNamespace = "horizon-popup-surface";
 
 constexpr const char* kPanelPopupNamespace = "event-horizon-panel-popup";
 
